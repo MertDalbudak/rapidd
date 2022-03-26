@@ -1,0 +1,13 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-2 -8 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-2, -8)">
+    <g id="Cash">
+      <path d="M29, 8L3, 8C2.5, 8 2, 8.5 2, 9L2, 23C2, 23.5 2.5, 24 3, 24L29, 24C29.5, 24 30, 23.5 30, 23L30, 9C30, 8.5 29.5, 8 29, 8zM28, 18C25.8, 18 24, 19.8 24, 22L8, 22C8, 19.8 6.2, 18 4, 18L4, 14C6.2, 14 8, 12.2 8, 10L24, 10C24, 12.2 25.8, 14 28, 14L28, 18z" fill="#039C23" class="Green" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -8)">
+    <g id="Cash">
+      <circle cx="16" cy="16" r="4" fill="#039C23" class="Green" />
+    </g>
+  </g>
+</svg>

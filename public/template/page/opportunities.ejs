@@ -1,0 +1,27 @@
+<table>
+    <thead>
+        <tr>
+            <th>Id</th>
+            <th>Target Name</th>
+            <th>Status Code</th>
+            <th>Stage</th>
+            <th>Effektives Datum</th>
+            <th>Umsatz</th>
+            <th>Währung</th>
+        </tr>
+    </thead>
+<tbody>
+<? for(let i = 0; i < data.opportunities.length; i++) { ?>
+    <tr>
+        <td><?= data.opportunities[i]['OptyNumber'] ?></td>
+        <td><?= data.opportunities[i]['TargetPartyName'] ?></td>
+        <td><?= data.opportunities[i]['StatusCode'] ?></td>
+        <td><?= data.opportunities[i]['SalesStage'] ?></td>
+        <td><?= moment(data.opportunities[i]['EffectiveDate']).utc().format('DD MMM YYYY') ?></td>
+        <td><?= data.opportunities[i]['Revenue'] ?></td>
+        <td><?= data.opportunities[i]['CurrencyCode'] ?></td>
+    </tr>
+<? } ?>
+</tbody>
+</table>
+<?- debug(data.opportunities) ?>

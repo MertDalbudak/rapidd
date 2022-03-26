@@ -1,0 +1,13 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-2 -6 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-2, -6)">
+    <g id="Camping">
+      <polygon points="2,26 6,26 10,15 14,26 18,26 10,6  " fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -6)">
+    <g id="Camping">
+      <polygon points="22,6 12,6 20,26 30,26  " fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+</svg>

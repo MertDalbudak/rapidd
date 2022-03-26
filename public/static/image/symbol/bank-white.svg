@@ -1,0 +1,28 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-2 -4 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Bank">
+      <polygon points="16,4 2,12 30,12  " fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Bank">
+      <rect x="14" y="14" width="4" height="8" rx="0" ry="0" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Bank">
+      <rect x="20" y="14" width="4" height="8" rx="0" ry="0" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Bank">
+      <rect x="4" y="24" width="24" height="4" rx="0" ry="0" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Bank">
+      <rect x="8" y="14" width="4" height="8" rx="0" ry="0" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+</svg>

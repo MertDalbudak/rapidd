@@ -1,0 +1,10 @@
+<svg id="Ebene_1" data-name="Ebene 1" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #fff;
+      }
+    </style>
+  </defs>
+  <path id="rss" class="cls-1" d="M0,0V2.49A13.51,13.51,0,0,1,13.51,16H16A16,16,0,0,0,0,0ZM0,5V7.48A8.51,8.51,0,0,1,8.52,16v0H11A11,11,0,0,0,0,5Zm2.39,6.23a2.39,2.39,0,1,0,2.39,2.39h0a2.39,2.39,0,0,0-2.38-2.4h0Z"/>
+</svg>

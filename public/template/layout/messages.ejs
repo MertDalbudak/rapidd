@@ -1,0 +1,25 @@
+<ul id="msg_container">
+    <? for(var i = 0; i < messages.length; i++) { ?>
+        <li class="msg msg_<?= messages[i]['type'] ?>">
+            <div class="container">
+                <div class="msg_symbol"></div>
+                <div class="msg_content">
+                    <h3 class="msg_subject">
+                        <?= __(messages[i]['subject']) ?>
+                    </h3>
+                    <div class="msg_text">
+                        <span>
+                            <?= __(messages[i]['text']) ?>
+                        </span>
+                    </div>
+                </div>
+                <div class="msg_close">
+                    <button></button>
+                </div>
+            </div>
+            <div class="fuse-container">
+                <div class="fuse ignite"></div>
+            </div>
+        </li>
+    <? } ?>
+</ul>

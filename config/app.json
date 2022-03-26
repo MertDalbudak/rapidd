@@ -1,0 +1,107 @@
+{
+    "database": {
+        "default": {
+            "host": "localhost",
+            "port": 3306,
+            "username": "root",
+            "password": "Password",
+            "database": "DB",
+            "type": "MariaDB"
+        }
+    },
+    "services": {
+        "EC": {
+            "hostname": "test-connection.com",
+            "path": "/API/PATH",
+            "secure": true,
+            "port": 443,
+            "authorization": {
+                "type": "Basic",
+                "username": "WebAdmin",
+                "password": "Welcome123"
+            },
+            "headers": {
+                "Accept": "*/*"
+            },
+            "queries": {},
+            "endpoints": {
+                "allUsers": {
+                    "path": "/users",
+                    "method": "GET",
+                    "headers": {
+                        "Accept": "application/json"
+                    },
+                    "queries": {
+                        "onlyData": true
+                    }
+                },
+                "getUser": {
+                    "path": "/users/{{id}}",
+                    "method": "GET",
+                    "headers": {},
+                    "queries": {
+                        "onlyData": true
+                    }
+                },
+                "setUser":{
+                    "path": "/users",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "queries": {}
+                },
+                "updateUser":{
+                    "path": "/users/{{id}}",
+                    "method": "PATCH",
+                    "headers": {
+                        "Content-Type": "application/json"
+                    },
+                    "queries": {}
+                }
+            }
+        },
+        "IDCS": {
+            "hostname": "test-connection2.com",
+            "path": "/PATH/API",
+            "secure": true,
+            "port": 443,
+            "authorization": {
+                "type": "OAuth2",
+                "hostname": "auth.test-connection2.com",
+                "auth_path": null,
+                "token_path": "/oauth2/v1/token",
+                "client_id": "CLIENT-ID",
+                "client_secret": "CLIENT-SECRET",
+                "params": {
+                    
+                }
+            },
+            "headers": {},
+            "queries": {},
+            "endpoints": {
+                "allUsers": {
+                    "path": "/Users",
+                    "method": "GET",
+                    "headers": {
+                        "Content-Type": "application/scim+json"
+                    },
+                    "queries": {}
+                }
+            }
+        }
+    },
+    "emails": {
+        "default": {
+            "host": "localhost",
+            "port": 25,
+            "user": null,
+            "password": null,
+            "client": null
+        }
+    },
+    "languages": [
+        "root",
+        "de-de"
+    ]
+}

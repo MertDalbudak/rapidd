@@ -1,0 +1,13 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-6 -2 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-6, -2)">
+    <g id="Restaurant">
+      <path d="M14, 10L12, 10L12, 2L10, 2L10, 10L8, 10L8, 2L6, 2L6, 10L6, 11C6, 13.4 7.7, 15.4 10, 15.9C9.1, 20.2 8, 26 8, 27C8, 28.7 9.3, 30 11, 30C12.7, 30 14, 28.7 14, 27C14, 26 12.9, 20.2 12, 15.9C14.3, 15.4 16, 13.4 16, 11L16, 10L16, 2L14, 2L14, 10z" fill="#727272" class="Black" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-6, -2)">
+    <g id="Restaurant">
+      <path d="M18, 18L22, 18L22, 28C22, 29.1 22.9, 30 24, 30C25.1, 30 26, 29.1 26, 28L26, 17L26, 16L26, 8L26, 2.8C26, 2.8 26, 2.6 26, 2C18, 2 18, 18 18, 18z" fill="#727272" class="Black" />
+    </g>
+  </g>
+</svg>

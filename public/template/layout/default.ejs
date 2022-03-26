@@ -1,0 +1,44 @@
+<?
+    moment.locale(langShort(language));
+?>
+<!DOCTYPE html>
+<html lang="<?= langShort(language) ?>">
+    <head>
+        <!-- Head -->
+        <?- include('default-head.ejs') ?>
+        <!-- Head -->
+
+        <!-- DEBUG -->
+        <?- include('debug-head.ejs') ?>
+        <!-- DEBUG -->
+    </head>
+    <body>
+        <div id="loading-screen">
+            <img src="/image/loading.gif" alt="loading..." loading="lazy" width="80" /> 
+        </div>
+        <!-- Messages -->
+        <?- include('messages.ejs') ?>
+        <!-- Messages -->
+
+        <!-- Header -->
+        <?- include('header.ejs') ?>
+        <!-- Header -->
+
+        <div id="main">
+        
+            <!-- Navigation -->
+            <?- include('nav.ejs') ?>
+            <!-- Navigation -->
+        
+            <div id="content">
+                <!-- Content -->
+                <?- include('../page/' + content) ?>
+                <!-- Content -->
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <?- include('footer.ejs') ?>
+        <!-- Footer -->
+    </body>
+</html>

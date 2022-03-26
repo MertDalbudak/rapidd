@@ -1,0 +1,59 @@
+<div id="header-container">
+    <div id="header">
+
+        <div id="header-start">
+            <!-- Menu Nav Toggle -->
+            <div id="nav-mobile-toggle" onclick="toggleNav()"></div>
+            <!-- Menu Nav Toggle -->
+
+            <!-- Logo -->
+            <div id="logo">
+                <a href="/">
+                    <img id="logo-img" alt="Rapidd Framework" height="50" src="/image/Logo.svg">
+                </a>
+            </div>
+            <!-- Logo -->
+        </div>
+
+        <div id="header_menu">
+            <div id="lang">
+                <button id="lang-globe" class="icon-globle context-menu-link" title="<?= langShort(language) ?>">
+                    <span><?= langShort(language) ?></span>
+                </button>
+                <div class="context-menu hidden">
+                    <ul id="account-menu" class="menu menu-vertical container">
+                        <li class="menu-link">
+                            <a href="/lang/en-us/?redirect=<?= path ?>" class="app-link"><?= __('English') ?></a>
+                        </li>
+                        <li class="menu-link">
+                            <a href="/lang/de-de/?redirect=<?= path ?>" class="app-link"><?= __('Deutsch') ?></a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <? if(user) { ?>
+            <div id="header-profile">
+                <span id="header-profile-name" class="context-menu-link context-menu-link-arrow"><?= `${user.contact.FirstName} ${user.contact.LastName}` ?></span>
+                <div class="context-menu hidden">
+                    <ul id="account-menu" class="menu menu-vertical container">
+                        <li id="option-my-profile" class="app-link"><?= __('myProfile_heading') ?></li>
+                        <li id="option-user-management" class="app-link"><?= __('userManagement_main_title') ?></li>
+                        <li class="menu-link">
+                            <a href="/logout" class="app-link"><?= __('shell_signOut') ?></a>
+                        </li>
+                    </ul>
+                </div>
+            </div>
+            <? } else { ?>
+            <ul class="menu menu-horizontal">
+                <li>
+                    <a href="/signin" class="app-link"><?= __('signIn') ?></a>
+                </li>
+                <li>
+                    <a href="/signup" class="app-link"><?= __('signUp') ?></a>
+                </li>
+            </ul>
+            <? } ?>
+        </div>
+    </div>
+</div>

@@ -1,0 +1,13 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-8 -2 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-8, -2)">
+    <g id="Microphone">
+      <path d="M16, 20L16, 20C13.8, 20 12, 18.2 12, 16L12, 6C12, 3.8 13.8, 2 16, 2L16, 2C18.2, 2 20, 3.8 20, 6L20, 16C20, 18.2 18.2, 20 16, 20z" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-8, -2)">
+    <g id="Microphone">
+      <path d="M24, 16L24, 14L22, 14L22, 16C22, 19.3 19.3, 22 16, 22C12.7, 22 10, 19.3 10, 16L10, 14L8, 14L8, 16C8, 19.7 10.6, 22.8 14, 23.7L14, 28L10, 28L10, 30L22, 30L22, 28L18, 28L18, 23.7C21.4, 22.8 24, 19.7 24, 16z" fill="#FFFFFF" class="White" />
+    </g>
+  </g>
+</svg>

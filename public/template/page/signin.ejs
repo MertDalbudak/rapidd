@@ -1,0 +1,12 @@
+<form method="POST">
+    <?- form(form_security) ?>
+    <div>
+        <label for="email"><?= __('email') ?></label>
+        <input id="email" type="email" name="email" required="required" />
+    </div>
+    <div>
+        <label for="password"><?= __('password') ?></label>
+        <input id="password" type="password" name="password" required="required" />
+    </div>
+    <input type="submit" value="<?= __('signIn_button') ?>" />
+</form>

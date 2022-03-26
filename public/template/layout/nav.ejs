@@ -1,0 +1,40 @@
+<div id="nav-container">
+    <div id="nav">
+        <ul>
+            <? for(let i = 0; i < nav_schema.length; i++) { ?>
+            <li id="<?= nav_schema[i].id ?>">
+                <div class="nav-link">
+                    <span class="<?= nav_schema[i].icon ?>"><?= __(nav_schema[i].title) ?></span>
+                    <? if(nav_schema[i].children) {?>
+                    <button class="context-menu-link-arrow" aria-label="Nav Dropdown"></button>
+                    <? } ?>
+                </div>
+                <? if(nav_schema[i].children) {?>
+                <div class="nav-link-children-container hidden">
+                    <ul class="nav-link-children">
+                    <? for(let j = 0; j < nav_schema[i].children.length; j++) {?>
+                        <li id="<?= nav_schema[i].children[j].id ?>" class="nav-link-child">
+                            <div class="nav-link">
+                                <span class="<?= nav_schema[i].children[j].icon ?>"><?= __(nav_schema[i].children[j].title) ?></span>
+                            </div>
+                        </li>
+                    <? } ?>
+                    </ul>
+                </div>
+                <? } ?>
+            </li>
+            <? } ?>
+        </ul>
+        <div id="navFooter">
+            <div id="navFooter-social">
+            
+            </div>
+            <div id="navFooter-links">
+                <a target="_blank" rel="noreferrer" href="<?= __('footer_contact_us_url') ?>"><?= __('footer_contact_us') ?></a>|<a target="_blank" rel="noreferrer" href="<?= __('footer_legal_notice_url') ?>"><?= __('footer_legal_notice') ?></a>|<a target="_blank" rel="noreferrer" href="<?= __('footer_company_details_url') ?>"><?= __('footer_company_details') ?></a>
+            </div>
+            <div id="copyright">
+                © <?= new Date().getFullYear() ?> Rapidd Framework
+            </div>  
+        </div>
+    </div>
+</div>

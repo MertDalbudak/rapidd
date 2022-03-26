@@ -1,0 +1,17 @@
+.debug {
+    display: block !important;
+    visibility: visible !important;
+    background-color: #ffe4c4;
+}
+
+.debug * {
+    color: #000;
+}
+
+.debug span.key {font-weight: bold;}
+
+.string { color: #000; }
+.number { color: #000; }
+.boolean { color: #003cff; }
+.null { color: #003cff; }
+.key { color: red; }

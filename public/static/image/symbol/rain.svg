@@ -1,0 +1,23 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-2 -4 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Rain">
+      <polygon points="6,28 8,28 10,22 8,22  " fill="#1177D7" class="Blue" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Rain">
+      <polygon points="12,28 14,28 16,22 14,22  " fill="#1177D7" class="Blue" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Rain">
+      <polygon points="18,28 20,28 22,22 20,22  " fill="#1177D7" class="Blue" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-2, -4)">
+    <g id="Rain">
+      <path d="M27, 14C26.6, 14 26.2, 14.1 25.8, 14.2C25.9, 13.8 26, 13.4 26, 13C26, 10.2 23.8, 8 21, 8C20.5, 8 19.9, 8.1 19.4, 8.3C18.4, 5.8 15.9, 4 13, 4C9.1, 4 6, 7.1 6, 11C6, 11.3 6, 11.7 6.1, 12C6.1, 12 6, 12 6, 12C3.8, 12 2, 13.8 2, 16C2, 18.2 3.8, 20 6, 20L27, 20C28.7, 20 30, 18.7 30, 17C30, 15.3 28.7, 14 27, 14z" fill="#1177D7" class="Blue" />
+    </g>
+  </g>
+</svg>

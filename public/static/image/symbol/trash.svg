@@ -1,0 +1,13 @@
+﻿<?xml version='1.0' encoding='UTF-8'?>
+<svg viewBox="-6 -4 32 32" xmlns="http://www.w3.org/2000/svg">
+  <g id="Layer_1" transform="translate(-6, -4)">
+    <g id="Trash">
+      <path d="M8, 27C8, 27.5 8.5, 28 9, 28L23, 28C23.5, 28 24, 27.5 24, 27L24, 12L8, 12L8, 27z" fill="#727272" class="Black" />
+    </g>
+  </g>
+  <g id="Layer_1" transform="translate(-6, -4)">
+    <g id="Trash">
+      <path d="M25, 6L18, 6L18, 5C18, 4.5 17.5, 4 17, 4L15, 4C14.5, 4 14, 4.5 14, 5L14, 6L7, 6C6.5, 6 6, 6.5 6, 7L6, 10L26, 10L26, 7C26, 6.5 25.5, 6 25, 6z" fill="#727272" class="Black" />
+    </g>
+  </g>
+</svg>
