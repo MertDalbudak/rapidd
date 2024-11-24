@@ -1,5 +1,5 @@
 // PUT ALL YOUR HELPERS HERE
-
+const LanguageDict = require('../../lib/LanguageDict');
 
 const Helper = {};
 
@@ -32,7 +32,7 @@ Helper.debug = function(data){
                 return '<span class="' + cls + '">' + match + '</span>';
             });
     }
-    return `<pre class="debug">${debug_string}</pre>`;
+    return `<pre class="debug _select">${debug_string}</pre>`;
 };
 
 Helper.langShort = function(lang){
@@ -46,6 +46,29 @@ Helper.form = function(options){
 Helper.csrf = function(csrfToken){
     return `<input type="hidden" name="_csrf" value="${csrfToken}" autocomplete="off" />`;
 };
+/**
+ * 
+ * @param {'success'|'warn'|'error'} type 
+ * @param {String} subject 
+ * @param {String} text 
+ * @returns {String}
+ */
+Helper.message = function(type, text){
+    return `<div class="msg ${type}"><span>${text}</span></div>`;
+}
+
+/**
+ * 
+ * @param {String} content
+ */
+Helper.getPageName = (page) =>{
+    if(typeof page == "string"){
+        return page.split('.')[0];
+    }
+    throw new Error(`String expected, ${typeof content} given.`);
+}
+
+Helper.addToClipboard = (content) => `<a href="javascript:addToClipboard('${content}')" class="addToClipboard" title="Copy to clipboard"></a>`;
 
 Helper.moment = require('moment');
 

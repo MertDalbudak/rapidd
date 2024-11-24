@@ -593,16 +593,13 @@
     "nav_downlaods": "Downlaods",
     "nav_dev_center": "Dev Center",
     "nav_firmwares": "Firmwares",
-    "footer_contact_us_url": "https://dalbudak.de/contact/",
     "footer_legal_notice": "Legal notice",
-    "footer_legal_notice_url": "https://dalbudak.de/legal-notice/",
     "footer_company_details": "Company details",
-    "footer_company_details_url": "https://dalbudak.de/company-details/",
     "under_construction_notice": "This website is currently under construction",
     "signInFailStackLocked_message": "Your account has been locked because of 5 failed login attempts. Please reset your password!",
-    "signInFailedStore_message": "There was a problem signing into your account. Try a different browser and report to mert@dalbudak.de",
+    "signInFailedStore_message": "There was a problem signing into your account. Try a different browser and report to webmaster@lancom-systems.de",
     "signOut_message": "You have successfully logged out",
     "signOutForce_message": "You have been logged out",
-    "signOutNotLatest_message": "You were automatically singed out because there is a more recent session with your account."
-    
+    "signOutNotLatest_message": "You were automatically singed out because there is a more recent session with your account.",
+    "code_of_conduct": "Code of conduct"
 }
