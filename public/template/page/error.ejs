@@ -1,0 +1,15 @@
+<div class="container" style="padding: 75px 0;text-align: center;">
+    <img class="not-found-icon" src="/image/symbol/not_found.svg" alt="not found" />
+    <h1 style="margin-top: 20px;"><?= __('error') ?> <?= data.error_code ?></h1>
+    <? if(data.error_message){?>
+    <h3 style="margin-top: 20px;"><?= data.error_message ?></h3>
+    <? } ?>
+</div>
+<style scoped>
+    /* Dark Mode */
+    @media (prefers-color-scheme: dark) {
+        .not-found-icon {
+            content: url('/image/symbol/not_found_dark.svg');
+        }
+    }
+</style>

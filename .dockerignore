@@ -1,0 +1,16 @@
+node_modules
+#.git
+.github
+*.md
+.gitignore
+__test__
+*.log
+.env
+docker-compose.yml
+dockerfile
+compose.yml
+.dockerignore
+
+config/default.json
+custom-sevdesk-invoice.htm
+prisma/client

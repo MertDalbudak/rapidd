@@ -5,8 +5,9 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+require("express-async-errors");
 const cookieParser = require('cookie-parser');
-const cors = require('cors')
+const cors = require('cors');
 const csrf = require('csurf');
 const fileUpload = require('express-fileupload');
 
@@ -24,8 +25,11 @@ process.env.TEMPLATE_PATH = path.join(process.env.PUBLIC_PATH, "template");
 process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout");
 
 // REQUIRE CUSTOM DEPENDENCIES
+const {Api, ErrorResponse} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
+
+
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
 const SUPPORTED_LANGUAGES = fs.readdirSync(process.env.STRINGS_PATH).map(e => path.parse(e).name);
@@ -37,25 +41,16 @@ const COOKIE_OPTIONS = {
     'secure': NODE_ENV == "production",
     'sameSite': "strict"
 };
-const SESSION_OPTIONS = {
-    'name': "usid",
-    'resave': false,
-    'saveUninitialized': false,
-    'secret': SESSION_SECRET,
-    'cookie': {
-        'path': "/",
-        'maxAge': SESSION_MAX_AGE,
-        'expires': new Date(Date.now() + SESSION_MAX_AGE),
-        'httpOnly': true, 
-        'secure': NODE_ENV == "production",
-        'sameSite': "strict"
-    },
-    'store': require('./src/Model/Session')(session.Store)
-};
+
 const CSRF_OPTIONS = { cookie: true };
 
 const app = express();
 app.set('case sensitive routing', true);
+
+// TRUST PROXY WHEN PRODUCTION
+if (NODE_ENV === 'production') {
+    app.set('trust proxy', 1);
+}
 
 /**
  * Gets the first accepted language
@@ -73,28 +68,39 @@ function acceptedLanguage(remote_lang){
             if(lang != undefined)
                 return lang;
         }
-        pushLog(`Remote's accepted language is not allowed or not supported.`, 'Remote', 'request');
-    }catch {
-        pushLog(`Cannot understand remote's accepted language.`, 'Remote', 'request');
+        pushLog(`Remotes accepted language is not allowed or not supported.`, 'Remote', 'request');
+    }catch(error) {
+        pushLog(`Cannot understand remotes accepted language.`, 'Remote', 'request');
     }
     pushLog(`Setting ${_default} as language.`, 'Remote', 'request');
     return _default;
 }
 
-app.use(express.static(ROOT + '/public/static'));
+app.use(express.static(process.env.PUBLIC_STATIC));
 
 app.use(express.urlencoded({
     extended: true
 }));
 
-/////////// CORS ///////////
+// USE CORS
+
+const allowed_origins = process.env.ALLOWED_ORIGINS.split(',').map(e => e.trim());
 
 const corsOptions = {
-    origin: process.env.FRONTEND_DOMAIN, // Use your frontend domain in production
-    optionsSuccessStatus: 200
+    'origin': (origin, callback) => {
+        if (!origin || allowed_origins.find(e => origin.endsWith(e))) {
+            return callback(null, true);
+        }
+        else {
+            return callback(new ErrorResponse(`Blocked by CORS policy: ${origin}`, 403), false);
+        }
+    },
+    'preflightContinue': false
 };
 
-app.use(cors());
+app.use(cors(NODE_ENV === "production" ? corsOptions : { origin: '*' }));
+
+// USE CORSE
 
 // USE JSON PARSE MIDDLEWARE
 app.use(express.json());
@@ -103,7 +109,6 @@ app.use(cookieParser(process.env.COOKIE_SECRET));
 // USE CSRF MIDDLEWARE
 
 app.use(csrf(CSRF_OPTIONS));
-
 app.use(function(err, req, res, next) {
     console.error(err);
     if (err.code !== 'EBADCSRFTOKEN') return next(err)
@@ -113,24 +118,21 @@ app.use(function(err, req, res, next) {
     res.end();
 });
 
-app.use(session(SESSION_OPTIONS));
-
 /////////// CUSTOM MIDDLEWARE ///////////
 
 app.use(async function(req, res, next){
-    //////////// SET LANGUAGE ////////////
-
+    //////////// SET LANGUAGE //////////// 
+    
     req.language = req.signedCookies['lang'] || acceptedLanguage(req.headers['accept-language'] || "");
 
-    //////////// SET LANGUAGE ////////////
-
-    /////// VALIDATE LOGIN STATUS ///////
+    /////// LOGGED IN USER ///////
     req.user = null;
-    /////// VALIDATE LOGIN STATUS ///////
     
     next();
 });
 
+
+/////////// UPLOAD HANDLER ///////////
 
 app.use(fileUpload({
     'useTempFiles' : true,
@@ -150,7 +152,7 @@ app.use(fileUpload({
 app.use(ejsMiddleware({
     'template_path': process.env.TEMPLATE_LAYOUT_PATH, 
     'dictionary_path': process.env.STRINGS_PATH, 
-    'default_language': "de-de"
+    'default_language': "root"
 }));
 
 ///////////// EJS RENDER /////////////
@@ -173,15 +175,16 @@ app.post('/lang/:lang', function(req, res){
         res.cookie('lang', lang, COOKIE_OPTIONS);
         res.redirect(302, req.query['redirect'] || '/');
     }
-    else
+    else {
         res.redirect('/');
+    }
 });
 
 // LOAD ALL ROUTERS IN /routes
 function init_router_directory(route_path){
     const relative_path = '/' + path.relative(process.env.ROUTES_PATH, route_path).replace('\\', '/');
     // LOAD ALL ROUTERS IN DIRECTORY, root.js ALWAYS COMES FIRST
-    const dir_content = fs.readdirSync(route_path, {withFileTypes: true}).sort((a, b)=> (a.name == 'root.js' ? -2 : a.isDirectory ? -1 : 0) - (b.name == 'root.js' ? -2 : b.isDirectory ? -1 : 0))
+    const dir_content = fs.readdirSync(route_path, {withFileTypes: true}).sort((a, b)=> (a.name == 'root.js' ? -2 : a.isDirectory() ? 0 : -1) - (b.name == 'root.js' ? -2 : b.isDirectory() ? 0 : -1))
     dir_content.forEach(function(file) {
         if(!file.isDirectory()){
             const route = file.name == "root.js" ? relative_path : `${relative_path.length > 1 ? relative_path : ''}/${path.parse(file.name).name}`;
@@ -203,10 +206,22 @@ app.all('*', (req, res)=>{
         res.status(404).send(file);
     }).catch((error)=> {
         res.status(500).send(error.toString());
-    })
+    });
+});
+
+// DEFAULT ERROR HANDLER
+app.use((error, req, res, next) => {
+    const status = error.status_code || 500;
+    console.log(error instanceof ErrorResponse);
+    
+    const message = Object.getPrototypeOf(error).constructor === Error && NODE_ENV === "production" ? "Something went wrong" : (error.message || error.toString());
+    pushLog(message, status);
+    res.status(status).json(Api.errorResponseBody(status, null, message));
 });
 
 /////////////// ROUTER ///////////////
 
 app.disable('x-powered-by');
-app.listen(process.env.PORT, () => pushLog('Application running on port ' + process.env.PORT, "Server start"));
+const server = app.listen(process.env.PORT, () => pushLog('Application running on port ' + process.env.PORT, "Server start"));
+
+module.exports = server;

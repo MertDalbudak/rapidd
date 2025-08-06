@@ -2,6 +2,7 @@
     display: block !important;
     visibility: visible !important;
     background-color: #ffe4c4;
+    overflow-x: auto;
 }
 
 .debug * {

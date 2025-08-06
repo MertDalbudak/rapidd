@@ -1,14 +1,28 @@
-<title>Rapidd Framework</title>
+<?
+let page_name = getPageName(page);
+?>
+<title>rapidd | API</title>
 <meta charset="utf-8" />
+<meta name="autor" content="Mert Dalbudak">
+
+<!-- APPLE META -->
+<meta name="apple-mobile-web-app-title" content="rapidd | API" />
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+
+<!-- META -->
+<meta http-equiv="ScreenOrientation" content="autoRotate:disabled">
+<meta name="HandheldFriendly" content="true">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=5">
 <meta name="csrf-token" content="<?= form_security.csrf ?>">
-<meta name="viewport" content="viewport-fit=cover, width=device-width, initial-scale=1">
 <meta http-equiv="X-UA-Compatible" content="ie=edge">
 <link rel="shortcut icon" href="/favicon.ico" />
+<meta name="description" content="rapidd API Service">
 
 <!-- JS -->
 <script src="/js/polyfill.js" defer></script>
-<script src="/js/message.js" defer></script>
-<script src="/js/fundamental.js" defer></script>
+
+<script src="/js/<?= page_name ?>.js" defer></script>
 <!-- JS -->
 
 <!-- CSS -->
@@ -72,4 +86,4 @@
 
 </style>
 <link rel="stylesheet" href="/css/fundamental.css" type="text/css" />
-<!-- CSS -->
+<link rel="stylesheet" href="/css/<?= page_name ?>.css" type="text/css" />

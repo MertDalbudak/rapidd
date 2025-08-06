@@ -1,0 +1,12 @@
+{
+    "/api/v1/login": {
+        "maxRequests": 5,
+        "windowMs": 900000,
+        "ignoreSuccessfulRequests": true
+    },
+    "/api": {
+        "maxRequests": 1000,
+        "windowMs": 60000,
+        "ignoreSuccessfulRequests": true
+    }
+}

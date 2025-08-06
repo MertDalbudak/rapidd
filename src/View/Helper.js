@@ -1,5 +1,7 @@
 // PUT ALL YOUR HELPERS HERE
+const { ErrorResponse } = require('../Api');
 const LanguageDict = require('../../lib/LanguageDict');
+const {default_timezone} = require('../../config/app.json') || "Europe/Berlin";
 
 const Helper = {};
 
@@ -65,11 +67,12 @@ Helper.getPageName = (page) =>{
     if(typeof page == "string"){
         return page.split('.')[0];
     }
-    throw new Error(`String expected, ${typeof content} given.`);
+    throw new ErrorResponse(`String expected, ${typeof content} given.`, 400);
 }
 
 Helper.addToClipboard = (content) => `<a href="javascript:addToClipboard('${content}')" class="addToClipboard" title="Copy to clipboard"></a>`;
 
-Helper.moment = require('moment');
+Helper.moment = require('moment-timezone');
+Helper.moment.tz.setDefault(default_timezone);
 
 module.exports = Helper;

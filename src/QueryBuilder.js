@@ -1,29 +1,28 @@
-const { PrismaClient } = require('@prisma/client');
+const { PrismaClient } = require('../prisma/client');
+const { ErrorResponse } = require('./Api');
 
 const prisma = new PrismaClient({
     'omit': {
         'user': {
-            'sevdesk_contact_id': true,
             'hash': true
         },
         'address': {
-            'sevdesk_address_id': true
+
         },
         'school':{
-            'sevdesk_contact_id': true
+            
         }
     }
 });
 
-const API_RESULT_LIMIT = 500;
+const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
 
 class QueryBuilder {
     constructor(name, model){
         this.name = name;
-        this.fields = prisma[this.name].fields;
         this.model = model;
+        this.fields = prisma[this.name].fields;
         this.relatedObjects = this.model.relatedObjects;
-        this.access_rule = this.model.access_rule;
         this.access_fields = this.model.access_fields;
         this.inaccessible_fields = this.model.inaccessible_fields;
     }
@@ -45,62 +44,215 @@ class QueryBuilder {
     }
 
     /**
-     * 
+     *
      * @param {string} q 
      * @returns {{[key: string]: {operator: string}}}
      */
     filter(q){
         if (typeof q === 'string') {
-            return q.split(',').reduce((acc, curr) => {
+            return q.split(/,(?![^\[]*\])/).reduce((acc, curr) => {
                 const [key, value] = curr.split('=');
-                const trimmedKey = key.trim();
+                const relation = key.split('.').map(e => e.trim());
+                const trimmedKey = relation.pop();
                 const trimmedValue = value ? value.trim() : null;
-                if (!this.fields[trimmedKey]) {
-                    throw new Error(`Field '${trimmedKey}' does not exist in user.`);
+                
+                if (relation.length == 0 && !this.fields[trimmedKey]) {
+                    throw new ErrorResponse(`Invalid filter field: ${trimmedKey}.`, 400);
                 }
-                if (!trimmedValue) {
-                    throw new Error(`Value for '${trimmedKey}' cannot be empty.`);
-                }
-                if(isNaN(trimmedValue)){
-                    if (trimmedValue.startsWith('%') && trimmedValue.endsWith('%')) {
-                        acc[trimmedKey] = {
-                            contains: trimmedValue.replace(/%/g, '')
-                        };
+                
+                let filter = acc;
+                const relationPrisma = relation.reduce((_acc, _curr) => {
+                    let rel;
+                    if(Array.isArray(_acc)){
+                        rel = _acc.find(rel => rel.name == _curr);
+                        if(!rel){
+                            throw new ErrorResponse(`Relation '${_curr}' does not exist in ${Array.isArray(_acc) ? this.model.name : _acc.name}.`, 400);
+                        }
                     }
-                    else{
-                        if(trimmedValue.startsWith('%')){
-                            acc[trimmedKey] = {
-                                endsWith: trimmedValue.slice(1)
-                            };
+                    else {
+                        rel = _acc?.relation?.find(rel => rel.name == _curr);
+                    }
+                    if(!filter[rel.name]){
+                        if(!rel.field || (!prisma[rel.object].fields[rel.field] && (Array.isArray(_acc) ? this.fields[rel.field] : prisma[_acc.object].fields[rel.field]))){
+                            filter[rel.name] = {}
+                            filter = filter[rel.name];
                         }
                         else{
-                            if (trimmedValue.endsWith('%')) {
-                                acc[trimmedKey] = {
-                                    startsWith: trimmedValue.slice(0, -1)
-                                };
+                            const listSearch = {
+                                'some': {
+
+                                }
                             }
-                            else{
-                                if(trimmedValue == "true")
-                                    acc[trimmedKey] = true;
-                                else if(trimmedValue == "false")
-                                    acc[trimmedKey] = false;
-                                else
-                                    acc[trimmedKey] = {
-                                        equals: trimmedValue
-                                    };
+                            filter[rel.name] = listSearch;
+                            filter = listSearch['some'];
+                        }
+                    }
+                    else{
+                        if(filter[rel.name]['some']){
+                            filter = filter[rel.name]['some'];
+                        }
+                        filter = filter[rel.name];
+                    }
+
+                    return rel;
+                }, this.relatedObjects);
+                
+                if (relation.length > 0 && !prisma[relationPrisma.object].fields[trimmedKey]) {
+                    throw new ErrorResponse(`Field '${trimmedKey}' does not exist in ${relationPrisma.object}.`, 400);
+                }
+
+                if (!trimmedValue) {
+                    filter[trimmedKey] = null;
+                }
+                else{
+                    if(isNaN(trimmedValue)){
+                        if(trimmedValue.startsWith('[') && trimmedValue.endsWith(']')){
+                            if(!Array.isArray(filter['AND'])){
+                                filter['AND'] = []
+                            }
+
+                            const listValues = trimmedValue.slice(1, -1)?.split(',');
+                            const condition = {
+                                'OR': []
+                            };
+                            
+                            filter['AND'].push(condition);
+                            listValues.forEach(listValue => {
+                                const listSearch = {};
+                                listValue = listValue ? listValue.trim() : null;
+                                if(listValue){
+                                    if(isNaN(listValue)){
+                                        listSearch[trimmedKey] = this.#filterString(listValue);
+                                    }
+                                    else{
+                                        listSearch[trimmedKey] = {
+                                            equals: Number(listValue)
+                                        }
+                                    }
+                                }
+                                else{
+                                    listSearch[trimmedKey] = null;
+                                }
+                                condition['OR'].push(listSearch);
+                            });
+                            
+                        }
+                        else{
+                            // Check if it's a date/datetime filter
+                            const dateFilter = this.#filterDateTime(trimmedValue);
+                            if (dateFilter) {
+                                filter[trimmedKey] = dateFilter;
+                            } else {
+                                filter[trimmedKey] = this.#filterString(trimmedValue);
                             }
                         }
                     }
-                }
-                else{
-                    acc[trimmedKey] = {
-                        equals: Number(trimmedValue)
-                    };
+                    else{
+                        filter[trimmedKey] = {
+                            'equals': Number(trimmedValue)
+                        };
+                    }
                 }
                 return acc;
             }, {});
         }
         return {};
+    }
+
+    /**
+     * Parse and handle date/datetime filtering
+     * @param {string} value 
+     * @returns {{[operator: string]: Date} | null}
+     */
+    #filterDateTime(value) {
+        // Date operators: before:, after:, from:, to:, between:, on:
+        const dateOperators = ['before:', 'after:', 'from:', 'to:', 'between:', 'on:'];
+        const foundOperator = dateOperators.find(op => value.startsWith(op));
+        
+        if (!foundOperator) {
+            return null;
+        }
+        
+        const operatorValue = value.substring(foundOperator.length);
+        
+        try {
+            switch (foundOperator) {
+                case 'before:':
+                    return { lt: new Date(operatorValue) };
+                    
+                case 'after:':
+                    return { gt: new Date(operatorValue) };
+                    
+                case 'from:':
+                    return { gte: new Date(operatorValue) };
+                    
+                case 'to:':
+                    return { lte: new Date(operatorValue) };
+                    
+                case 'on:':
+                    const date = new Date(operatorValue);
+                    const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+                    const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
+                    return {
+                        gte: startOfDay,
+                        lt: endOfDay
+                    };
+                    
+                case 'between:':
+                    const [startDate, endDate] = operatorValue.split(';').map(d => d.trim());
+                    if (!startDate || !endDate) {
+                        throw new ErrorResponse('Between operator requires two dates separated by semicolon', 400);
+                    }
+                    return {
+                        gte: new Date(startDate),
+                        lte: new Date(endDate)
+                    };
+                    
+                default:
+                    return null;
+            }
+        } catch (error) {
+            throw new ErrorResponse(`Invalid date format in filter: ${value}. Error: ${error.message}`, 400);
+        }
+    }
+
+    /**
+     * Enhanced string filtering (existing method)
+     * @param {string} value 
+     * @returns {{[operator: string]: value} | boolean}
+     */
+    #filterString(value){
+        if (value.startsWith('%') && value.endsWith('%')) {
+            return {
+                'contains': decodeURI(value.replace(/%/g, ''))
+            };
+        }
+        else{
+            if(value.startsWith('%')){
+                return {
+                    'endsWith': decodeURI(value.slice(1))
+                };
+            }
+            else{
+                if (value.endsWith('%')) {
+                    return {
+                        'startsWith': decodeURI(value.slice(0, -1))
+                    };
+                }
+                else{
+                    switch(value){
+                        case "true":
+                            return true;
+                        case "false":
+                            return false;
+                        default:
+                            return {
+                                'equals': value
+                            };
+                    }
+                }
+            }
+        }
     }
 
     #includeDeepRelationships(relation, user){
@@ -133,20 +285,26 @@ class QueryBuilder {
 
     /**
      * 
-     * @param {string} include 
+     * @property {string|Object} include 
      * @returns {{[key: string]: true}}
      */
     include(include = "ALL", user){
-        if(typeof include === 'string'){
+        let include_query = typeof include === 'string' ? include : typeof include === 'object' ? include.query : null;
+        let exclude_rule = typeof include === 'object' ? include.rule : null;
+        if(include_query){
             let includeRelated = this.relatedObjects.reduce((acc, curr) => {
                 if(typeof curr.access !== "object" || curr.access[user.role] !== false){
-                    acc[curr.name] = this.#includeDeepRelationships(curr, user);
+                    const rel = this.#includeDeepRelationships(curr, user);
+                    if(exclude_rule && exclude_rule[curr.name]){
+                        rel.where = exclude_rule[curr.name];
+                    }
+                    acc[curr.name] = rel;
                 }
                 return acc;
             }, {});
             
-            if(include != "ALL"){
-                const includeList = include.split(',').map(item => item.trim());
+            if(include_query != "ALL"){
+                const includeList = include_query.split(',').map(item => item.trim());
                 for(let key in includeRelated){
                     if(!includeList.includes(key)){
                         delete includeRelated[key];
@@ -175,25 +333,38 @@ class QueryBuilder {
      * @returns {number}
      */
     take(limit){
-        return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : parseInt(limit)
+        // Offset and Limit
+        if(!Number.isInteger(limit) || limit <= 0){
+            throw new ErrorResponse("Invalid limit", 400);
+        }
+        return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : limit
     }
 
     /**
      * 
      * @param {string} sortBy 
-     * @param {string} sortOrder 
+     * @param {'asc'|'desc'} sortOrder  
      * @returns {{[key: string]: 'asc' | 'desc'}}
      */
     sort(sortBy, sortOrder){
         if(typeof sortBy !== 'string'){
-            throw new Error(`sortBy must be a string. '${typeof sortBy}' given.`);
+            throw new ErrorResponse(`sortBy must be a string. '${typeof sortBy}' given.`, 400);
         }
         if(typeof sortOrder !== 'string' || (sortOrder != 'desc' && sortOrder != 'asc')){
-            throw new Error(`sortOrder can only be 'asc' ord 'desc'. '${sortOrder}' given.`);
+            throw new ErrorResponse(`sortOrder can only be 'asc' ord 'desc'. '${sortOrder}' given.`, 400);
         }
-        return {
-            [sortBy.trim()]: sortOrder
-        };
+        const relation_chain = sortBy.split('.').map(e => e.trim());
+        const field_name = relation_chain.pop();
+
+        const sort = {};
+        let curr = sort;
+        for(let i = 0; i < relation_chain.length; i++){
+            curr[relation_chain[i]] = {}
+            curr = curr[relation_chain[i]];
+        }
+        curr[field_name] = sortOrder;
+
+        return sort;
     }
 
     /**
@@ -207,10 +378,10 @@ class QueryBuilder {
         delete data.create_date;
         delete data.update_date;
         for(let key in data){
-            if(this.fields[key] == undefined){
+            if(this.fields[key] == null){
                 const relatedObject = this.relatedObjects.find(e => e.name == key);
-                if(relatedObject == undefined){
-                    throw new Error(`Given key '${key}' is not expected`);
+                if(relatedObject == null){
+                    throw new ErrorResponse(`Given key '${key}' is not expected`, 400);
                 }
                 else{
                     if(data[key]){
@@ -221,31 +392,66 @@ class QueryBuilder {
                                 delete data[key][i].create_date;
                                 delete data[key][i].update_date;
                                 // CHECK EXPECTED KEYS FOR RELATION
+                                let relation = false;
                                 for(let _key in data[key][i]){
-                                    if(prisma[relatedObject.object].fields[_key] == undefined){
-                                        throw new Error(`Given key '${key}.${_key}' is not expected`);
+                                    if(prisma[relatedObject.object].fields[_key] == null){
+                                        throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
+                                    }
+                                    if(relatedObject.fields && relatedObject.fields.includes(_key)){
+                                        const sub_data_clone = {...data[key][i]};
+                                        delete sub_data_clone[_key];
+                                        const index = relatedObject.fields.findIndex((f => f == _key));
+                                        if(index > 0){
+                                            data[key][i] = {
+                                                [relatedObject.relation[index - 1].name]: {
+                                                    'connect': {
+                                                        'id': data[key][i][_key]
+                                                    }
+                                                },
+                                                ...sub_data_clone,
+                                                'createdBy': {
+                                                    'connect': {
+                                                        'id': user_id,
+                                                    }
+                                                }
+                                            };
+                                            relation = true;
+                                        }
+                                        else{
+                                            delete data[key][i][_key];
+                                        }
                                     }
                                 }
-                                //data[key][i].createdBy = {'connect': {'id': user_id}};
-                                if(data[key][i].id == undefined){
+                                if(!relation && data[key][i].id == null){
                                     data[key][i].created_by = user_id;
                                 }
                             }
                             
                             data[key] = {
-                                'create': data[key].filter(e => e.id == undefined),
+                                'create': data[key].filter(e => e.id == null),
                                 'connect': data[key].filter(e => e.id)
                             };
                         }
                         else{
                             // CHECK EXPECTED KEYS FOR RELATION
+                            delete data[key].created_by;
+                            delete data[key].updated_by;
+                            delete data[key].create_date;
+                            delete data[key].update_date;
+
                             for(let _key in data[key]){
-                                delete data[key].created_by;
-                                delete data[key].updated_by;
-                                delete data[key].create_date;
-                                delete data[key].update_date;
-                                if(prisma[relatedObject.object].fields[_key] == undefined){
-                                    throw new Error(`Given key '${key}.${_key}' is not expected`);
+                                if(prisma[relatedObject.object].fields[_key] == null){
+                                    throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
+                                }
+                                // CHECK IF VALUE IS FOREIGN KEY
+                                const child_relation = relatedObject?.relation?.find(e => e.field == _key);
+                                if(child_relation){
+                                    data[key][child_relation.name] = {
+                                        'connect': {
+                                            'id': data[key][_key]
+                                        }
+                                    };
+                                    delete data[key][_key];
                                 }
                             }
                             data[key] = {
@@ -280,10 +486,10 @@ class QueryBuilder {
         delete data.create_date;
         delete data.update_date;
         for(let key in data){
-            if(this.fields[key] == undefined){
+            if(this.fields[key] == null){
                 const relatedObject = this.relatedObjects.find(e => e.name == key);
-                if(relatedObject == undefined){
-                    throw new Error(`Given key '${key}' is not expected`);
+                if(relatedObject == null){
+                    throw new ErrorResponse(`Given key '${key}' is not expected`, 400);
                 }
                 else{
                     if(data[key]){
@@ -296,31 +502,37 @@ class QueryBuilder {
                                 delete data[key][i].update_date;
                                 // CHECK EXPECTED KEYS FOR RELATION
                                 for(let _key in data[key][i]){
-                                    if(prisma[relatedObject.object].fields[_key] == undefined){
-                                        throw new Error(`Given key '${key}.${_key}' is not expected`);
+                                    if(prisma[relatedObject.object].fields[_key] == null){
+                                        throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                     }
                                 }
                             }
                             data[key] = {
-                                'upsert': data[key].map(e => {
+                                'connect': data[key].filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length == 1).map(e => {
+                                    return {[Object.keys(e)[0]]: e[Object.keys(e)[0]]};
+                                }),
+                                'updateMany': data[key].filter(e => e.id && Object.keys(e).length > 1).map(e => {
+                                    return {
+                                        'where': {
+                                            'id': e.id
+                                        },
+                                        'data': {...e, 'updated_by': user_id}
+                                    };
+                                }),
+                                'upsert': data[key].filter(e => e.id == null).map(e => {
                                     const where = {};
-                                    if(e.id){
-                                        where.id = e.id;
+                                    if(Array.isArray(relatedObject.fields)){
+                                        const pair_id = {};
+                                        pair_id[relatedObject.fields[0]] = id;
+                                        for(let field in e){
+                                            if(relatedObject.fields.includes(field)){
+                                                pair_id[field] = e[field];
+                                            }
+                                        }
+                                        where[relatedObject.field] = pair_id;
                                     }
                                     else{
-                                        if(Array.isArray(relatedObject.fields)){
-                                            const pair_id = {};
-                                            pair_id[relatedObject.fields[0]] = id;
-                                            for(let field in e){
-                                                if(relatedObject.fields.includes(field)){
-                                                    pair_id[field] = e[field];
-                                                }
-                                            }
-                                            where[relatedObject.fields.join('_')] = pair_id;
-                                        }
-                                        else{
-                                            where[relatedObject.field || 'id'] = e[relatedObject.field || 'id'] || -1;
-                                        }
+                                        where[relatedObject.field || 'id'] = e[relatedObject.field || 'id'] || -1;
                                     }
                                     return {
                                         'where': where,
@@ -332,10 +544,32 @@ class QueryBuilder {
                         }
                         else{
                             for(let _key in data[key]){
-                                if(prisma[relatedObject.object].fields[_key] == undefined){
-                                    throw new Error(`Given key '${key}.${_key}' is not expected`);
+                                if(prisma[relatedObject.object].fields[_key] == null){
+                                    throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                 }
                             }
+                            
+                            for(let relation_key in data[key]){
+                                if(relatedObject.relation){
+                                    const rel = relatedObject.relation.find(e => e.field == relation_key);
+                                    if(rel){
+                                        if(data[key][relation_key] != null){
+                                            data[key][rel.name] = {
+                                                'connect': {
+                                                    "id": data[key][relation_key]
+                                                }
+                                            }
+                                        }
+                                        else{
+                                            data[key][rel.name] = {
+                                                'disconnect': true
+                                            }
+                                        }
+                                        delete data[key][relation_key];
+                                    }
+                                }
+                            }
+                            
                             data[key] = {
                                 'upsert': {
                                     'create': {
@@ -355,94 +589,17 @@ class QueryBuilder {
             else{
                 const relatedObject = this.relatedObjects.find(e => e.field == key);
                 if(relatedObject){
-                    data[relatedObject.name] = {'connect': {'id': data[key]}};
+                    if(data[key] != null){
+                        data[relatedObject.name] = {'connect': {'id': data[key]}};
+                    }
+                    else {
+                        data[relatedObject.name] = {'disconnect': true};
+                    }
                     delete data[key];
                 }
             }
         }
         data.updatedBy = {'connect': {'id': user_id}};
-    }
-
-    /**
-     * 
-     * @param {{}} user 
-     * @returns {{}} access_filter
-     */
-    getAccessFilter(user){
-        const getAccessCriteria = (access_criteria) => {
-            const criteria = {};
-            if(access_criteria === true){
-                return {};
-            }
-            if(access_criteria === false){
-                return {"access": false};
-            }
-            for(let key in access_criteria){
-                if(Array.isArray(access_criteria[key])){
-                    criteria[key] = getCriteriaValue(access_criteria[key]);
-                }
-                else{
-                    criteria[key] = getAccessCriteria(access_criteria[key]);
-                }
-            }
-            return criteria;
-        };
-
-        const getCriteriaValue = (value_path) => {
-            let value = user;
-            for(let i = 0; i < value_path.length; i++){
-                value = value[value_path[i]];
-            }
-            return value;
-        };
-
-        let access_filter = {};
-        if(this.access_rule != null){
-            for(let field in this.access_rule){
-                const access_criteria = this.access_rule[field][user[field]];
-                access_filter = {...access_filter, ...getAccessCriteria(access_criteria)};
-            }
-        }
-        
-        return access_filter;
-    }
-
-    /**
-     * 
-     * @param {{}} data 
-     * @param {{}} user 
-     * @returns {boolean} access
-     */
-    hasAccess(data, user){
-        const checkCriteria = (data, access_criteria)=>{
-            for(let key in access_criteria){
-                if(typeof access_criteria[key] === 'object'){
-                    console.log(key, data);
-                    
-                    if(key === 'some' && Array.isArray(data)){
-                        const found = data[key]((e, i) => {
-                            return checkCriteria(e, access_criteria[key])
-                        });
-                        if(!found){
-                            return false;
-                        }
-                    }
-                    else{
-                        const criteria = checkCriteria(data[key], access_criteria[key]);
-                        if(criteria === false){
-                            return false;
-                        }
-                    }
-                }
-                else{
-                    if(data[key] !== access_criteria[key]){
-                        return false;
-                    }
-                }
-            }
-            return true;
-        };
-        return checkCriteria(data, this.getAccessFilter(user));
     }
 
     static get API_RESULT_LIMIT (){
@@ -459,19 +616,141 @@ class QueryBuilder {
 QueryBuilder.errorHandler = (error, data = {})=>{
     console.error(error);
 
-    let status_code = 500, message = error.toString();
+    let status_code = error.status_code || 500;
+    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" :  (error.message || error.toString());
+
     if(error?.code){
         switch(error.code){
             case "P1001":
                 message = `Connection to the database couldn't be established`;
                 break;
+            case "P2000":
+                status_code = 400;
+                message = `The provided value for the column is too long`;
+                break;
+            case "P2001":
+                status_code = 404;
+                message = `The record searched for in the where condition does not exist`;
+                break;
             case "P2002":
                 status_code = 409;
-                message = `Duplicate entry for ${error.meta.modelName}. Record with ${error.meta.target}: '${data[error.meta.target]}' already exists`;
+                message = `Duplicate entry for ${error.meta?.modelName}. Record with ${error.meta?.target}: '${data[error.meta?.target]}' already exists`;
+                break;
+            case "P2003":
+                status_code = 400;
+                message = `Foreign key constraint failed`;
+                break;
+            case "P2004":
+                status_code = 400;
+                message = `A constraint failed on the database`;
+                break;
+            case "P2005":
+                status_code = 400;
+                message = `The value stored in the database is invalid for the field's type`;
+                break;
+            case "P2006":
+                status_code = 400;
+                message = `The provided value is not valid`;
+                break;
+            case "P2007":
+                status_code = 400;
+                message = `Data validation error`;
+                break;
+            case "P2008":
+                status_code = 400;
+                message = `Failed to parse the query`;
+                break;
+            case "P2009":
+                status_code = 400;
+                message = `Failed to validate the query`;
+                break;
+            case "P2010":
+                status_code = 500;
+                message = `Raw query failed`;
+                break;
+            case "P2011":
+                status_code = 400;
+                message = `Null constraint violation`;
+                break;
+            case "P2012":
+                status_code = 400;
+                message = `Missing a required value`;
+                break;
+            case "P2013":
+                status_code = 400;
+                message = `Missing the required argument`;
+                break;
+            case "P2014":
+                status_code = 400;
+                message = `The change you are trying to make would violate the required relation`;
+                break;
+            case "P2015":
+                status_code = 404;
+                message = `A related record could not be found`;
+                break;
+            case "P2016":
+                status_code = 400;
+                message = `Query interpretation error`;
+                break;
+            case "P2017":
+                status_code = 400;
+                message = `The records for relation are not connected`;
+                break;
+            case "P2018":
+                status_code = 404;
+                message = `The required connected records were not found`;
+                break;
+            case "P2019":
+                status_code = 400;
+                message = `Input error`;
+                break;
+            case "P2020":
+                status_code = 400;
+                message = `Value out of range for the type`;
+                break;
+            case "P2021":
+                status_code = 404;
+                message = `The table does not exist in the current database`;
+                break;
+            case "P2022":
+                status_code = 404;
+                message = `The column does not exist in the current database`;
+                break;
+            case "P2023":
+                status_code = 400;
+                message = `Inconsistent column data`;
+                break;
+            case "P2024":
+                status_code = 408;
+                message = `Timed out fetching a new connection from the connection pool`;
                 break;
             case "P2025":
                 status_code = 404;
                 message = `Operation failed because it depends on one or more records that were required but not found`;
+                break;
+            case "P2026":
+                status_code = 400;
+                message = `The current database provider doesn't support a feature that the query used`;
+                break;
+            case "P2027":
+                status_code = 500;
+                message = `Multiple errors occurred on the database during query execution`;
+                break;
+            case "P2028":
+                status_code = 500;
+                message = `Transaction API error`;
+                break;
+            case "P2030":
+                status_code = 404;
+                message = `Cannot find a fulltext index to use for the search`;
+                break;
+            case "P2033":
+                status_code = 400;
+                message = `A number used in the query does not fit into a 64 bit signed integer`;
+                break;
+            case "P2034":
+                status_code = 409;
+                message = `Transaction failed due to a write conflict or a deadlock`;
                 break;
         }
     }

@@ -1,40 +1,35 @@
 {
   "name": "rapidd",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "An node.js example for a customer portal with oracle REST API",
   "main": "main.js",
   "scripts": {
     "start": "node main.js",
-    "test": "jest --detectOpenHandles --forceExit",
-    "git-test": "npm test -t services"
-  },
-  "repository": {
+    "test": "jest --forceExit"
   },
   "author": "Mert Dalbudak",
   "license": "ISC",
-  "bugs": {
-  },
-  "homepage": "https://dalbudak.de",
   "dependencies": {
-    "@prisma/client": "^5.20.0",
+    "@prisma/client": "^6.8.2",
     "bcrypt": "^5.1.0",
     "cookie-parser": "^1.4.5",
     "cors": "^2.8.5",
-    "crypto": "^1.0.1",
     "dotenv": "^8.6.0",
     "ejs": "^3.1.5",
     "express": "^4.17.1",
+    "express-async-errors": "^3.1.1",
     "express-fileupload": "^1.2.0",
+    "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.2",
     "mariadb": "^2.5.1",
-    "moment": "^2.29.1",
+    "moment-timezone": "^0.5.46",
     "nodemailer": "^6.6.1",
     "oauth": "^0.9.15"
   },
   "devDependencies": {
     "cross-env": "^7.0.2",
-    "jest": "^26.6.3",
-    "prisma": "^5.20.0",
+    "jest": "^29.7.0",
+    "prisma": "^6.8.2",
     "supertest": "^6.0.1"
   },
   "jest": {

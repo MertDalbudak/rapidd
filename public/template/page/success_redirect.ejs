@@ -1,0 +1,35 @@
+<div class="container" style="padding: 75px 0;text-align: center;">
+    <svg xmlns="http://www.w3.org/2000/svg"
+    class="success-icon"
+    alt="success"
+    width="24" height="24"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    stroke-width="2"
+    stroke-linecap="round"
+    stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M8 12l2.5 2.5L16 9" />
+    </svg>
+    <h1 style="margin-top: 20px;"><?= __(data.message) ?></h1>
+    <h3 style="margin-top: 20px;"><?- __('redirectNotice', {'uri': data.redirect_uri}) ?></h3>
+</div>
+<style scoped>
+    .success-icon {
+        width: 6em;
+        height: 6em;
+        color: #16a34a;
+    }
+    /* Dark Mode */
+    @media (prefers-color-scheme: dark) {
+        .success-icon {
+            color: #22c55e;
+        }
+    }
+</style>
+<script defer>
+    setTimeout(() => {
+        window.location.href = "<?- data.redirect_uri ?>";
+    }, 5000);
+</script>

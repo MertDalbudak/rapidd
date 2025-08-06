@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="200" viewBox="0 0 200 200" fill="none">
+  <!-- Background Circle -->
+  <circle cx="100" cy="100" r="90" fill="#2B2B2B" />
+
+  <!-- Document Shape -->
+  <rect x="60" y="50" width="80" height="100" rx="5" fill="#3C3C3C" stroke="#606060" stroke-width="2" />
+
+  <!-- Folded Corner -->
+  <path d="M140 50 L120 50 L140 70 Z" fill="#505050" />
+
+  <!-- Error Cross -->
+  <line x1="80" y1="80" x2="120" y2="120" stroke="#FF6B6B" stroke-width="5" stroke-linecap="round" />
+  <line x1="120" y1="80" x2="80" y2="120" stroke="#FF6B6B" stroke-width="5" stroke-linecap="round" />
+
+  <!-- Clouds -->
+  <circle cx="50" cy="140" r="10" fill="#606060" />
+  <circle cx="60" cy="140" r="15" fill="#606060" />
+  <circle cx="140" cy="140" r="15" fill="#606060" />
+  <circle cx="150" cy="140" r="10" fill="#606060" />
+</svg>
