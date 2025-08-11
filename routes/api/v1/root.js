@@ -21,10 +21,6 @@ router.all('*', async function(req, res, next) {
                 req.user = await prisma.user.findUnique({
                     'where': {
                         'id': req.session.user_id
-                    },
-                    'include': {
-                        'student': true,
-                        'teacher': true
                     }
                 });
             }

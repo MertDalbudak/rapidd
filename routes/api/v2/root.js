@@ -20,11 +20,7 @@ router.all('*', async function(req, res, next) {
                 'api_user': true
             },
             omit: {
-                hash: false
-            },
-            include: {
-                'student': true,
-                'teacher': true
+                'hash': false
             }
         });
         if(user){

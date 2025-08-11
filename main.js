@@ -110,12 +110,17 @@ app.use(cookieParser(process.env.COOKIE_SECRET));
 
 app.use(csrf(CSRF_OPTIONS));
 app.use(function(err, req, res, next) {
+    if (req.path.startsWith('/api')) {
+        return next();
+    }
     console.error(err);
-    if (err.code !== 'EBADCSRFTOKEN') return next(err)
-
-    // handle CSRF token errors here
-    res.sendStatus(403);
-    res.end();
+    // Handle CSRF token errors
+    if (err.code === 'EBADCSRFTOKEN') {
+        // Respond with a 403 Forbidden status for CSRF token errors
+        return res.status(403).end();
+    }
+    // For other errors, pass them to the next middleware
+    next(err);
 });
 
 /////////// CUSTOM MIDDLEWARE ///////////

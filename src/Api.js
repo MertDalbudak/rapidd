@@ -5,6 +5,16 @@ const configPath = "./config/rate-limit.json";
 const redisMaxTimout = 1000 * 10; // 10 seconds
 const redisMaxRetries = 60;
 
+// BigInt serialization
+BigInt.prototype.toJSON = function () {
+    const num = Number(this);
+    if (!Number.isSafeInteger(num)) {
+        throw new Error("BigInt value is too large to convert safely");
+    }
+    return num;
+};
+
+
 class Api {
     /**
      * @param {Object[]} data

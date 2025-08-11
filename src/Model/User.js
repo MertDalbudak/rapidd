@@ -4,20 +4,11 @@ const {ejsRender} = require('../../lib/ejsRender');
 const eMail = require('../../lib/SendMail');
 const {RestApi} = require('../../lib/RestApi')
 const {Model, QueryBuilder, prisma} = require('../Model');
-const {Contact} = require('../EspoCRM/EspoCRM');
 const pushLog = require('../../lib/pushLog');
 
 const Renderer = new ejsRender();
 
 const SALT_ROUNDS = parseInt(process.env.SALT_ROUNDS || 10);
-
-const SEVDESK_DATA = {
-    'contact_student_id': 879034,
-    'contact_teacher_id': 879035,
-    'bg_number': 8620,
-    'contactAddressCategory': 44,
-    'billingAddressCategory': 47
-}
 
 class User extends Model {
     constructor(options){
@@ -34,7 +25,7 @@ class User extends Model {
      * @returns {Object[]}
      */
     async getMany(q = {}, include = "", limit = 25, offset = 0, sortBy = "id", sortOrder = "asc"){
-        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder, {'omit': {'additional_data': true}});
+        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder);
     }
 
     /**
@@ -43,7 +34,7 @@ class User extends Model {
      * @returns {{} | null}
      */
     async get(id, include){
-        return await this._get(Number(id), include, {'omit': {'additional_data': true}});
+        return await this._get(Number(id), include);
     }
 
     /**
@@ -87,104 +78,10 @@ class User extends Model {
         const password = data.password;
         delete data.password;
 
-        delete data.additional_data;
-
-        // USER ROLE VALIDATION
-        switch(data.role){
-            case "admin":
-            case "super_admin":
-                if(data.student != undefined || data.teacher != undefined){
-                    throw new Model.Error(`role is set to ${data.role} but '${data.student ? 'student' : 'teacher'}' object is given`, 400);
-                }
-                break;
-            case "student":
-                if(typeof data.student != 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but related object is missing`, 400);
-                }
-                if(typeof data.teacher == 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but teacher object is given`, 400);
-                }
-                break;
-            case "teacher":
-                if(typeof data.teacher != 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but related object is missing`, 400);
-                }
-                if(typeof data.student == 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but student object is given`, 400);
-                }
-                break;
-            default:
-                throw new Model.Error("Role is invalid", 400);
-        }
-
-        const response = await this._create(data, {'omit': {'additional_data': true}});
-        
-        if(response.role != 'super_admin' && response.role != 'admin'){
-            
-            const sevdesk_response = await this.#createSevdeskContact(response);
-
-            const updateSevdeskData = {
-                'additional_data': {
-                    'sevdesk_contact_id': parseInt(sevdesk_response.id)
-                }
-            }
-
-            if(sevdesk_response.email){
-                updateSevdeskData.additional_data.sevdesk_email_id = sevdesk_response.email.id;
-            }
-
-            if(sevdesk_response.phone){
-                updateSevdeskData.additional_data.sevdesk_phone_id = sevdesk_response.phone.id;
-            }
-
-            if(sevdesk_response.bg_number){
-                updateSevdeskData.additional_data.sevdesk_bg_number_id = sevdesk_response.bg_number.id;
-            }
-
-            if(sevdesk_response.contactAddress){
-                await prisma.address.update({
-                    'where': {
-                        'id': response.contactAddress.id
-                    },
-                    'data': {
-                        'sevdesk_address_id': parseInt(sevdesk_response.contactAddress.id)
-                    }
-                });
-            }
-
-            if(sevdesk_response.billingAddress){
-                await prisma.address.update({
-                    'where': {
-                        'id': response.billingAddress.id
-                    },
-                    'data': {
-                        'sevdesk_address_id': parseInt(sevdesk_response.billingAddress.id)
-                    }
-                });
-            }
-
-            if(response.role == "student"){
-                updateSevdeskData.student = {
-                    'customer_number': sevdesk_response.customerNumber,
-                    'school_level': response.student.school_level
-                }
-            }
-            this.constructor.queryBuilder.update(response.id, updateSevdeskData, this.user_id);
-
-            await this.prisma.update({
-                'data': updateSevdeskData,
-                'where': {
-                    'id': parseInt(response.id)
-                }
-            });
-        }
+        const response = await this._create(data);
 
         await this.sendValidationMail(response.id, "activation", {'password': password});
-        Contact.upsertUserContact(response).then(()=>{
-            console.log("EspoCRM Contact Upsert Success");
-        }).catch((error) =>{
-            pushLog(error, "EspoCRM Upsert Failed");
-        });
+
         return response;
     }
 
@@ -198,33 +95,6 @@ class User extends Model {
         // GET DATA FIRST
         const current_data = await this._get(id);
 
-        // USER ROLE VALIDATION
-        if(data.role && data.role != current_data.role){
-            throw new Model.Error("Role of user cannot be changed", 409);
-        }
-        else{
-            data.role = current_data.role;
-        }
-
-        switch(data.role){
-            case "admin":
-            case "super_admin":
-                if(data.student != undefined || data.teacher != undefined){
-                    throw new Model.Error(`role is set to ${data.role} but '${data.student ? 'student' : 'teacher'}' object is given`, 400);
-                }
-                break;
-            case "student":
-                if(typeof data.teacher == 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but teacher object is given`, 400);
-                }
-                break;
-            case "teacher":
-                if(typeof data.student == 'object'){
-                    throw new Model.Error(`role is set to ${data.role} but student object is given`, 400);
-                }
-                break;
-        }
-
         if(data.email && !this.validateEmail(data.email)){
             throw new Model.Error("Given email address is not valid", 400);
         }
@@ -233,9 +103,8 @@ class User extends Model {
             throw new Model.Error("You don't have permission to update the status", 403);
         }
 
-        // DELETE HASH & ADDITIONAL_DATA PROPERTY
+        // DELETE HASH
         delete data.hash;
-        delete data.additional_data;
 
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS
         this.constructor.queryBuilder.update(id, data, this.user_id);
@@ -247,73 +116,6 @@ class User extends Model {
             'data': data,
             'include': this.include('ALL')
         });
-
-        if(updated_user.role == "student" || updated_user.role == "teacher"){
-            let sevdesk_response;
-            const sevdesk_contact_data = updated_user.additional_data;
-            if(updated_user.additional_data.sevdesk_contact_id){
-                try{
-                    sevdesk_response = await this.#updateSevdeskContact(updated_user);
-                }
-                catch(error){
-                    console.error(error);
-                    
-                    sevdesk_response = await this.#createSevdeskContact(updated_user);
-                    sevdesk_contact_data.sevdesk_contact_id = parseInt(sevdesk_response.id)
-                }
-            }
-            else{
-                sevdesk_response = await this.#createSevdeskContact(updated_user);
-                sevdesk_contact_data.sevdesk_contact_id = parseInt(sevdesk_response.id)
-            }
-
-            if(sevdesk_response.bg_number?.id){
-                sevdesk_contact_data.sevdesk_bg_number_id = sevdesk_response.bg_number.id;
-            }
-
-            // COMMS
-            if(updated_user.additional_data.sevdesk_email_id != sevdesk_response.email?.id){
-                sevdesk_contact_data.sevdesk_email_id = sevdesk_response.email ? parseInt(sevdesk_response.email.id) : null;
-            };
-            if(updated_user.additional_data.sevdesk_phone_id != sevdesk_response.phone?.id){
-                sevdesk_contact_data.sevdesk_phone_id = sevdesk_response.phone ? parseInt(sevdesk_response.phone.id) : null;
-            }
-            if(Object.keys(sevdesk_contact_data).length > 0){
-                updated_user = await this.prisma.update({
-                    'where': {
-                        'id': id
-                    },
-                    'data': {
-                        'additional_data': sevdesk_contact_data
-                    },
-                    'include': this.include('ALL')
-                });
-            }
-
-            // contactAddress created on User Update
-            if(updated_user.contactAddress?.sevdesk_address_id != sevdesk_response.contactAddress?.id){
-                await prisma.address.update({
-                    'where': {
-                        'id': updated_user.contactAddress.id
-                    },
-                    'data': {
-                        'sevdesk_address_id': parseInt(sevdesk_response.contactAddress.id)
-                    }
-                });
-            }
-            // billingAddress created on User Update
-            if(updated_user.billingAddress?.sevdesk_address_id != sevdesk_response.billingAddress?.id){
-                await prisma.address.update({
-                    'where': {
-                        'id': updated_user.billingAddress.id
-                    },
-                    'data': {
-                        'sevdesk_address_id': parseInt(sevdesk_response.billingAddress.id)
-                    }
-                });
-            }
-        }
-        delete updated_user.additional_data;
         return updated_user;
     }
 
@@ -325,29 +127,6 @@ class User extends Model {
         id = Number(id);
         const user = await this._get(id);
         if(user != null){
-            if(user.contact_address_id){
-                await prisma.address.delete({
-                    'where': {
-                        'id': user.contact_address_id
-                    }
-                });
-            }
-            
-            if(user.billing_address_id){
-                await prisma.address.delete({
-                    'where': {
-                        'id': user.billing_address_id
-                    }
-                });
-            }
-            if(user.role != "super_admin" && user.role != "admin"){
-                const deleteSevdeskContact = await RestApi.create('sevdesk', 'deleteContact', {'params': {'id': user.additional_data.sevdesk_contact_id}});
-                deleteSevdeskContact.request().then((response) => {
-                    console.log(response);
-                }).catch((error) => {
-                    pushLog(error, "FAILED DLETING SEVDESK CONTACT");
-                });
-            }
             return await this.prisma.delete({
                 'where': {
                     'id': id
@@ -617,377 +396,28 @@ class User extends Model {
             throw new Model.Error("New password doesn't fulfill requirements", 400);
         }
     }
-
-    async #createSevdeskContact(data){
-        // CREATE SEVDESK CONTACT
-        const sevdeskContact = await RestApi.create('sevdesk', 'createContact');
-        try{
-            const sevdesk_response = (await sevdeskContact.request({
-                'status': 100,
-                'surename': data.billingAddress?.first_name || data.first_name,
-                'familyname': data.billingAddress?.last_name || data.last_name,
-                "category": {
-                    "id": data.role == 'student' ? SEVDESK_DATA.contact_student_id : SEVDESK_DATA.contact_teacher_id,
-                    "objectName": "Category"
-                },
-                "academicTitle": data.billingAddress?.title || data.academic_title,
-                "gender": data.gender == "Male" ? "Herr" : data.gender == "Female" ? "Frau": null,
-                "birthday": data.date_of_birth,
-                "bankAccount": data.role == 'teacher' ? data.teacher.iban : null,
-                "bankNumber": data.role == 'teacher' ? data.teacher.bic : null,
-                "taxNumber": data.role == 'teacher' ? data.teacher.tax_number : null,
-                "governmentAgency": false
-            })).objects;
-
-            const sevdesk_relations = ['contactAddress', 'billingAddress', 'email', 'phone', 'bg_number'];
-            const sevdesk_requests = [];
-
-            if(data.contactAddress){
-                sevdesk_requests[0] = this.#createSevdeskAddress(sevdesk_response.id, data.contactAddress, {'category': SEVDESK_DATA.contactAddressCategory});
-            }
-            if(data.billingAddress){
-                sevdesk_requests[1] = this.#createSevdeskAddress(sevdesk_response.id, data.billingAddress, {'category': SEVDESK_DATA.billingAddressCategory});
-            }
-            if(data.email){
-                sevdesk_requests[2] = this.#createSevdeskCommunication(sevdesk_response.id, 'EMAIL', data.email);
-            }
-            if(data.phone){
-                sevdesk_requests[3] = this.#createSevdeskCommunication(sevdesk_response.id, 'PHONE', data.phone);
-            }
-
-            if(data.role == "student" && data.student?.bg_number){
-                sevdesk_requests[4] = this.#createSevdeskBGNumber(sevdesk_response.id, data.student.bg_number, data.date_of_birth);
-            }
-
-            const sevdesk_relation_responses = await Promise.allSettled(sevdesk_requests);
-            for(let i = 0; i < sevdesk_relation_responses.length; i++){
-                sevdesk_response[sevdesk_relations[i]] = sevdesk_relation_responses[i].status == "fulfilled" ? sevdesk_relation_responses[i].value : null;
-            }
-            
-            return sevdesk_response;
-        }
-        catch(error){
-            console.error(error);
-            throw new Model.Error("Couldn't create sevdesk contact.", 500);
-        }
-    }
-
-    async #updateSevdeskContact(data){
-        try{
-            const payload = {
-                'status': data.status == 'active' ? 1000 : 100,
-                'surename': data.first_name,
-                'familyname': data.last_name,
-                "academicTitle": data.academic_title,
-                "gender": data.gender == "Male" ? "Herr" : data.gender == "Female" ? "Frau": null,
-                "birthday": data.date_of_birth,
-                "bankAccount": data?.role == 'teacher' ? data?.teacher?.iban : null,
-                "bankNumber": data?.role == 'teacher' ? data?.teacher?.bic : null,
-                "taxNumber": data?.role == 'teacher' ? data?.teacher?.tax_number : null,
-                "governmentAgency": false
-            };
-            const updateSevdeskContact = await RestApi.create('sevdesk', 'updateContact', {'params': {'id': data.additional_data.sevdesk_contact_id}});
-            const sevdesk_response = (await updateSevdeskContact.request(payload)).objects;
-
-            const sevdesk_relations = ['contactAddress', 'billingAddress', 'email', 'phone', 'bg_number'];
-            const sevdesk_requests = [];
-
-            if(data.contactAddress?.sevdesk_address_id){
-                sevdesk_requests[0] = this.#updateSevdeskAddress(data.contactAddress, data.contactAddress.sevdesk_address_id);
-            }
-            else{
-                sevdesk_requests[0] = this.#createSevdeskAddress(sevdesk_response.id, data.contactAddress, {'category': SEVDESK_DATA.contactAddressCategory});
-            }
-            if(data.billingAddress?.sevdesk_address_id){
-                sevdesk_requests[1] = this.#updateSevdeskAddress(data.billingAddress, data.billingAddress.sevdesk_address_id);
-            }
-            else{
-                sevdesk_requests[1] = this.#createSevdeskAddress(sevdesk_response.id, data.billingAddress, {'category': SEVDESK_DATA.billingAddressCategory});
-            }
-            sevdesk_requests[2] = this.#updateSevdeskCommunication(data.additional_data.sevdesk_email_id, sevdesk_response.id, 'EMAIL', data.email);
-            sevdesk_requests[3] = this.#updateSevdeskCommunication(data.additional_data.sevdesk_phone_id, sevdesk_response.id, 'PHONE', data.phone);
-            sevdesk_requests[4] = this.#updateSevdeskBGNumber(sevdesk_response.id, data.additional_data.sevdesk_bg_number_id, data.student?.bg_number, data.date_of_birth);
-
-            const sevdesk_relation_responses = await Promise.allSettled(sevdesk_requests);
-            for(let i = 0; i < sevdesk_relation_responses.length; i++){
-                sevdesk_response[sevdesk_relations[i]] = sevdesk_relation_responses[i].status == "fulfilled" ? sevdesk_relation_responses[i].value : null;
-            }
-            return sevdesk_response;
-        }
-        catch(error){
-            console.error(error);
-            throw new Model.Error("Couldn't update sevdesk contact.", 500);
-        }
-    }
-
-    async #createSevdeskAddress(sevdesk_contact_id, data, options = {'category': SEVDESK_DATA.billingAddressCategory}){
-        try{
-            const payload = {
-                'contact': {
-                    'id': sevdesk_contact_id,
-                    'objectName': "Contact"
-                },
-                'street': data.address_line,
-                'zip': data.postal_code,
-                'city': data.city,
-                'country': {
-                    'id': 1, // GERMANY
-                    'objectName': "StaticCountry"
-                },
-                'category': {
-                    'id': options.category,
-                    'objectName': "Category"
-                },
-                'name': `${data.first_name} ${data.last_name}`
-            };
-            const createSevdeskAddress = await RestApi.create('sevdesk', 'createContactAddress');
-            const sevdesk_response = (await createSevdeskAddress.request(payload)).objects;
-    
-            return sevdesk_response;
-        }
-        catch(error){
-            console.error(error);
-            throw new Model.Error("Couldn't create sevdesk contact address.", 500);
-        }
-    }
-
-    async #updateSevdeskAddress(data, sevdesk_address_id = null){
-        try{
-            const payload = {
-                'street': data.address_line,
-                'zip': data.postal_code,
-                'city': data.city,
-                'country': {
-                    'id': 1, // GERMANY
-                    'objectName': "StaticCountry"
-                },
-                'name': `${data.first_name} ${data.last_name}`
-            };
-            const updateSevdeskAddress = await RestApi.create('sevdesk', 'updateContactAddress', {'params': {'id': sevdesk_address_id}});
-            const sevdesk_response = (await updateSevdeskAddress.request(payload)).objects;
-    
-            return sevdesk_response;
-        }
-        catch(error){
-            console.error(error);
-            if(sevdesk_contact_id && error.status_code == 404){
-                return await this.#createSevdeskAddress(sevdesk_contact_id, data, {'category': SEVDESK_DATA.billingAddressCategory});
-            }
-            throw new Model.Error("Couldn't update sevdesk contact address.", 500);
-        }
-    }
-
-    /**
-     * 
-     * @param {number} sevdesk_contact_id
-     * @param {'EMAIL'|'PHONE'} type 
-     * @param {string} value 
-     * @returns {Promise<Object>}
-     */
-    async #createSevdeskCommunication(sevdesk_contact_id, type, value){
-        try{
-            const payload = {
-                'contact': {
-                    'id': sevdesk_contact_id,
-                    'objectName': "Contact"
-                },
-                "type": type,
-                "value": value,
-                "key": {
-                    "id": 8,
-                    "objectName": "CommunicationWayKey"
-                },
-                "main": false
-            };
-            const createSevdeskComm = await RestApi.create('sevdesk', 'createContactCommunication');
-            return (await createSevdeskComm.request(payload)).objects;
-        }
-        catch(error){
-            console.error("Couldn't create sevdesk communication", error);
-            throw new Model.Error(`Couldn't create sevdesk ${type} communication`, 500);
-        }
-    }
-
-    /**
-     * 
-     * @param {number} sevdesk_communication_id
-     * @param {'EMAIL'|'PHONE'} type 
-     * @param {string} value 
-     * @param {number|null} sevdesk_contact_id 
-     * @returns {Promise<Object>}
-     */
-    async #updateSevdeskCommunication(sevdesk_communication_id, sevdesk_contact_id, type, value){
-        try{
-            if(sevdesk_communication_id){
-                if(value){
-                    const payload = {
-                        'contact': {
-                            'id': sevdesk_contact_id,
-                            'objectName': "Contact"
-                        },
-                        "type": type,
-                        "value": value,
-                        "key": {
-                            "id": 8,
-                            "objectName": "CommunicationWayKey"
-                        },
-                        "main": false
-                    };
-                    const updateSevdeskComm = await RestApi.create('sevdesk', 'updateContactCommunication', {'params': {'id': sevdesk_communication_id}});
-                    const sevdesk_response = (await updateSevdeskComm.request(payload)).objects;
-                    return sevdesk_response;
-                }
-                else{
-                    await this.#deleteSevdeskCommunication(sevdesk_communication_id);
-                }
-            }
-            else {
-                if(value){
-                    return await this.#createSevdeskCommunication(sevdesk_contact_id, type, value);
-                }
-            }
-        }
-        catch(error){
-            console.error("Couldn't update sevdesk communication", error);
-            if(sevdesk_communication_id && error.status_code == 404){
-                return await this.#createSevdeskCommunication(sevdesk_contact_id, type, value);
-            }
-            throw new Model.Error(`Couldn't update sevdesk ${type} communication`, 500);
-        }
-        return null;
-    }
-
-    /**
-     * 
-     * @param {number} sevdesk_contact_id
-     * @param {'EMAIL'|'PHONE'} type 
-     * @param {string} value 
-     * @returns {Promise<Object>}
-     */
-    async #deleteSevdeskCommunication(sevdesk_communication_id){
-        try{
-            const deleteSevdeskComm = await RestApi.create('sevdesk', 'deleteContactCommunication', {'params': {'id': sevdesk_communication_id}});
-            await deleteSevdeskComm.request();
-            return true;
-        }
-        catch(error){
-            console.error("Couldn't delete sevdesk communication", error);
-            throw new Model.Error(`Couldn't delete sevdesk ${type} communication`, 500);
-        }
-    }
-
-    async #createSevdeskBGNumber(sevdesk_contact_id, bg_number, birthday = null){
-        let value = bg_number;
-        if(birthday){
-            const date_of_birth = (new Date(birthday)).toLocaleDateString('de-DE', {
-                'day': "2-digit",
-                'month': "2-digit",
-                'year': "numeric",
-            });
-            value += ` - ${date_of_birth}`;
-        }
-        try{
-            const sevdeskContactBgNumber = await RestApi.create('sevdesk', 'createContactCustomField');
-            const payload = {
-                "contact": {
-                    'id': parseInt(sevdesk_contact_id),
-                    'objectName': "Contact"
-                },
-                "contactCustomFieldSetting": {
-                    'id': SEVDESK_DATA.bg_number,
-                    'objectName': "ContactCustomFieldSetting"
-                },
-                'value': value,
-                'objectName': "ContactCustomField"
-            };
-            return (await sevdeskContactBgNumber.request(payload)).objects;
-        }
-        catch(error){
-            console.error(error);
-            throw new Model.Error("Couldn't add BG-Number to Sevdesk Contact", 500);
-        }
-    }
-    async #updateSevdeskBGNumber(sevdesk_contact_id, sevdesk_bg_number_id, bg_number, birthday = null){
-        let value = bg_number;
-        if(birthday){
-            const date_of_birth = (new Date(birthday)).toLocaleDateString('de-DE', {
-                'day': "2-digit",
-                'month': "2-digit",
-                'year': "numeric",
-            });
-            value += ` - ${date_of_birth}`;
-        }
-        try{
-            if(sevdesk_bg_number_id && !isNaN(sevdesk_bg_number_id)){
-                const sevdeskContactBgNumber = await RestApi.create('sevdesk', 'updateContactCustomField', {'params': {'id': sevdesk_bg_number_id}});
-                const payload = {
-                    "contact": {
-                        'id': parseInt(sevdesk_contact_id),
-                        'objectName': "Contact"
-                    },
-                    "contactCustomFieldSetting": {
-                        'id': SEVDESK_DATA.bg_number,
-                        'objectName': "ContactCustomFieldSetting"
-                    },
-                    'value': value,
-                    'objectName': "ContactCustomField"
-                };
-                return (await sevdeskContactBgNumber.request(payload)).objects;
-            }
-            return await this.#createSevdeskBGNumber(sevdesk_contact_id, bg_number, birthday);
-        }
-        catch(error){
-            console.error(error);
-            if(sevdesk_bg_number_id && error.status_code == 404){
-                return await this.#createSevdeskBGNumber(sevdesk_contact_id, bg_number, birthday);
-            }
-            throw new Model.Error("Couldn't update Sevdesk Contacts BG Number", 500);
-        }
-    }
 }
 
 User.relatedObjects = [
-    {'name': "teacher", 'object': "teacher", 'access': {'student': false}, 'relation': [
+    /*{'name': "teacher", 'object': "teacher", 'access': {'student': false}, 'relation': [
         {'name': "courses", 'object': "course_teacher", 'field': "course_id_teacher_id", 'fields': ["teacher_id", "course_id"], 'access': {'admin': ['course_id'], 'student': false}, 'relation': [
             {'name': "course", 'object': "course", 'field': "course_id", 'access': {}}
         ]},
     ]},
-    {'name': "student", 'object': "student", 'access': {'teacher': false}, 'relation': [
-        {'name': "agency", 'object': "agency", 'access': {'student': false, 'teacher': false}, 'relation': [
-            {'name': "contactAddress", 'object': "address", 'field': "contact_address_id", 'access': {'teacher': false}},
-            {'name': "billingAddress", 'object': "address", 'field': "billing_address_id", 'access': {'teacher': false}}
-        ]},
-        {'name': "school", 'object': "school", 'field': "school_id", 'relation': [
-            {'name': "contactAddress", 'object': "address", 'field': "contact_address_id"},
-            {'name': "billingAddress", 'object': "address", 'field': "billing_address_id", 'access': {'student': false, 'teacher': false}}
-        ]},
-        {'name': "courses", 'object': "course_student", 'field': "course_id_student_id", 'fields': ["student_id", "course_id"], 'access': {'student': [], 'teacher': false}, 'relation': [
-            {'name': "course", 'object': "course", 'field': "course_id", 'access': {'student': ['id', 'name', 'url', 'location']}}
-        ]}
-    ]},
-    {'name': "contactAddress", 'object': "address", 'field': "contact_address_id"},
-    {'name': "billingAddress", 'object': "address", 'field': "billing_address_id"}
+    */
 ];
 
 User.hasAccess = (data, user) => {
-    switch(user.role){
-        case "student":
-        case "teacher":
-            return user.id == data.id;
-        case "admin":
-            return data.rule != "super_admin";
-        case "super_admin":
-            return true;
-    }
+    return data.id == user.id;
 }
 
+/**
+ * Either return a boolean value or an filter object
+ * @param {User} user
+ * @returns {Boolean|{}}
+ */
 User.getAccessFilter = (user) => {
     switch(user.role){
-        case "student":
-        case "teacher":
-            return {
-                'id': user.id
-            }
         case "admin":
             return {
                 'role': {
@@ -996,13 +426,19 @@ User.getAccessFilter = (user) => {
             }
         case "super_admin":
             return true;
+        default:
+            return {
+                'id': user.id
+            }
     }
 }
 
-User.inaccessible_fields = {
-    'role':{
-        'student': ['additional_data'],
-        'teacher': ['additional_data']
+User.getOmitFields = (user) => {
+    switch(user.role){
+        case "admin":
+            return [];
+        default:
+            return []
     }
 }
 

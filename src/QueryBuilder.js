@@ -5,12 +5,6 @@ const prisma = new PrismaClient({
     'omit': {
         'user': {
             'hash': true
-        },
-        'address': {
-
-        },
-        'school':{
-            
         }
     }
 });
@@ -18,24 +12,22 @@ const prisma = new PrismaClient({
 const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
 
 class QueryBuilder {
-    constructor(name, model){
+    constructor(name, model) {
         this.name = name;
         this.model = model;
         this.fields = prisma[this.name].fields;
         this.relatedObjects = this.model.relatedObjects;
-        this.access_fields = this.model.access_fields;
         this.inaccessible_fields = this.model.inaccessible_fields;
     }
 
-    select(fields = null){
-        if(fields == null){
-            fields = {}
-            for(let key in this.fields){
+    select(fields = null) {
+        if (fields == null) {
+            fields = {};
+            for (let key in this.fields) {
                 fields[key] = true;
             }
-        }
-        else{
-            fields = fields.reduce((acc, curr) =>{
+        } else {
+            fields = fields.reduce((acc, curr) => {
                 acc[curr] = true;
                 return acc;
             }, {});
@@ -43,52 +35,42 @@ class QueryBuilder {
         return fields;
     }
 
-    /**
-     *
-     * @param {string} q 
-     * @returns {{[key: string]: {operator: string}}}
-     */
-    filter(q){
+    filter(q) {
         if (typeof q === 'string') {
             return q.split(/,(?![^\[]*\])/).reduce((acc, curr) => {
                 const [key, value] = curr.split('=');
                 const relation = key.split('.').map(e => e.trim());
                 const trimmedKey = relation.pop();
                 const trimmedValue = value ? value.trim() : null;
-                
-                if (relation.length == 0 && !this.fields[trimmedKey]) {
+
+                if (relation.length === 0 && !this.fields[trimmedKey]) {
                     throw new ErrorResponse(`Invalid filter field: ${trimmedKey}.`, 400);
                 }
-                
+
                 let filter = acc;
                 const relationPrisma = relation.reduce((_acc, _curr) => {
                     let rel;
-                    if(Array.isArray(_acc)){
-                        rel = _acc.find(rel => rel.name == _curr);
-                        if(!rel){
+                    if (Array.isArray(_acc)) {
+                        rel = _acc.find(rel => rel.name === _curr);
+                        if (!rel) {
                             throw new ErrorResponse(`Relation '${_curr}' does not exist in ${Array.isArray(_acc) ? this.model.name : _acc.name}.`, 400);
                         }
+                    } else {
+                        rel = _acc?.relation?.find(rel => rel.name === _curr);
                     }
-                    else {
-                        rel = _acc?.relation?.find(rel => rel.name == _curr);
-                    }
-                    if(!filter[rel.name]){
-                        if(!rel.field || (!prisma[rel.object].fields[rel.field] && (Array.isArray(_acc) ? this.fields[rel.field] : prisma[_acc.object].fields[rel.field]))){
-                            filter[rel.name] = {}
+                    if (!filter[rel.name]) {
+                        if (!rel.field || (!prisma[rel.object].fields[rel.field] && (Array.isArray(_acc) ? this.fields[rel.field] : prisma[_acc.object].fields[rel.field]))) {
+                            filter[rel.name] = {};
                             filter = filter[rel.name];
-                        }
-                        else{
+                        } else {
                             const listSearch = {
-                                'some': {
-
-                                }
-                            }
+                                'some': {}
+                            };
                             filter[rel.name] = listSearch;
                             filter = listSearch['some'];
                         }
-                    }
-                    else{
-                        if(filter[rel.name]['some']){
+                    } else {
+                        if (filter[rel.name]['some']) {
                             filter = filter[rel.name]['some'];
                         }
                         filter = filter[rel.name];
@@ -96,49 +78,43 @@ class QueryBuilder {
 
                     return rel;
                 }, this.relatedObjects);
-                
+
                 if (relation.length > 0 && !prisma[relationPrisma.object].fields[trimmedKey]) {
                     throw new ErrorResponse(`Field '${trimmedKey}' does not exist in ${relationPrisma.object}.`, 400);
                 }
 
                 if (!trimmedValue) {
                     filter[trimmedKey] = null;
-                }
-                else{
-                    if(isNaN(trimmedValue)){
-                        if(trimmedValue.startsWith('[') && trimmedValue.endsWith(']')){
-                            if(!Array.isArray(filter['AND'])){
-                                filter['AND'] = []
+                } else {
+                    if (isNaN(trimmedValue)) {
+                        if (trimmedValue.startsWith('[') && trimmedValue.endsWith(']')) {
+                            if (!Array.isArray(filter['AND'])) {
+                                filter['AND'] = [];
                             }
 
                             const listValues = trimmedValue.slice(1, -1)?.split(',');
                             const condition = {
                                 'OR': []
                             };
-                            
+
                             filter['AND'].push(condition);
                             listValues.forEach(listValue => {
                                 const listSearch = {};
                                 listValue = listValue ? listValue.trim() : null;
-                                if(listValue){
-                                    if(isNaN(listValue)){
+                                if (listValue) {
+                                    if (isNaN(listValue)) {
                                         listSearch[trimmedKey] = this.#filterString(listValue);
-                                    }
-                                    else{
+                                    } else {
                                         listSearch[trimmedKey] = {
                                             equals: Number(listValue)
-                                        }
+                                        };
                                     }
-                                }
-                                else{
+                                } else {
                                     listSearch[trimmedKey] = null;
                                 }
                                 condition['OR'].push(listSearch);
                             });
-                            
-                        }
-                        else{
-                            // Check if it's a date/datetime filter
+                        } else {
                             const dateFilter = this.#filterDateTime(trimmedValue);
                             if (dateFilter) {
                                 filter[trimmedKey] = dateFilter;
@@ -146,8 +122,7 @@ class QueryBuilder {
                                 filter[trimmedKey] = this.#filterString(trimmedValue);
                             }
                         }
-                    }
-                    else{
+                    } else {
                         filter[trimmedKey] = {
                             'equals': Number(trimmedValue)
                         };
@@ -159,36 +134,26 @@ class QueryBuilder {
         return {};
     }
 
-    /**
-     * Parse and handle date/datetime filtering
-     * @param {string} value 
-     * @returns {{[operator: string]: Date} | null}
-     */
     #filterDateTime(value) {
-        // Date operators: before:, after:, from:, to:, between:, on:
         const dateOperators = ['before:', 'after:', 'from:', 'to:', 'between:', 'on:'];
         const foundOperator = dateOperators.find(op => value.startsWith(op));
-        
+
         if (!foundOperator) {
             return null;
         }
-        
+
         const operatorValue = value.substring(foundOperator.length);
-        
+
         try {
             switch (foundOperator) {
                 case 'before:':
                     return { lt: new Date(operatorValue) };
-                    
                 case 'after:':
                     return { gt: new Date(operatorValue) };
-                    
                 case 'from:':
                     return { gte: new Date(operatorValue) };
-                    
                 case 'to:':
                     return { lte: new Date(operatorValue) };
-                    
                 case 'on:':
                     const date = new Date(operatorValue);
                     const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -197,7 +162,6 @@ class QueryBuilder {
                         gte: startOfDay,
                         lt: endOfDay
                     };
-                    
                 case 'between:':
                     const [startDate, endDate] = operatorValue.split(';').map(d => d.trim());
                     if (!startDate || !endDate) {
@@ -207,7 +171,6 @@ class QueryBuilder {
                         gte: new Date(startDate),
                         lte: new Date(endDate)
                     };
-                    
                 default:
                     return null;
             }
@@ -216,31 +179,23 @@ class QueryBuilder {
         }
     }
 
-    /**
-     * Enhanced string filtering (existing method)
-     * @param {string} value 
-     * @returns {{[operator: string]: value} | boolean}
-     */
-    #filterString(value){
+    #filterString(value) {
         if (value.startsWith('%') && value.endsWith('%')) {
             return {
                 'contains': decodeURI(value.replace(/%/g, ''))
             };
-        }
-        else{
-            if(value.startsWith('%')){
+        } else {
+            if (value.startsWith('%')) {
                 return {
                     'endsWith': decodeURI(value.slice(1))
                 };
-            }
-            else{
+            } else {
                 if (value.endsWith('%')) {
                     return {
                         'startsWith': decodeURI(value.slice(0, -1))
                     };
-                }
-                else{
-                    switch(value){
+                } else {
+                    switch (value) {
                         case "true":
                             return true;
                         case "false":
@@ -255,26 +210,24 @@ class QueryBuilder {
         }
     }
 
-    #includeDeepRelationships(relation, user){
+    #includeDeepRelationships(relation, user) {
         const child_relation = relation.relation;
         let content = {};
-        if(typeof relation.access === "object" && Array.isArray(relation.access[user.role])){
+        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
             content.select = relation.access[user.role].reduce((acc, curr) => {
                 acc[curr] = true;
                 return acc;
             }, {});
-        }
-        else{
+        } else {
             content.include = {};
         }
-        if(Array.isArray(child_relation)){
-            for(let i = 0; i < child_relation.length; i++){
+        if (Array.isArray(child_relation)) {
+            for (let i = 0; i < child_relation.length; i++) {
                 const _child_relation = this.#includeDeepRelationships(child_relation[i], user);
-                if(typeof child_relation[i].access !== "object" || child_relation[i].access[user.role] !== false){
-                    if(content.hasOwnProperty('select')){
+                if (typeof child_relation[i].access !== "object" || child_relation[i].access[user.role] !== false) {
+                    if (content.hasOwnProperty('select')) {
                         content['select'][child_relation[i].name] = _child_relation;
-                    }
-                    else{
+                    } else {
                         content['include'][child_relation[i].name] = _child_relation;
                     }
                 }
@@ -283,30 +236,25 @@ class QueryBuilder {
         return content.hasOwnProperty('select') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
     }
 
-    /**
-     * 
-     * @property {string|Object} include 
-     * @returns {{[key: string]: true}}
-     */
-    include(include = "ALL", user){
+    include(include = "ALL", user) {
         let include_query = typeof include === 'string' ? include : typeof include === 'object' ? include.query : null;
         let exclude_rule = typeof include === 'object' ? include.rule : null;
-        if(include_query){
+        if (include_query) {
             let includeRelated = this.relatedObjects.reduce((acc, curr) => {
-                if(typeof curr.access !== "object" || curr.access[user.role] !== false){
+                if (typeof curr.access !== "object" || curr.access[user.role] !== false) {
                     const rel = this.#includeDeepRelationships(curr, user);
-                    if(exclude_rule && exclude_rule[curr.name]){
+                    if (exclude_rule && exclude_rule[curr.name]) {
                         rel.where = exclude_rule[curr.name];
                     }
                     acc[curr.name] = rel;
                 }
                 return acc;
             }, {});
-            
-            if(include_query != "ALL"){
+
+            if (include_query != "ALL") {
                 const includeList = include_query.split(',').map(item => item.trim());
-                for(let key in includeRelated){
-                    if(!includeList.includes(key)){
+                for (let key in includeRelated) {
+                    if (!includeList.includes(key)) {
                         delete includeRelated[key];
                     }
                 }
@@ -316,10 +264,10 @@ class QueryBuilder {
         return {};
     }
 
-    omit(user, inaccessible_fields = null){
-        const omit_fields = inaccessible_fields || this.inaccessible_fields['role'][user.role];
-        if(omit_fields){
-            return omit_fields.reduce((acc, curr)=>{
+    omit(user, inaccessible_fields = null) {
+        const omit_fields = inaccessible_fields || this.model.getOmitFields(user);
+        if (omit_fields) {
+            return omit_fields.reduce((acc, curr) => {
                 acc[curr] = true;
                 return acc;
             }, {});
@@ -327,39 +275,27 @@ class QueryBuilder {
         return {};
     }
 
-    /**
-     * 
-     * @param {*} limit 
-     * @returns {number}
-     */
-    take(limit){
-        // Offset and Limit
-        if(!Number.isInteger(limit) || limit <= 0){
+    take(limit) {
+        if (!Number.isInteger(limit) || limit <= 0) {
             throw new ErrorResponse("Invalid limit", 400);
         }
-        return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : limit
+        return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : limit;
     }
 
-    /**
-     * 
-     * @param {string} sortBy 
-     * @param {'asc'|'desc'} sortOrder  
-     * @returns {{[key: string]: 'asc' | 'desc'}}
-     */
-    sort(sortBy, sortOrder){
-        if(typeof sortBy !== 'string'){
+    sort(sortBy, sortOrder) {
+        if (typeof sortBy !== 'string') {
             throw new ErrorResponse(`sortBy must be a string. '${typeof sortBy}' given.`, 400);
         }
-        if(typeof sortOrder !== 'string' || (sortOrder != 'desc' && sortOrder != 'asc')){
-            throw new ErrorResponse(`sortOrder can only be 'asc' ord 'desc'. '${sortOrder}' given.`, 400);
+        if (typeof sortOrder !== 'string' || (sortOrder != 'desc' && sortOrder != 'asc')) {
+            throw new ErrorResponse(`sortOrder can only be 'asc' or 'desc'. '${sortOrder}' given.`, 400);
         }
         const relation_chain = sortBy.split('.').map(e => e.trim());
         const field_name = relation_chain.pop();
 
         const sort = {};
         let curr = sort;
-        for(let i = 0; i < relation_chain.length; i++){
-            curr[relation_chain[i]] = {}
+        for (let i = 0; i < relation_chain.length; i++) {
+            curr[relation_chain[i]] = {};
             curr = curr[relation_chain[i]];
         }
         curr[field_name] = sortOrder;
@@ -367,260 +303,243 @@ class QueryBuilder {
         return sort;
     }
 
-    /**
-     * 
-     * @param {{}} data 
-     * @param {number} user_id
-     */
-    create(data, user_id){
-        delete data.created_by;
-        delete data.updated_by;
-        delete data.create_date;
-        delete data.update_date;
-        for(let key in data){
-            if(this.fields[key] == null){
-                const relatedObject = this.relatedObjects.find(e => e.name == key);
-                if(relatedObject == null){
+    create(data, user_id) {
+        delete data.created_job_by;
+        delete data.updated_job_by;
+        delete data.created_job_date;
+        delete data.updated_job_date;
+        for (let key in data) {
+            if (this.fields[key] == null) {
+                const relatedObject = this.relatedObjects.find(e => e.name === key);
+                if (relatedObject == null) {
                     throw new ErrorResponse(`Given key '${key}' is not expected`, 400);
-                }
-                else{
-                    if(data[key]){
-                        if(Array.isArray(data[key])){
-                            for(let i = 0; i < data[key].length; i++){
-                                delete data[key][i].created_by;
-                                delete data[key][i].updated_by;
-                                delete data[key][i].create_date;
-                                delete data[key][i].update_date;
-                                // CHECK EXPECTED KEYS FOR RELATION
+                } else {
+                    if (data[key]) {
+                        if (Array.isArray(data[key])) {
+                            for (let i = 0; i < data[key].length; i++) {
+                                delete data[key][i].created_job_by;
+                                delete data[key][i].updated_job_by;
+                                delete data[key][i].created_job_date;
+                                delete data[key][i].updated_job_date;
                                 let relation = false;
-                                for(let _key in data[key][i]){
-                                    if(prisma[relatedObject.object].fields[_key] == null){
+                                for (let _key in data[key][i]) {
+                                    if (prisma[relatedObject.object].fields[_key] == null) {
                                         throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                     }
-                                    if(relatedObject.fields && relatedObject.fields.includes(_key)){
-                                        const sub_data_clone = {...data[key][i]};
+                                    if (relatedObject.fields && relatedObject.fields.includes(_key)) {
+                                        const sub_data_clone = { ...data[key][i] };
                                         delete sub_data_clone[_key];
-                                        const index = relatedObject.fields.findIndex((f => f == _key));
-                                        if(index > 0){
+                                        const index = relatedObject.fields.findIndex(f => f === _key);
+                                        if (index > 0) {
                                             data[key][i] = {
                                                 [relatedObject.relation[index - 1].name]: {
                                                     'connect': {
-                                                        'id': data[key][i][_key]
+                                                        [relatedObject.relation[index - 1].foreignKey || 'id']: data[key][i][_key]
                                                     }
                                                 },
                                                 ...sub_data_clone,
                                                 'createdBy': {
                                                     'connect': {
-                                                        'id': user_id,
+                                                        'id': user_id
                                                     }
                                                 }
                                             };
                                             relation = true;
-                                        }
-                                        else{
+                                        } else {
                                             delete data[key][i][_key];
                                         }
                                     }
                                 }
-                                if(!relation && data[key][i].id == null){
-                                    data[key][i].created_by = user_id;
+                                if (!relation && data[key][i].id == null) {
+                                    data[key][i].created_job_by = user_id;
                                 }
                             }
-                            
+
                             data[key] = {
                                 'create': data[key].filter(e => e.id == null),
-                                'connect': data[key].filter(e => e.id)
+                                'connect': data[key].filter(e => e.id).map(e => ({
+                                    [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
+                                }))
                             };
-                        }
-                        else{
-                            // CHECK EXPECTED KEYS FOR RELATION
-                            delete data[key].created_by;
-                            delete data[key].updated_by;
-                            delete data[key].create_date;
-                            delete data[key].update_date;
+                        } else {
+                            delete data[key].created_job_by;
+                            delete data[key].updated_job_by;
+                            delete data[key].created_job_date;
+                            delete data[key].updated_job_date;
 
-                            for(let _key in data[key]){
-                                if(prisma[relatedObject.object].fields[_key] == null){
+                            for (let _key in data[key]) {
+                                if (prisma[relatedObject.object].fields[_key] == null) {
                                     throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                 }
-                                // CHECK IF VALUE IS FOREIGN KEY
-                                const child_relation = relatedObject?.relation?.find(e => e.field == _key);
-                                if(child_relation){
-                                    data[key][child_relation.name] = {
-                                        'connect': {
-                                            'id': data[key][_key]
-                                        }
-                                    };
+                                const child_relation = relatedObject?.relation?.find(e => e.field === _key);
+                                if (child_relation) {
+                                    if(data[key][_key]){
+                                        data[key][child_relation.name] = {
+                                            'connect': {
+                                                [child_relation.foreignKey || 'id']: data[key][_key]
+                                            }
+                                        };
+                                    }
                                     delete data[key][_key];
                                 }
                             }
                             data[key] = {
                                 'create': {
                                     ...data[key],
-                                    'createdBy': {'connect': {'id': user_id}}
+                                    'createdBy': { 'connect': { 'id': user_id } }
                                 }
                             };
                         }
                     }
                 }
-            }
-            else{
-                const relatedObject = this.relatedObjects.find(e => e.field == key);
-                if(relatedObject){
-                    data[relatedObject.name] = {'connect': {'id': data[key]}};
+            } else {
+                const relatedObject = this.relatedObjects.find(e => e.field === key);
+                if (relatedObject) {
+                    if(data[key]){
+                        data[relatedObject.name] = {
+                            'connect': {
+                                [relatedObject.foreignKey || 'id']: data[key]
+                            }
+                        };
+                    }
                     delete data[key];
                 }
             }
         }
-        data.createdBy = {'connect': {'id': user_id}};
+        data.createdBy = { 'connect': { 'id': user_id } };
     }
 
-    /**
-     * 
-     * @param {{}} data 
-     * @param {number} user_id
-     */
-    update(id, data, user_id){
-        delete data.created_by;
-        delete data.updated_by;
-        delete data.create_date;
-        delete data.update_date;
-        for(let key in data){
-            if(this.fields[key] == null){
-                const relatedObject = this.relatedObjects.find(e => e.name == key);
-                if(relatedObject == null){
+    update(id, data, user_id) {
+        delete data.created_job_by;
+        delete data.updated_job_by;
+        delete data.created_job_date;
+        delete data.updated_job_date;
+        for (let key in data) {
+            if (this.fields[key] == null) {
+                const relatedObject = this.relatedObjects.find(e => e.name === key);
+                if (relatedObject == null) {
                     throw new ErrorResponse(`Given key '${key}' is not expected`, 400);
-                }
-                else{
-                    if(data[key]){
-                        // CHECK EXPECTED KEYS FOR RELATION
-                        if(Array.isArray(data[key])){
-                            for(let i = 0; i < data[key].length; i++){
-                                delete data[key][i].created_by;
-                                delete data[key][i].updated_by;
-                                delete data[key][i].create_date;
-                                delete data[key][i].update_date;
-                                // CHECK EXPECTED KEYS FOR RELATION
-                                for(let _key in data[key][i]){
-                                    if(prisma[relatedObject.object].fields[_key] == null){
+                } else {
+                    if (data[key]) {
+                        if (Array.isArray(data[key])) {
+                            for (let i = 0; i < data[key].length; i++) {
+                                delete data[key][i].created_job_by;
+                                delete data[key][i].updated_job_by;
+                                delete data[key][i].created_job_date;
+                                delete data[key][i].updated_job_date;
+                                for (let _key in data[key][i]) {
+                                    if (prisma[relatedObject.object].fields[_key] == null) {
                                         throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                     }
                                 }
                             }
                             data[key] = {
-                                'connect': data[key].filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length == 1).map(e => {
-                                    return {[Object.keys(e)[0]]: e[Object.keys(e)[0]]};
+                                'connect': data[key].filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length === 1).map(e => {
+                                    return { [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id'] };
                                 }),
                                 'updateMany': data[key].filter(e => e.id && Object.keys(e).length > 1).map(e => {
                                     return {
                                         'where': {
-                                            'id': e.id
+                                            [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
                                         },
-                                        'data': {...e, 'updated_by': user_id}
+                                        'data': { ...e, 'updated_job_by': user_id }
                                     };
                                 }),
                                 'upsert': data[key].filter(e => e.id == null).map(e => {
                                     const where = {};
-                                    if(Array.isArray(relatedObject.fields)){
+                                    if (Array.isArray(relatedObject.fields)) {
                                         const pair_id = {};
                                         pair_id[relatedObject.fields[0]] = id;
-                                        for(let field in e){
-                                            if(relatedObject.fields.includes(field)){
+                                        for (let field in e) {
+                                            if (relatedObject.fields.includes(field)) {
                                                 pair_id[field] = e[field];
                                             }
                                         }
                                         where[relatedObject.field] = pair_id;
-                                    }
-                                    else{
-                                        where[relatedObject.field || 'id'] = e[relatedObject.field || 'id'] || -1;
+                                    } else {
+                                        where[relatedObject.field || relatedObject.foreignKey || 'id'] = e[relatedObject.field || relatedObject.foreignKey || 'id'] || -1;
                                     }
                                     return {
                                         'where': where,
-                                        'create': {...e, 'created_by': user_id},
-                                        'update': {...e, 'updated_by': user_id}
-                                    }
+                                        'create': { ...e, 'created_job_by': user_id },
+                                        'update': { ...e, 'updated_job_by': user_id }
+                                    };
                                 })
                             };
-                        }
-                        else{
-                            for(let _key in data[key]){
-                                if(prisma[relatedObject.object].fields[_key] == null){
+                        } else {
+                            for (let _key in data[key]) {
+                                if (prisma[relatedObject.object].fields[_key] == null) {
                                     throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
                                 }
                             }
-                            
-                            for(let relation_key in data[key]){
-                                if(relatedObject.relation){
-                                    const rel = relatedObject.relation.find(e => e.field == relation_key);
-                                    if(rel){
-                                        if(data[key][relation_key] != null){
+
+                            for (let relation_key in data[key]) {
+                                if (relatedObject.relation) {
+                                    const rel = relatedObject.relation.find(e => e.field === relation_key);
+                                    if (rel) {
+                                        if (data[key][relation_key] != null) {
                                             data[key][rel.name] = {
                                                 'connect': {
-                                                    "id": data[key][relation_key]
+                                                    [rel.foreignKey || 'id']: data[key][relation_key]
                                                 }
-                                            }
-                                        }
-                                        else{
+                                            };
+                                        } else {
                                             data[key][rel.name] = {
                                                 'disconnect': true
-                                            }
+                                            };
                                         }
                                         delete data[key][relation_key];
                                     }
                                 }
                             }
-                            
+
                             data[key] = {
                                 'upsert': {
                                     'create': {
                                         ...data[key],
-                                        'createdBy': {'connect': {'id': user_id}}
+                                        'createdBy': { 'connect': { 'id': user_id } }
                                     },
                                     'update': {
                                         ...data[key],
-                                        'updatedBy': {'connect': {'id': user_id}}
+                                        'updatedBy': { 'connect': { 'id': user_id } }
                                     }
                                 }
                             };
                         }
                     }
                 }
-            }
-            else{
-                const relatedObject = this.relatedObjects.find(e => e.field == key);
-                if(relatedObject){
-                    if(data[key] != null){
-                        data[relatedObject.name] = {'connect': {'id': data[key]}};
-                    }
-                    else {
-                        data[relatedObject.name] = {'disconnect': true};
+            } else {
+                const relatedObject = this.relatedObjects.find(e => e.field === key);
+                if (relatedObject) {
+                    if (data[key] != null) {
+                        data[relatedObject.name] = {
+                            'connect': {
+                                [relatedObject.foreignKey || 'id']: data[key]
+                            }
+                        };
+                    } else {
+                        data[relatedObject.name] = { 'disconnect': true };
                     }
                     delete data[key];
                 }
             }
         }
-        data.updatedBy = {'connect': {'id': user_id}};
+        data.updatedBy = { 'connect': { 'id': user_id } };
     }
 
-    static get API_RESULT_LIMIT (){
+    static get API_RESULT_LIMIT() {
         return API_RESULT_LIMIT;
     }
 }
 
-/**
- * 
- * @param {Error | string} error
- * @param {{}} data 
- * @returns {{'status_code': number, 'message': string}}
- */
-QueryBuilder.errorHandler = (error, data = {})=>{
+QueryBuilder.errorHandler = (error, data = {}) => {
     console.error(error);
 
     let status_code = error.status_code || 500;
-    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" :  (error.message || error.toString());
+    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" : (error.message || error.toString());
 
-    if(error?.code){
-        switch(error.code){
+    if (error?.code) {
+        switch (error.code) {
             case "P1001":
                 message = `Connection to the database couldn't be established`;
                 break;
@@ -754,7 +673,7 @@ QueryBuilder.errorHandler = (error, data = {})=>{
                 break;
         }
     }
-    return {'status_code': status_code, 'message': message};
+    return { 'status_code': status_code, 'message': message };
 }
 
-module.exports = {QueryBuilder, prisma};
+module.exports = { QueryBuilder, prisma };

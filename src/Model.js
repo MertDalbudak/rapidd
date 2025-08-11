@@ -9,7 +9,7 @@ class Model {
     constructor(name, options){
         this.modelName = name;
         this.options = options || {}
-        this.user = this.options.user || {'id': 2, 'role': 'application'};
+        this.user = this.options.user || {'id': 1, 'role': 'application'};
         this.user_id = this.user ? this.user.id : null;
     }
 
