@@ -179,30 +179,44 @@ class QueryBuilder {
         }
     }
 
-    #filterString(value) {
+    /**
+     * Enhanced string filtering with proper URL decoding
+     * @param {string} value 
+     * @returns {{[operator: string]: value} | boolean}
+     */
+    #filterString(value){
         if (value.startsWith('%') && value.endsWith('%')) {
+            // Remove the outer % signs, then decode the inner content
+            const innerValue = value.slice(1, -1);
             return {
-                'contains': decodeURI(value.replace(/%/g, ''))
+                'contains': decodeURIComponent(innerValue)
             };
-        } else {
-            if (value.startsWith('%')) {
+        }
+        else{
+            if(value.startsWith('%')){
+                // Remove the leading %, then decode
+                const innerValue = value.slice(1);
                 return {
-                    'endsWith': decodeURI(value.slice(1))
+                    'endsWith': decodeURIComponent(innerValue)
                 };
-            } else {
+            }
+            else{
                 if (value.endsWith('%')) {
+                    // Remove the trailing %, then decode
+                    const innerValue = value.slice(0, -1);
                     return {
-                        'startsWith': decodeURI(value.slice(0, -1))
+                        'startsWith': decodeURIComponent(innerValue)
                     };
-                } else {
-                    switch (value) {
+                }
+                else{
+                    switch(value){
                         case "true":
                             return true;
                         case "false":
                             return false;
                         default:
                             return {
-                                'equals': value
+                                'equals': decodeURIComponent(value)
                             };
                     }
                 }
@@ -304,10 +318,7 @@ class QueryBuilder {
     }
 
     create(data, user_id) {
-        delete data.created_job_by;
-        delete data.updated_job_by;
-        delete data.created_job_date;
-        delete data.updated_job_date;
+        this.#cleanTimestampFields(data);
         for (let key in data) {
             if (this.fields[key] == null) {
                 const relatedObject = this.relatedObjects.find(e => e.name === key);
@@ -317,10 +328,7 @@ class QueryBuilder {
                     if (data[key]) {
                         if (Array.isArray(data[key])) {
                             for (let i = 0; i < data[key].length; i++) {
-                                delete data[key][i].created_job_by;
-                                delete data[key][i].updated_job_by;
-                                delete data[key][i].created_job_date;
-                                delete data[key][i].updated_job_date;
+                                this.#cleanTimestampFields(data[key][i]);
                                 let relation = false;
                                 for (let _key in data[key][i]) {
                                     if (prisma[relatedObject.object].fields[_key] == null) {
@@ -351,7 +359,7 @@ class QueryBuilder {
                                     }
                                 }
                                 if (!relation && data[key][i].id == null) {
-                                    data[key][i].created_job_by = user_id;
+                                    data[key][i].created_by = user_id;
                                 }
                             }
 
@@ -362,10 +370,7 @@ class QueryBuilder {
                                 }))
                             };
                         } else {
-                            delete data[key].created_job_by;
-                            delete data[key].updated_job_by;
-                            delete data[key].created_job_date;
-                            delete data[key].updated_job_date;
+                            this.#cleanTimestampFields(data[key]);
 
                             for (let _key in data[key]) {
                                 if (prisma[relatedObject.object].fields[_key] == null) {
@@ -410,10 +415,8 @@ class QueryBuilder {
     }
 
     update(id, data, user_id) {
-        delete data.created_job_by;
-        delete data.updated_job_by;
-        delete data.created_job_date;
-        delete data.updated_job_date;
+        this.#cleanTimestampFields(data);
+        
         for (let key in data) {
             if (this.fields[key] == null) {
                 const relatedObject = this.relatedObjects.find(e => e.name === key);
@@ -422,89 +425,9 @@ class QueryBuilder {
                 } else {
                     if (data[key]) {
                         if (Array.isArray(data[key])) {
-                            for (let i = 0; i < data[key].length; i++) {
-                                delete data[key][i].created_job_by;
-                                delete data[key][i].updated_job_by;
-                                delete data[key][i].created_job_date;
-                                delete data[key][i].updated_job_date;
-                                for (let _key in data[key][i]) {
-                                    if (prisma[relatedObject.object].fields[_key] == null) {
-                                        throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
-                                    }
-                                }
-                            }
-                            data[key] = {
-                                'connect': data[key].filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length === 1).map(e => {
-                                    return { [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id'] };
-                                }),
-                                'updateMany': data[key].filter(e => e.id && Object.keys(e).length > 1).map(e => {
-                                    return {
-                                        'where': {
-                                            [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
-                                        },
-                                        'data': { ...e, 'updated_job_by': user_id }
-                                    };
-                                }),
-                                'upsert': data[key].filter(e => e.id == null).map(e => {
-                                    const where = {};
-                                    if (Array.isArray(relatedObject.fields)) {
-                                        const pair_id = {};
-                                        pair_id[relatedObject.fields[0]] = id;
-                                        for (let field in e) {
-                                            if (relatedObject.fields.includes(field)) {
-                                                pair_id[field] = e[field];
-                                            }
-                                        }
-                                        where[relatedObject.field] = pair_id;
-                                    } else {
-                                        where[relatedObject.field || relatedObject.foreignKey || 'id'] = e[relatedObject.field || relatedObject.foreignKey || 'id'] || -1;
-                                    }
-                                    return {
-                                        'where': where,
-                                        'create': { ...e, 'created_job_by': user_id },
-                                        'update': { ...e, 'updated_job_by': user_id }
-                                    };
-                                })
-                            };
+                            data[key] = this.#processArrayRelation(data[key], relatedObject, id, user_id);
                         } else {
-                            for (let _key in data[key]) {
-                                if (prisma[relatedObject.object].fields[_key] == null) {
-                                    throw new ErrorResponse(`Given key '${key}.${_key}' is not expected`, 400);
-                                }
-                            }
-
-                            for (let relation_key in data[key]) {
-                                if (relatedObject.relation) {
-                                    const rel = relatedObject.relation.find(e => e.field === relation_key);
-                                    if (rel) {
-                                        if (data[key][relation_key] != null) {
-                                            data[key][rel.name] = {
-                                                'connect': {
-                                                    [rel.foreignKey || 'id']: data[key][relation_key]
-                                                }
-                                            };
-                                        } else {
-                                            data[key][rel.name] = {
-                                                'disconnect': true
-                                            };
-                                        }
-                                        delete data[key][relation_key];
-                                    }
-                                }
-                            }
-
-                            data[key] = {
-                                'upsert': {
-                                    'create': {
-                                        ...data[key],
-                                        'createdBy': { 'connect': { 'id': user_id } }
-                                    },
-                                    'update': {
-                                        ...data[key],
-                                        'updatedBy': { 'connect': { 'id': user_id } }
-                                    }
-                                }
-                            };
+                            data[key] = this.#processSingleRelation(data[key], relatedObject, user_id);
                         }
                     }
                 }
@@ -524,7 +447,199 @@ class QueryBuilder {
                 }
             }
         }
-        data.updatedBy = { 'connect': { 'id': user_id } };
+        
+        // Only add updatedBy if we still have data to update
+        if (Object.keys(data).length > 0) {
+            data.updatedBy = { 'connect': { 'id': user_id } };
+        }
+    }
+    
+    /**
+     * Recursively process array relations
+     */
+    #processArrayRelation(dataArray, relatedObject, parentId, user_id) {
+        for (let i = 0; i < dataArray.length; i++) {
+            this.#cleanTimestampFields(dataArray[i]);
+            
+            // Validate all fields
+            for (let _key in dataArray[i]) {
+                if (prisma[relatedObject.object].fields[_key] == null) {
+                    throw new ErrorResponse(`Given key '${relatedObject.name}.${_key}' is not expected`, 400);
+                }
+            }
+            
+            // Process nested relations recursively if they exist
+            if (relatedObject.relation) {
+                dataArray[i] = this.#processNestedRelations(dataArray[i], relatedObject.relation, user_id);
+            }
+        }
+        
+        return {
+            'connect': dataArray.filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length === 1).map(e => {
+                return { [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id'] };
+            }),
+            'updateMany': dataArray.filter(e => e.id && Object.keys(e).length > 1).map(e => {
+                return {
+                    'where': {
+                        [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
+                    },
+                    'data': { ...e, 'updated_by': user_id }
+                };
+            }),
+            'upsert': dataArray.filter(e => e.id == null).map(e => {
+                const where = {};
+                if (Array.isArray(relatedObject.fields)) {
+                    const pair_id = {};
+                    pair_id[relatedObject.fields[0]] = parentId;
+                    for (let field in e) {
+                        if (relatedObject.fields.includes(field)) {
+                            pair_id[field] = e[field];
+                        }
+                    }
+                    where[relatedObject.field] = pair_id;
+                } else {
+                    where[relatedObject.field || relatedObject.foreignKey || 'id'] = e[relatedObject.field || relatedObject.foreignKey || 'id'] || -1;
+                }
+                return {
+                    'where': where,
+                    'create': { ...e, 'created_by': user_id },
+                    'update': { ...e, 'updated_by': user_id }
+                };
+            })
+        };
+    }
+    
+    /**
+     * Recursively process single relations
+     */
+    #processSingleRelation(dataObj, relatedObject, user_id) {
+        // Validate all fields first
+        for (let _key in dataObj) {
+            if (prisma[relatedObject.object].fields[_key] == null) {
+                throw new ErrorResponse(`Given key '${relatedObject.name}.${_key}' is not expected`, 400);
+            }
+        }
+    
+        // Process nested relations recursively if they exist
+        let processedData = dataObj;
+        if (relatedObject.relation) {
+            processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user_id);
+        }
+    
+        // Prepare separate data objects for create and update
+        let createData = {...processedData};
+        let updateData = {...processedData};
+        let hasDisconnects = false;
+    
+        // Process direct relations
+        if (relatedObject.relation) {
+            for (let relation_key in processedData) {
+                const rel = relatedObject.relation.find(e => e.field === relation_key);
+                if (rel) {
+                    if (processedData[relation_key] != null) {
+                        // For both create and update, use connect when value is not null
+                        const connectObj = {
+                            'connect': {
+                                [rel.foreignKey || 'id']: processedData[relation_key]
+                            }
+                        };
+                        createData[rel.name] = connectObj;
+                        updateData[rel.name] = connectObj;
+                    } else {
+                        // For update, use disconnect when value is null
+                        updateData[rel.name] = {
+                            'disconnect': true
+                        };
+                        hasDisconnects = true;
+                        // For create, remove the relation entirely
+                        delete createData[rel.name];
+                    }
+                    // Remove the original field from both
+                    delete createData[relation_key];
+                    delete updateData[relation_key];
+                }
+            }
+        }
+    
+        // Check if we have meaningful content for create and update
+        const hasCreateContent = this.#hasMeaningfulContent(createData);
+        const hasUpdateContent = this.#hasMeaningfulContent(updateData) || hasDisconnects;
+    
+        // Build upsert object conditionally
+        const upsertObj = {};
+        
+        if (hasCreateContent) {
+            // Clean up createData - remove any disconnect operations that might have leaked
+            
+            upsertObj.create = {
+                ...createData,
+                'createdBy': { 'connect': { 'id': user_id } }
+            };
+        }
+        
+        if (hasUpdateContent) {
+            upsertObj.update = {
+                ...updateData,
+                'updatedBy': { 'connect': { 'id': user_id } }
+            };
+        }
+    
+        // Only return upsert if we have at least one operation
+        return Object.keys(upsertObj).length > 0 ? { 'upsert': upsertObj } : null;
+    }
+    
+    /**
+     * Recursively process nested relations in data
+     */
+    #processNestedRelations(dataObj, relatedObjects, user_id) {
+        const processedData = {...dataObj};
+        
+        for (let key in processedData) {
+            const nestedRelation = relatedObjects.find(rel => rel.name === key);
+            
+            if (nestedRelation && processedData[key] && typeof processedData[key] === 'object') {
+                if (Array.isArray(processedData[key])) {
+                    // Process nested array relation recursively
+                    processedData[key] = this.#processArrayRelation(processedData[key], nestedRelation, null, user_id);
+                } else {
+                    // Process nested single relation recursively
+                    const nestedResult = this.#processSingleRelation(processedData[key], nestedRelation, user_id);
+                    if (nestedResult) {
+                        processedData[key] = nestedResult;
+                    } else {
+                        delete processedData[key];
+                    }
+                }
+            }
+        }
+        
+        return processedData;
+    }
+    
+    /**
+     * Clean timestamp fields from data object
+     */
+    #cleanTimestampFields(dataObj) {
+        delete dataObj.created_by;
+        delete dataObj.updated_by;
+        delete dataObj.created_date;
+        delete dataObj.updated_date;
+    }
+    
+    /**
+     * Check if object has meaningful content
+     */
+    #hasMeaningfulContent(dataObj) {
+        return Object.keys(dataObj).length > 0 && 
+            Object.keys(dataObj).some(key => {
+                const value = dataObj[key];
+                if (value === null || value === undefined) return false;
+                if (typeof value === 'object') {
+                    // For nested objects, check if they have meaningful operations
+                    return value.connect || value.disconnect || value.create || value.update || value.upsert;
+                }
+                return true;
+            });
     }
 
     static get API_RESULT_LIMIT() {
