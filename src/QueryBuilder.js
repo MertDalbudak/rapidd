@@ -1,25 +1,83 @@
-const { PrismaClient } = require('../prisma/client');
+const {prisma, Prisma, rls} = require('../rapidd/rapidd');
 const { ErrorResponse } = require('./Api');
-
-const prisma = new PrismaClient({
-    'omit': {
-        'user': {
-            'hash': true
-        }
-    }
-});
+const path = require('path');
+const fs = require('fs');
 
 const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
 
 class QueryBuilder {
+    /**
+     * Initialize QueryBuilder with model name and configuration
+     * @param {string} name - The model name
+     * @param {Object} model - Model configuration object
+     */
     constructor(name, model) {
         this.name = name;
         this.model = model;
         this.fields = prisma[this.name].fields;
-        this.relatedObjects = this.model.relatedObjects;
         this.inaccessible_fields = this.model.inaccessible_fields;
+        this._relationshipsCache = null;
     }
 
+    /**
+     * Load relationships from relationships.json file
+     * @returns {Object} Relationships configuration for this model
+     */
+    get relatedObjects() {
+        if (this._relationshipsCache) {
+            return this._relationshipsCache;
+        }
+
+        try {
+            const relationshipsPath = path.resolve(__dirname, '../rapidd/relationships.json');
+            const relationships = JSON.parse(fs.readFileSync(relationshipsPath, 'utf8'));
+            const modelRelationships = relationships[this.name] || {};
+
+            // Convert to array format expected by existing code
+            this._relationshipsCache = Object.entries(modelRelationships).map(([name, config]) => ({
+                name,
+                ...config
+            }));
+
+            return this._relationshipsCache;
+        } catch (error) {
+            console.error(`Failed to load relationships for ${this.name}:`, error);
+            return [];
+        }
+    }
+
+    /**
+     * Get primary key field(s) for a given model
+     * @param {string} modelName - The model name
+     * @returns {string|Array} Primary key field name or array of field names for composite keys
+     */
+    getPrimaryKey(modelName) {
+        const model = Prisma.dmmf.datamodel.models.find(m => m.name === modelName.toLowerCase());
+        if (!model) {
+            // Fallback to 'id' if model not found
+            return 'id';
+        }
+
+        // Check for composite primary key
+        if (model.primaryKey && model.primaryKey.fields && model.primaryKey.fields.length > 0) {
+            return model.primaryKey.fields.length === 1 ? model.primaryKey.fields[0] : model.primaryKey.fields;
+        }
+
+        // Check for single primary key field
+        const idField = model.fields.find(f => f.isId);
+        if (idField) {
+            return idField.name;
+        }
+
+        // Default fallback
+        return 'id';
+    }
+
+    /**
+     * Build select object for specified fields
+     * @param {Array|null} fields - Fields to select, null for all
+     * @returns {Object} Prisma select object
+     */
     select(fields = null) {
         if (fields == null) {
             fields = {};
@@ -35,6 +93,12 @@ class QueryBuilder {
         return fields;
     }
 
+    /**
+     * Parse filter string into Prisma where conditions
+     * Supports: numeric/date/string operators, not:, #NULL, not:#NULL
+     * @param {string} q - Filter query string
+     * @returns {Object} Prisma where object
+     */
     filter(q) {
         if (typeof q === 'string') {
             return q.split(/,(?![^\[]*\])/).reduce((acc, curr) => {
@@ -72,60 +136,172 @@ class QueryBuilder {
                     } else {
                         if (filter[rel.name]['some']) {
                             filter = filter[rel.name]['some'];
+                        } else {
+                            filter = filter[rel.name];
                         }
-                        filter = filter[rel.name];
                     }
 
                     return rel;
                 }, this.relatedObjects);
 
-                if (relation.length > 0 && !prisma[relationPrisma.object].fields[trimmedKey]) {
-                    throw new ErrorResponse(`Field '${trimmedKey}' does not exist in ${relationPrisma.object}.`, 400);
+                // #NULL and not:#NULL handling
+                if (trimmedValue === '#NULL') {
+                    filter[trimmedKey] = null;
+                    return acc;
+                }
+                if (trimmedValue === 'not:#NULL') {
+                    filter[trimmedKey] = { not: null };
+                    return acc;
+                }
+
+                // Universal not: operator for all types
+                if (trimmedValue && trimmedValue.startsWith('not:')) {
+                    const negValue = trimmedValue.substring(4);
+
+                    // not:#NULL (is not null)
+                    if (negValue === '#NULL') {
+                        filter[trimmedKey] = { not: null };
+                        return acc;
+                    }
+
+                    // Array exclusion with wildcards
+                    if (negValue.startsWith('[') && negValue.endsWith(']')) {
+                        let arr;
+                        try {
+                            arr = JSON.parse(negValue);
+                        } catch {
+                            arr = negValue.slice(1, -1).split(',').map(v => v.trim());
+                        }
+                        // If any value contains %, treat as string filter
+                        if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
+                            // Build NOT array for Prisma
+                            filter.NOT = arr.map(v => ({
+                                [trimmedKey]: this.#filterString(v)
+                            }));
+                        } else {
+                            filter[trimmedKey] = { notIn: arr };
+                        }
+                        return acc;
+                    }
+
+                    // Special handling for between: with dates/numbers
+                    if (negValue.startsWith('between:')) {
+                        const operatorValue = negValue.substring('between:'.length);
+                        const [start, end] = operatorValue.split(';').map(v => v.trim());
+
+                        if (!start || !end) {
+                            throw new ErrorResponse('Between operator requires two values separated by semicolon', 400);
+                        }
+
+                        // Check if values are pure numbers
+                        const isStartNumber = /^-?\d+(\.\d+)?$/.test(start);
+                        const isEndNumber = /^-?\d+(\.\d+)?$/.test(end);
+
+                        if (isStartNumber && isEndNumber) {
+                            // Handle numeric not:between: - exclude values between start and end
+                            const startNum = parseFloat(start);
+                            const endNum = parseFloat(end);
+                            // Add NOT condition with AND logic (exclude range)
+                            filter.NOT = (filter.NOT || []).concat([{
+                                AND: [
+                                    { [trimmedKey]: { gte: startNum } },
+                                    { [trimmedKey]: { lte: endNum } }
+                                ]
+                            }]);
+                        } else {
+                            // Handle date not:between: - exclude dates between start and end
+                            const startDate = new Date(start);
+                            const endDate = new Date(end);
+                            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+                                throw new ErrorResponse(`Invalid date in between range: ${start} or ${end}`, 400);
+                            }
+                            // Add NOT condition with AND logic (exclude range)
+                            filter.NOT = (filter.NOT || []).concat([{
+                                AND: [
+                                    { [trimmedKey]: { gte: startDate } },
+                                    { [trimmedKey]: { lte: endDate } }
+                                ]
+                            }]);
+                        }
+                        return acc;
+                    }
+
+                    // Date
+                    const dateFilter = this.#filterDateTime(negValue);
+                    if (dateFilter) {
+                        filter[trimmedKey] = { not: dateFilter };
+                        return acc;
+                    }
+
+                    // Number
+                    if (!isNaN(negValue) || ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:'].some(op => negValue.startsWith(op))) {
+                        const numFilter = this.#filterNumber(negValue);
+                        if (numFilter) {
+                            filter[trimmedKey] = { not: numFilter };
+                        } else {
+                            filter[trimmedKey] = { not: Number(negValue) };
+                        }
+                        return acc;
+                    }
+
+                    // String
+                    filter[trimmedKey] = { not: this.#filterString(negValue) };
+                    return acc;
                 }
 
                 if (!trimmedValue) {
                     filter[trimmedKey] = null;
                 } else {
-                    if (isNaN(trimmedValue)) {
-                        if (trimmedValue.startsWith('[') && trimmedValue.endsWith(']')) {
-                            if (!Array.isArray(filter['AND'])) {
-                                filter['AND'] = [];
-                            }
+                    // Check for date patterns first (since between: can be both numeric and date)
+                    const isoDateRegex = /^\d{4}-\d{2}-\d{2}(T.*)?$/;
+                    const dateOperators = ['before:', 'after:', 'from:', 'to:', 'on:'];
+                    const hasDateOperator = dateOperators.some(op => trimmedValue.startsWith(op));
+                    const isBetweenWithDates = trimmedValue.startsWith('between:') &&
+                        (trimmedValue.includes('-') && trimmedValue.includes('T') ||
+                         trimmedValue.substring(8).split(';').some(part => part.trim().match(isoDateRegex)));
 
-                            const listValues = trimmedValue.slice(1, -1)?.split(',');
-                            const condition = {
-                                'OR': []
-                            };
-
-                            filter['AND'].push(condition);
-                            listValues.forEach(listValue => {
-                                const listSearch = {};
-                                listValue = listValue ? listValue.trim() : null;
-                                if (listValue) {
-                                    if (isNaN(listValue)) {
-                                        listSearch[trimmedKey] = this.#filterString(listValue);
-                                    } else {
-                                        listSearch[trimmedKey] = {
-                                            equals: Number(listValue)
-                                        };
-                                    }
-                                } else {
-                                    listSearch[trimmedKey] = null;
-                                }
-                                condition['OR'].push(listSearch);
-                            });
-                        } else {
-                            const dateFilter = this.#filterDateTime(trimmedValue);
-                            if (dateFilter) {
-                                filter[trimmedKey] = dateFilter;
-                            } else {
-                                filter[trimmedKey] = this.#filterString(trimmedValue);
-                            }
+                    if (hasDateOperator || isBetweenWithDates || isoDateRegex.test(trimmedValue)) {
+                        const dateFilter = this.#filterDateTime(trimmedValue);
+                        if (dateFilter) {
+                            filter[trimmedKey] = dateFilter;
+                            return acc;
                         }
-                    } else {
+                    }
+
+                    // Try numeric operators
+                    if (!isNaN(trimmedValue) || ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'].some(op => trimmedValue.startsWith(op))) {
+                        const numFilter = this.#filterNumber(trimmedValue);
+                        if (numFilter) {
+                            filter[trimmedKey] = numFilter;
+                            return acc;
+                        }
+                    }
+                    // If numeric parsing failed but it's a number, treat as equals
+                    if (!isNaN(trimmedValue)) {
                         filter[trimmedKey] = {
                             'equals': Number(trimmedValue)
                         };
+                    } 
+                    // For normal array inclusion
+                    else if (trimmedValue.startsWith('[') && trimmedValue.endsWith(']')) {
+                        let arr;
+                        try {
+                            arr = JSON.parse(trimmedValue);
+                        } catch {
+                            arr = trimmedValue.slice(1, -1).split(',').map(v => v.trim());
+                        }
+                        // If any value contains %, treat as string filter
+                        if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
+                            // Build OR array in the current filter context (not top-level)
+                            if (!filter.OR) filter.OR = [];
+                            arr.forEach(v => {
+                                filter.OR.push({ [trimmedKey]: this.#filterString(v) });
+                            });
+                        } else {
+                            filter[trimmedKey] = { in: arr };
+                        }
+                    } else {
+                        filter[trimmedKey] = this.#filterString(trimmedValue);
                     }
                 }
                 return acc;
@@ -134,6 +310,47 @@ class QueryBuilder {
         return {};
     }
 
+    /**
+     * Parse numeric filter operators
+     * @param {string} value - Filter value with operator
+     * @returns {Object|null} Prisma numeric filter or null
+     */
+    #filterNumber(value) {
+        const numOperators = ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'];
+        const foundOperator = numOperators.find(op => value.startsWith(op));
+        let numValue = value;
+        let prismaOp = 'equals';
+
+        if (foundOperator) {
+            numValue = value.substring(foundOperator.length);
+            switch (foundOperator) {
+                case 'lt:': prismaOp = 'lt'; break;
+                case 'lte:': prismaOp = 'lte'; break;
+                case 'gt:': prismaOp = 'gt'; break;
+                case 'gte:': prismaOp = 'gte'; break;
+                case 'eq:': prismaOp = 'equals'; break;
+                case 'ne:': prismaOp = 'not'; break;
+                case 'between:': {
+                    // Support between for decimals: between:1.5;3.7
+                    const [start, end] = numValue.split(';').map(v => parseFloat(v.trim()));
+                    if (isNaN(start) || isNaN(end)) return null;
+                    return { gte: start, lte: end };
+                }
+            }
+        }
+
+        // Support decimal numbers
+        numValue = parseFloat(numValue);
+        if (isNaN(numValue)) return null;
+
+        return { [prismaOp]: numValue };
+    }
+
+    /**
+     * Parse date/datetime filter operators
+     * @param {string} value - Filter value with date operator
+     * @returns {Object|null} Prisma date filter or null
+     */
     #filterDateTime(value) {
         const dateOperators = ['before:', 'after:', 'from:', 'to:', 'between:', 'on:'];
         const foundOperator = dateOperators.find(op => value.startsWith(op));
@@ -147,15 +364,34 @@ class QueryBuilder {
         try {
             switch (foundOperator) {
                 case 'before:':
-                    return { lt: new Date(operatorValue) };
+                    const beforeDate = new Date(operatorValue);
+                    if (isNaN(beforeDate.getTime())) {
+                        throw new Error(`Invalid date: ${operatorValue}`);
+                    }
+                    return { lt: beforeDate };
                 case 'after:':
-                    return { gt: new Date(operatorValue) };
+                    const afterDate = new Date(operatorValue);
+                    if (isNaN(afterDate.getTime())) {
+                        throw new Error(`Invalid date: ${operatorValue}`);
+                    }
+                    return { gt: afterDate };
                 case 'from:':
-                    return { gte: new Date(operatorValue) };
+                    const fromDate = new Date(operatorValue);
+                    if (isNaN(fromDate.getTime())) {
+                        throw new Error(`Invalid date: ${operatorValue}`);
+                    }
+                    return { gte: fromDate };
                 case 'to:':
-                    return { lte: new Date(operatorValue) };
+                    const toDate = new Date(operatorValue);
+                    if (isNaN(toDate.getTime())) {
+                        throw new Error(`Invalid date: ${operatorValue}`);
+                    }
+                    return { lte: toDate };
                 case 'on:':
                     const date = new Date(operatorValue);
+                    if (isNaN(date.getTime())) {
+                        throw new Error(`Invalid date: ${operatorValue}`);
+                    }
                     const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
                     const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
                     return {
@@ -167,9 +403,22 @@ class QueryBuilder {
                     if (!startDate || !endDate) {
                         throw new ErrorResponse('Between operator requires two dates separated by semicolon', 400);
                     }
+
+                    // If both values look like pure numbers (not dates), let the number filter handle it
+                    const isStartNumber = /^-?\d+(\.\d+)?$/.test(startDate);
+                    const isEndNumber = /^-?\d+(\.\d+)?$/.test(endDate);
+                    if (isStartNumber && isEndNumber) {
+                        return null; // Let #filterNumber handle numeric between
+                    }
+
+                    const startDateObj = new Date(startDate);
+                    const endDateObj = new Date(endDate);
+                    if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
+                        throw new Error(`Invalid date in between range: ${startDate} or ${endDate}`);
+                    }
                     return {
-                        gte: new Date(startDate),
-                        lte: new Date(endDate)
+                        gte: startDateObj,
+                        lte: endDateObj
                     };
                 default:
                     return null;
@@ -180,9 +429,9 @@ class QueryBuilder {
     }
 
     /**
-     * Enhanced string filtering with proper URL decoding
-     * @param {string} value 
-     * @returns {{[operator: string]: value} | boolean}
+     * Parse string filters with wildcard support and URL decoding
+     * @param {string} value - String filter value
+     * @returns {Object|boolean} Prisma string filter or boolean value
      */
     #filterString(value){
         if (value.startsWith('%') && value.endsWith('%')) {
@@ -224,6 +473,12 @@ class QueryBuilder {
         }
     }
 
+    /**
+     * Build deep relationship include object with access controls
+     * @param {Object} relation - Relation configuration
+     * @param {Object} user - User object with role
+     * @returns {Object} Prisma include/select object
+     */
     #includeDeepRelationships(relation, user) {
         const child_relation = relation.relation;
         let content = {};
@@ -235,6 +490,13 @@ class QueryBuilder {
         } else {
             content.include = {};
         }
+
+        // Add omit fields for this relation if available
+        const omitFields = this.getRelatedOmit(relation.object, user);
+        if (Object.keys(omitFields).length > 0) {
+            content.omit = omitFields;
+        }
+
         if (Array.isArray(child_relation)) {
             for (let i = 0; i < child_relation.length; i++) {
                 const _child_relation = this.#includeDeepRelationships(child_relation[i], user);
@@ -247,40 +509,193 @@ class QueryBuilder {
                 }
             }
         }
-        return content.hasOwnProperty('select') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
     }
 
+    /**
+     * Build top-level only relationship include (no deep relations)
+     * @param {Object} relation - Relation configuration
+     * @param {Object} user - User object with role
+     * @returns {Object} Prisma include/select object for top-level only
+     */
+    #includeTopLevelOnly(relation, user) {
+        let content = {};
+        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
+            content.select = relation.access[user.role].reduce((acc, curr) => {
+                acc[curr] = true;
+                return acc;
+            }, {});
+        } else {
+            // Check if there are omit fields for this relation
+            const omitFields = this.getRelatedOmit(relation.object, user);
+            if (Object.keys(omitFields).length > 0) {
+                content = { omit: omitFields };
+            } else {
+                content = true; // Include all fields but no nested relations
+            }
+        }
+        return content;
+    }
+
+    /**
+     * Build selective deep relationship include based on dot notation paths
+     * @param {Object} relation - Relation configuration
+     * @param {Object} user - User object with role
+     * @param {Array} deepPaths - Array of deep paths (e.g., ['agency', 'courses.subject'])
+     * @returns {Object} Prisma include/select object with selective deep relations
+     */
+    #includeSelectiveDeepRelationships(relation, user, deepPaths) {
+        let content = {};
+        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
+            content.select = relation.access[user.role].reduce((acc, curr) => {
+                acc[curr] = true;
+                return acc;
+            }, {});
+        } else {
+            content.include = {};
+        }
+
+        // Add omit fields for this relation if available
+        const omitFields = this.getRelatedOmit(relation.object, user);
+        if (Object.keys(omitFields).length > 0) {
+            content.omit = omitFields;
+        }
+
+        // Process each deep path
+        if (Array.isArray(relation.relation)) {
+            const pathsByRelation = {};
+
+            // Group paths by their first level relation
+            deepPaths.forEach(path => {
+                const parts = path.split('.');
+                const firstLevel = parts[0];
+                if (!pathsByRelation[firstLevel]) {
+                    pathsByRelation[firstLevel] = [];
+                }
+                if (parts.length > 1) {
+                    pathsByRelation[firstLevel].push(parts.slice(1).join('.'));
+                } else {
+                    pathsByRelation[firstLevel].push(''); // Mark as include this level
+                }
+            });
+
+            // Build includes for each requested relation
+            relation.relation.forEach(childRelation => {
+                if (pathsByRelation[childRelation.name] &&
+                    (typeof childRelation.access !== "object" || childRelation.access[user.role] !== false)) {
+
+                    let childInclude;
+                    const childPaths = pathsByRelation[childRelation.name].filter(p => p !== '');
+
+                    if (childPaths.length > 0) {
+                        // Recursively build selective deep relationships
+                        childInclude = this.#includeSelectiveDeepRelationships(childRelation, user, childPaths);
+                    } else {
+                        // Only include this level
+                        childInclude = this.#includeTopLevelOnly(childRelation, user);
+                    }
+
+                    if (content.hasOwnProperty('select')) {
+                        content['select'][childRelation.name] = childInclude;
+                    } else {
+                        content['include'][childRelation.name] = childInclude;
+                    }
+                }
+            });
+        }
+
+        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+    }
+
+    /**
+     * Build include object for related data with access controls
+     * @param {string|Object} include - Include specification
+     * @param {Object} user - User object with role
+     * @returns {Object} Prisma include object
+     */
     include(include = "ALL", user) {
         let include_query = typeof include === 'string' ? include : typeof include === 'object' ? include.query : null;
         let exclude_rule = typeof include === 'object' ? include.rule : null;
         if (include_query) {
-            let includeRelated = this.relatedObjects.reduce((acc, curr) => {
-                if (typeof curr.access !== "object" || curr.access[user.role] !== false) {
-                    const rel = this.#includeDeepRelationships(curr, user);
-                    if (exclude_rule && exclude_rule[curr.name]) {
-                        rel.where = exclude_rule[curr.name];
-                    }
-                    acc[curr.name] = rel;
-                }
-                return acc;
-            }, {});
+            let includeRelated = {};
 
-            if (include_query != "ALL") {
-                const includeList = include_query.split(',').map(item => item.trim());
-                for (let key in includeRelated) {
-                    if (!includeList.includes(key)) {
-                        delete includeRelated[key];
+            if (include_query === "ALL") {
+                // Keep the old behavior for "ALL" - load all deep relationships
+                includeRelated = this.relatedObjects.reduce((acc, curr) => {
+                    if (typeof curr.access !== "object" || curr.access[user.role] !== false) {
+                        const rel = this.#includeDeepRelationships(curr, user);
+                        if (exclude_rule && exclude_rule[curr.name]) {
+                            rel.where = exclude_rule[curr.name];
+                        }
+                        acc[curr.name] = rel;
                     }
-                }
+                    return acc;
+                }, {});
+            } else {
+                // Parse dot notation includes (e.g., "student.agency,course")
+                const includeList = include_query.split(',').map(item => item.trim());
+                const topLevelIncludes = new Set();
+                const deepIncludes = {};
+
+                // Separate top-level and deep includes
+                includeList.forEach(item => {
+                    const parts = item.split('.');
+                    const topLevel = parts[0];
+                    topLevelIncludes.add(topLevel);
+
+                    if (parts.length > 1) {
+                        if (!deepIncludes[topLevel]) {
+                            deepIncludes[topLevel] = [];
+                        }
+                        deepIncludes[topLevel].push(parts.slice(1).join('.'));
+                    }
+                });
+
+                // Build include object for each top-level relation
+                this.relatedObjects.forEach(curr => {
+                    if (topLevelIncludes.has(curr.name) && (typeof curr.access !== "object" || curr.access[user.role] !== false)) {
+                        let rel;
+
+                        if (deepIncludes[curr.name]) {
+                            // Build selective deep relationships
+                            rel = this.#includeSelectiveDeepRelationships(curr, user, deepIncludes[curr.name]);
+                        } else {
+                            // Only include top-level (no deep relationships)
+                            rel = this.#includeTopLevelOnly(curr, user);
+                        }
+
+                        if (exclude_rule && exclude_rule[curr.name]) {
+                            if (typeof rel === 'object' && rel !== null) {
+                                rel.where = exclude_rule[curr.name];
+                            } else {
+                                rel = { where: exclude_rule[curr.name] };
+                            }
+                        }
+                        includeRelated[curr.name] = rel;
+                    }
+                });
             }
+
             return includeRelated;
         }
         return {};
     }
 
+    /**
+     * Build omit object for hiding fields based on user role
+     * @param {Object} user - User object with role
+     * @param {Array|null} inaccessible_fields - Override fields to omit
+     * @returns {Object} Prisma omit object
+     */
     omit(user, inaccessible_fields = null) {
-        const omit_fields = inaccessible_fields || this.model.getOmitFields(user);
-        if (omit_fields) {
+        // Get omit fields from RLS if available
+        let omit_fields = inaccessible_fields;
+
+        if (!omit_fields && rls.model[this.name]?.getOmitFields) {
+            omit_fields = rls.model[this.name].getOmitFields(user);
+        }
+
+        if (omit_fields && Array.isArray(omit_fields)) {
             return omit_fields.reduce((acc, curr) => {
                 acc[curr] = true;
                 return acc;
@@ -289,6 +704,30 @@ class QueryBuilder {
         return {};
     }
 
+    /**
+     * Get omit fields for a related object based on user role
+     * @param {string} relatedModelName - The related model name
+     * @param {Object} user - User object with role
+     * @returns {Object} Prisma omit object for the related model
+     */
+    getRelatedOmit(relatedModelName, user) {
+        if (rls.model[relatedModelName]?.getOmitFields) {
+            const omit_fields = rls.model[relatedModelName].getOmitFields(user);
+            if (omit_fields && Array.isArray(omit_fields)) {
+                return omit_fields.reduce((acc, curr) => {
+                    acc[curr] = true;
+                    return acc;
+                }, {});
+            }
+        }
+        return {};
+    }
+
+    /**
+     * Validate and limit result count
+     * @param {number} limit - Requested limit
+     * @returns {number} Validated limit within API constraints
+     */
     take(limit) {
         if (!Number.isInteger(limit) || limit <= 0) {
             throw new ErrorResponse("Invalid limit", 400);
@@ -296,6 +735,12 @@ class QueryBuilder {
         return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : limit;
     }
 
+    /**
+     * Build sort object for ordering results
+     * @param {string} sortBy - Field to sort by (supports dot notation)
+     * @param {string} sortOrder - 'asc' or 'desc'
+     * @returns {Object} Prisma orderBy object
+     */
     sort(sortBy, sortOrder) {
         if (typeof sortBy !== 'string') {
             throw new ErrorResponse(`sortBy must be a string. '${typeof sortBy}' given.`, 400);
@@ -317,6 +762,11 @@ class QueryBuilder {
         return sort;
     }
 
+    /**
+     * Process data for create operation with relation handling
+     * @param {Object} data - Data to create
+     * @param {number} user_id - ID of creating user
+     */
     create(data, user_id) {
         this.#cleanTimestampFields(data);
         for (let key in data) {
@@ -339,10 +789,11 @@ class QueryBuilder {
                                         delete sub_data_clone[_key];
                                         const index = relatedObject.fields.findIndex(f => f === _key);
                                         if (index > 0) {
+                                            const relPrimaryKey = relatedObject.relation[index - 1].foreignKey || this.getPrimaryKey(relatedObject.relation[index - 1].object);
                                             data[key][i] = {
                                                 [relatedObject.relation[index - 1].name]: {
                                                     'connect': {
-                                                        [relatedObject.relation[index - 1].foreignKey || 'id']: data[key][i][_key]
+                                                        [relPrimaryKey]: data[key][i][_key]
                                                     }
                                                 },
                                                 ...sub_data_clone,
@@ -379,9 +830,10 @@ class QueryBuilder {
                                 const child_relation = relatedObject?.relation?.find(e => e.field === _key);
                                 if (child_relation) {
                                     if(data[key][_key]){
+                                        const childPrimaryKey = child_relation.foreignKey || this.getPrimaryKey(child_relation.object);
                                         data[key][child_relation.name] = {
                                             'connect': {
-                                                [child_relation.foreignKey || 'id']: data[key][_key]
+                                                [childPrimaryKey]: data[key][_key]
                                             }
                                         };
                                     }
@@ -414,6 +866,12 @@ class QueryBuilder {
         data.createdBy = { 'connect': { 'id': user_id } };
     }
 
+    /**
+     * Process data for update operation with nested relation support
+     * @param {number} id - ID of record to update
+     * @param {Object} data - Data to update
+     * @param {number} user_id - ID of updating user
+     */
     update(id, data, user_id) {
         this.#cleanTimestampFields(data);
         
@@ -455,7 +913,12 @@ class QueryBuilder {
     }
     
     /**
-     * Recursively process array relations
+     * Process array relations for update operations
+     * @param {Array} dataArray - Array of relation data
+     * @param {Object} relatedObject - Relation configuration
+     * @param {number} parentId - Parent record ID
+     * @param {number} user_id - User ID
+     * @returns {Object} Prisma array relation operations
      */
     #processArrayRelation(dataArray, relatedObject, parentId, user_id) {
         for (let i = 0; i < dataArray.length; i++) {
@@ -510,7 +973,11 @@ class QueryBuilder {
     }
     
     /**
-     * Recursively process single relations
+     * Process single relation for update operations with create/update separation
+     * @param {Object} dataObj - Relation data object
+     * @param {Object} relatedObject - Relation configuration
+     * @param {number} user_id - User ID
+     * @returns {Object|null} Prisma upsert operation or null
      */
     #processSingleRelation(dataObj, relatedObject, user_id) {
         // Validate all fields first
@@ -569,8 +1036,6 @@ class QueryBuilder {
         const upsertObj = {};
         
         if (hasCreateContent) {
-            // Clean up createData - remove any disconnect operations that might have leaked
-            
             upsertObj.create = {
                 ...createData,
                 'createdBy': { 'connect': { 'id': user_id } }
@@ -589,7 +1054,11 @@ class QueryBuilder {
     }
     
     /**
-     * Recursively process nested relations in data
+     * Recursively process nested relations in data objects
+     * @param {Object} dataObj - Data object to process
+     * @param {Array} relatedObjects - Array of relation configurations
+     * @param {number} user_id - User ID
+     * @returns {Object} Processed data object
      */
     #processNestedRelations(dataObj, relatedObjects, user_id) {
         const processedData = {...dataObj};
@@ -617,7 +1086,8 @@ class QueryBuilder {
     }
     
     /**
-     * Clean timestamp fields from data object
+     * Remove timestamp fields from data object
+     * @param {Object} dataObj - Data object to clean
      */
     #cleanTimestampFields(dataObj) {
         delete dataObj.created_by;
@@ -627,7 +1097,9 @@ class QueryBuilder {
     }
     
     /**
-     * Check if object has meaningful content
+     * Check if data object contains meaningful content for database operations
+     * @param {Object} dataObj - Data object to check
+     * @returns {boolean} True if object has meaningful content
      */
     #hasMeaningfulContent(dataObj) {
         return Object.keys(dataObj).length > 0 && 
@@ -642,19 +1114,29 @@ class QueryBuilder {
             });
     }
 
+    /**
+     * Get API result limit constant
+     * @returns {number} Maximum API result limit
+     */
     static get API_RESULT_LIMIT() {
         return API_RESULT_LIMIT;
     }
 }
 
-QueryBuilder.errorHandler = (error, data = {}) => {
+/**
+ * Handle Prisma errors and convert to standardized error responses
+ * @param {Error|string} error - Error object or message
+ * @param {Object} data - Additional data context
+ * @returns {Object} Standardized error response with status_code and message
+ */
+QueryBuilder.errorHandler = (error, data = {})=>{
     console.error(error);
 
     let status_code = error.status_code || 500;
-    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" : (error.message || error.toString());
+    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" :  (error.message || error.toString());
 
-    if (error?.code) {
-        switch (error.code) {
+    if(error?.code){
+        switch(error.code){
             case "P1001":
                 message = `Connection to the database couldn't be established`;
                 break;
@@ -788,7 +1270,7 @@ QueryBuilder.errorHandler = (error, data = {}) => {
                 break;
         }
     }
-    return { 'status_code': status_code, 'message': message };
+    return {'status_code': status_code, 'message': message};
 }
 
-module.exports = { QueryBuilder, prisma };
+module.exports = {QueryBuilder, prisma};

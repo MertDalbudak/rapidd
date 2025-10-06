@@ -5,16 +5,6 @@ const configPath = "./config/rate-limit.json";
 const redisMaxTimout = 1000 * 10; // 10 seconds
 const redisMaxRetries = 60;
 
-// BigInt serialization
-BigInt.prototype.toJSON = function () {
-    const num = Number(this);
-    if (!Number.isSafeInteger(num)) {
-        throw new Error("BigInt value is too large to convert safely");
-    }
-    return num;
-};
-
-
 class Api {
     /**
      * @param {Object[]} data
@@ -174,7 +164,6 @@ class RateLimiter {
         return async (req, res, next) => {
             const req_path = req.originalUrl.split('?')[0];
             const pathConfig = this.getPathConfig(req_path);
-            console.log(pathConfig);
             
             const key = `${req.ip || req.connection.remoteAddress} - ${req_path}`;
             const now = Date.now();
@@ -265,7 +254,6 @@ class RateLimiter {
         `;
 
         const result = await this.redis.eval(luaScript, 1, redisKey, windowStart, maxRequests, now, windowMs);
-        console.log(result);
         
         return {
             allowed: result[0] === 1,

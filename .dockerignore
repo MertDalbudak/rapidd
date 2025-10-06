@@ -1,16 +1,71 @@
+# Dependencies
 node_modules
-#.git
-.github
-*.md
-.gitignore
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Testing and development
 __test__
-*.log
-.env
-docker-compose.yml
-dockerfile
+*.test.js
+jest.setup.js
+*.spec.js
+coverage
+
+# Development files
+.env*
+.env.local
+.env.development
+.env.test
+
+# Version control and CI/CD
+.git
+.gitignore
+.github
+.gitlab-ci.yml
+
+# Documentation
+*.md
+README*
+CHANGELOG*
+LICENSE*
+
+# Docker files
+Dockerfile*
+docker-compose*
 compose.yml
 .dockerignore
 
+# IDE and editor files
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+logs
+*.log
+tmp
+temp
+*.tmp
+
+# Sensitive config files that shouldn't be in production
 config/default.json
-custom-sevdesk-invoice.htm
+data/custom-sevdesk-creditNote.htm
+data/custom-sevdesk-invoice.htm
+
+# Build artifacts and caches
+dist
+build
+.cache
+
+# Prisma generated client (will be regenerated in build)
 prisma/client
+
+# Other unnecessary files
+*.orig
+*.backup

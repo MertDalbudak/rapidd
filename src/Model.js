@@ -1,24 +1,54 @@
-const { QueryBuilder, prisma } = require("./QueryBuilder");
+const { QueryBuilder, prisma, rls } = require("./QueryBuilder");
 const {ErrorResponse} = require('./Api');
 
 class Model {
     /**
-         * @param {string} name 
-         * @param {{'user': {}}} options 
+         * @param {string} name
+         * @param {{'user': {}}} options
          */
     constructor(name, options){
         this.modelName = name;
         this.options = options || {}
         this.user = this.options.user || {'id': 1, 'role': 'application'};
         this.user_id = this.user ? this.user.id : null;
+
+        // Initialize queryBuilder for this model instance
+        if (!this.constructor.queryBuilder || this.constructor.queryBuilder.name !== name) {
+            this.constructor.queryBuilder = new QueryBuilder(name, this.constructor);
+        }
     }
 
     _select = (fields) => this.constructor.queryBuilder.select(fields);
     _filter = (q) => this.constructor.queryBuilder.filter(q);
     _include = (include) => this.constructor.queryBuilder.include(include, this.user);
-    _getAccessFilter = () => this.constructor.getAccessFilter(this.user);
-    _hasAccess = (data) => this.constructor.hasAccess(data, this.user) || false;
+    _getAccessFilter = () => this.getAccessFilterFromRLS(this.user);
+    _hasAccess = (data) => this.hasAccessFromRLS(data, this.user) || false;
     _omit = () => this.constructor.queryBuilder.omit(this.user);
+
+    /**
+     * Get access filter from RLS configuration
+     * @param {Object} user - User object with role
+     * @returns {Object} Access filter object
+     */
+    getAccessFilterFromRLS(user) {
+        if (rls.model[this.name]?.getAccessFilter) {
+            return rls.model[this.name].getAccessFilter(user);
+        }
+        return {};
+    }
+
+    /**
+     * Check if user has access to data from RLS configuration
+     * @param {Object} data - Data to check access for
+     * @param {Object} user - User object with role
+     * @returns {boolean} True if user has access
+     */
+    hasAccessFromRLS(data, user) {
+        if (rls.model[this.name]?.hasAccess) {
+            return rls.model[this.name].hasAccess(data, user);
+        }
+        return true; // Default to allowing access if no RLS defined
+    }
 
     /**
      * 
@@ -57,6 +87,7 @@ class Model {
      * @returns {Promise<{} | null>}
      */
     _get = async (id, include, options = {}) =>{
+        const {omit, ..._options} = options;
         id = Number(id)
         // To determine if the record is inaccessible, either due to non-existence or insufficient permissions, two simultaneous queries are performed.
         const _response = this.prisma.findUnique({
@@ -65,10 +96,9 @@ class Model {
                 ...this.getAccessFilter()
             },
             'include': this.include(include),
-            'omit': this._omit(),
-            ...options
+            'omit': {...this._omit(), ...omit},
+            ..._options
         });
-        console.log(this.getAccessFilter());
         
         const _checkExistence = this.prisma.findUnique({
             'where': {
@@ -93,13 +123,18 @@ class Model {
         return response;
     }
     /**
-     * @param {{}} data 
+     * @param {{}} data
      * @returns {Promise<Object>}
      */
     _create = async (data, options = {}) => {
+        // Check if user can create records
+        if (rls.model[this.name]?.canCreate && !rls.model[this.name].canCreate(this.user)) {
+            throw new ErrorResponse("You don't have permission to create records", 403);
+        }
+
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS
         this.constructor.queryBuilder.create(data, this.user_id);
-            
+
         // CREATE
         return await this.prisma.create({
             'data': data,
@@ -109,14 +144,30 @@ class Model {
     }
 
     /**
-     * @param {number} id 
-     * @param {{}} data 
+     * @param {number} id
+     * @param {{}} data
      * @returns {Promise<Object>}
      */
     _update = async (id, data, options = {}) => {
         id = Number(id);
         // GET DATA FIRST
         const current_data = await this._get(id, "ALL");
+
+        // Check update filter from RLS
+        if (rls.model[this.name]?.getUpdateFilter) {
+            const updateFilter = rls.model[this.name].getUpdateFilter(this.user);
+            // Check if the record passes the update filter
+            const canUpdate = await this.prisma.findFirst({
+                where: {
+                    id: id,
+                    ...updateFilter
+                },
+                select: { id: true }
+            });
+            if (!canUpdate) {
+                throw new ErrorResponse("You don't have permission to update this record", 403);
+            }
+        }
 
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS
         this.constructor.queryBuilder.update(id, data, this.user_id);
@@ -142,12 +193,28 @@ class Model {
     }
 
     /**
-     * @param {number} id 
+     * @param {number} id
      * @returns {Promise<Object>}
      */
     _delete = async (id, options = {}) => {
         // GET DATA FIRST
         const current_data = await this._get(id);
+
+        // Check delete filter from RLS
+        if (rls.model[this.name]?.getDeleteFilter) {
+            const deleteFilter = rls.model[this.name].getDeleteFilter(this.user);
+            // Check if the record passes the delete filter
+            const canDelete = await this.prisma.findFirst({
+                where: {
+                    id: parseInt(id),
+                    ...deleteFilter
+                },
+                select: { id: true }
+            });
+            if (!canDelete) {
+                throw new ErrorResponse("You don't have permission to delete this record", 403);
+            }
+        }
 
         return await this.prisma.delete({
             'where': {
@@ -222,10 +289,11 @@ class Model {
         return this.constructor.queryBuilder.take(Number(limit));
     }
     skip(offset){
-        if(!Number.isInteger(offset) || offset < 0){
-            throw new ErrorResponse("Invalid offset", 400);
+        const parsed = parseInt(offset);
+        if(isNaN(parsed) || parsed < 0){
+            return 0;
         }
-        return isNaN(offset) ? 0 : parseInt(offset)
+        return parsed;
     }
 
     /**
@@ -255,9 +323,7 @@ class Model {
         this.fields = this.prisma.fields;
     }
 
-    static relatedObjects = [];
-    static access_rule = [];
     static Error = ErrorResponse;
 }
 
-module.exports = {Model, QueryBuilder, prisma};
+module.exports = {Model, QueryBuilder, prisma, rls};

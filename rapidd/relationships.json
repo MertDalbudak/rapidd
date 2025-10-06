@@ -1,0 +1,55 @@
+{
+    "user": {
+        "teacher":{
+            "object": "teacher"
+        }
+    },
+    "teacher": {
+        "user": {
+            "object": "user"
+        },
+        "courses": {
+            "object": "course_teacher",
+            "field": "course_id_teacher_id",
+            "fields": ["teacher_id", "course_id"]
+        }
+    },
+    "student": {
+        "user": {
+            "object": "user"
+        },
+        "courses": {
+            "object": "course_student",
+            "field": "course_id_student_id",
+            "fields": ["student_id", "course_id"]
+        }
+    },
+    "course_teacher": {
+        "teacher": {
+            "object": "teacher"
+        },
+        "course": {
+            "object": "course"
+        }
+    },
+    "course_student": {
+        "teacher": {
+            "object": "student"
+        },
+        "course": {
+            "object": "course"
+        }
+    },
+    "course": {
+        "teachers": {
+            "object": "course_teacher",
+            "field": "course_id_teacher_id",
+            "fields": ["course_id", "teacher_id"]
+        },
+        "students": {
+            "object": "course_student",
+            "field": "course_id_student_id",
+            "fields": ["course_id", "student_id"]
+        }
+    }
+}

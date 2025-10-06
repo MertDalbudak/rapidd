@@ -9,7 +9,7 @@ require("express-async-errors");
 const cookieParser = require('cookie-parser');
 const cors = require('cors');
 const csrf = require('csurf');
-const fileUpload = require('express-fileupload');
+//const fileUpload = require('express-fileupload');
 
 // SET CONST VARIABLE
 const NODE_ENV = process.env.NODE_ENV;
@@ -28,8 +28,6 @@ process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout"
 const {Api, ErrorResponse} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
-
-
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
 const SUPPORTED_LANGUAGES = fs.readdirSync(process.env.STRINGS_PATH).map(e => path.parse(e).name);
@@ -123,6 +121,32 @@ app.use(function(err, req, res, next) {
     next(err);
 });
 
+/////////// SECURITY HEADERS MIDDLEWARE ///////////
+
+app.use(function(req, res, next){
+    // Security headers
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-XSS-Protection', '1; mode=block');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+
+    // Content Security Policy
+    res.setHeader('Content-Security-Policy',
+        "default-src 'self'; " +
+        "script-src 'self' 'unsafe-inline'; " +
+        "style-src 'self' 'unsafe-inline'; " +
+        "img-src 'self' data:; " +
+        "font-src 'self'"
+    );
+
+    // HTTPS enforcement in production
+    if (NODE_ENV === 'production') {
+        res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+
+    next();
+});
+
 /////////// CUSTOM MIDDLEWARE ///////////
 
 app.use(async function(req, res, next){
@@ -135,22 +159,6 @@ app.use(async function(req, res, next){
     
     next();
 });
-
-
-/////////// UPLOAD HANDLER ///////////
-
-app.use(fileUpload({
-    'useTempFiles' : true,
-    'tempFileDir': process.env.ROOT + "/temp/upload/",
-    'limits': { 
-        'fileSize': 50 * 1024 * 1024    // 50Mbyte
-    },
-    'preserveExtension': true,
-    'abortOnLimit': true
-}));
-
-/////////// UPLOAD HANDLER ///////////
-
 
 ///////////// EJS RENDER /////////////
 
