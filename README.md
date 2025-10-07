@@ -46,9 +46,13 @@ npx rapidd build
 
 After building, review the generated RLS (Row-Level Security) policy files in your project. These files define access control rules for each model. Customize them according to your security requirements.
 
-### 4. Start Your Server
+### 4. Configure Your Application
 
-Once RLS policies are configured, start the server:
+Create an `app.json` file under the `/config` directory. You can use [config/default.json](config/default.json) as a reference example for the configuration structure.
+
+### 5. Start Your Server
+
+Once your application is configured, start the server:
 
 ```bash
 npm start
