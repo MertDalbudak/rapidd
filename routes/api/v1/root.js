@@ -3,35 +3,27 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const {User, prisma} = require('../../../src/Model/User');
 const {RateLimiter, ErrorResponse} = require('../../../src/Api');
-const api_credentials = require('../../../data/api_credentials');
 const pushLog = require('../../../lib/pushLog');
 
 router.all('*', async function(req, res, next) {
     const auth = req.headers.authorization ? Buffer.from(req.headers.authorization.split(' ')[1], 'base64').toString('utf8') : null;
-    if(process.env.UNRESTRICTED_API === "TRUE" || (api_credentials.findIndex((e) => e.user.concat(':', e.pass) == auth)) > -1){
-        req.session = null;
-        req.user = null;
-        if(req.headers['x-session-token'] != undefined){
-            req.session = await prisma.session.findFirst({
+    req.session = null;
+    req.user = null;
+    if(req.headers['x-session-token'] != undefined){
+        req.session = await prisma.session.findFirst({
+            'where': {
+                'token': req.headers['x-session-token']
+            }
+        });
+        if(req.session != null){
+            req.user = await prisma.user.findUnique({
                 'where': {
-                    'token': req.headers['x-session-token']
+                    'id': req.session.user_id
                 }
             });
-            if(req.session != null){
-                req.user = await prisma.user.findUnique({
-                    'where': {
-                        'id': req.session.user_id
-                    }
-                });
-            }
         }
-        next();
     }
-    else{
-        res.ejsRender('error.ejs', {'error_code': 401}).then(file => {
-            res.status(401).send(file);
-        });
-    }
+    next();
 });
 
 // Usage of custom limiter

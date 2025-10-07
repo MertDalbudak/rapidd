@@ -497,6 +497,16 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
+        // Apply RLS access filter for this relation (only for list relations)
+        if (relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+            const cleanedFilter = this.cleanFilter(accessFilter);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
+                content.where = simplifiedFilter;
+            }
+        }
+
         if (Array.isArray(child_relation)) {
             for (let i = 0; i < child_relation.length; i++) {
                 const _child_relation = this.#includeDeepRelationships(child_relation[i], user);
@@ -509,7 +519,33 @@ class QueryBuilder {
                 }
             }
         }
-        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+    }
+
+    /**
+     * Get relationships configuration for a specific model
+     * @param {string} modelName - The model name
+     * @returns {Array} Array of relationship configurations for the model
+     */
+    #getRelationshipsForModel(modelName) {
+        if (!modelName) {
+            return [];
+        }
+
+        try {
+            const relationshipsPath = path.resolve(__dirname, '../rapidd/relationships.json');
+            const relationships = JSON.parse(fs.readFileSync(relationshipsPath, 'utf8'));
+            const modelRelationships = relationships[modelName] || {};
+
+            // Convert to array format
+            return Object.entries(modelRelationships).map(([name, config]) => ({
+                name,
+                ...config
+            }));
+        } catch (error) {
+            console.error(`Failed to load relationships for ${modelName}:`, error);
+            return [];
+        }
     }
 
     /**
@@ -534,6 +570,21 @@ class QueryBuilder {
                 content = true; // Include all fields but no nested relations
             }
         }
+
+        // Apply RLS access filter for this relation (only for list relations)
+        if (typeof content === 'object' && relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+            const cleanedFilter = this.cleanFilter(accessFilter);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
+                if (content === true) {
+                    content = { where: simplifiedFilter };
+                } else {
+                    content.where = simplifiedFilter;
+                }
+            }
+        }
+
         return content;
     }
 
@@ -561,8 +612,18 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
+        // Apply RLS access filter for this relation (only for list relations)
+        if (relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+            const cleanedFilter = this.cleanFilter(accessFilter);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
+                content.where = simplifiedFilter;
+            }
+        }
+
         // Process each deep path
-        if (Array.isArray(relation.relation)) {
+        if (deepPaths && deepPaths.length > 0) {
             const pathsByRelation = {};
 
             // Group paths by their first level relation
@@ -579,13 +640,16 @@ class QueryBuilder {
                 }
             });
 
-            // Build includes for each requested relation
-            relation.relation.forEach(childRelation => {
-                if (pathsByRelation[childRelation.name] &&
-                    (typeof childRelation.access !== "object" || childRelation.access[user.role] !== false)) {
+            // Load child object's relationships from relationships.json
+            const childRelationships = this.#getRelationshipsForModel(relation.object);
 
+            // Build includes for each requested relation
+            for (const relationName in pathsByRelation) {
+                const childRelation = childRelationships.find(r => r.name === relationName);
+
+                if (childRelation && (typeof childRelation.access !== "object" || childRelation.access[user.role] !== false)) {
                     let childInclude;
-                    const childPaths = pathsByRelation[childRelation.name].filter(p => p !== '');
+                    const childPaths = pathsByRelation[relationName].filter(p => p !== '');
 
                     if (childPaths.length > 0) {
                         // Recursively build selective deep relationships
@@ -596,15 +660,15 @@ class QueryBuilder {
                     }
 
                     if (content.hasOwnProperty('select')) {
-                        content['select'][childRelation.name] = childInclude;
+                        content['select'][relationName] = childInclude;
                     } else {
-                        content['include'][childRelation.name] = childInclude;
+                        content['include'][relationName] = childInclude;
                     }
                 }
-            });
+            }
         }
 
-        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
     }
 
     /**
@@ -1112,6 +1176,138 @@ class QueryBuilder {
                 }
                 return true;
             });
+    }
+
+    /**
+     * Check if a relation is a list relation (one-to-many or many-to-many)
+     * @param {Object} relation - Relation configuration
+     * @returns {boolean} True if relation is a list relation
+     */
+    #isListRelation(relation) {
+        // Many-to-many relations have a fields array (composite keys for join tables)
+        if (Array.isArray(relation.fields)) {
+            return true;
+        }
+
+        // Check the actual Prisma schema to determine if it's a list relation
+        if (relation.object) {
+            try {
+                const model = Prisma.dmmf.datamodel.models.find(m => m.name === this.name.toLowerCase());
+                if (model) {
+                    const field = model.fields.find(f => f.name === relation.name);
+                    if (field) {
+                        // If the field has isList: true, it's a list relation
+                        return field.isList === true;
+                    }
+                }
+            } catch (error) {
+                console.error(`Error checking relation type for ${relation.name}:`, error);
+            }
+        }
+
+        // Fallback: relations without a field are likely list relations
+        return !relation.field;
+    }
+
+    /**
+     * Recursively clean filter object by removing undefined values and empty AND/OR arrays
+     * @param {Object|any} filter - Filter object to clean
+     * @returns {Object|null} Cleaned filter or null if empty
+     */
+    cleanFilter(filter) {
+        if (!filter || typeof filter !== 'object') {
+            return filter === undefined ? null : filter;
+        }
+
+        if (Array.isArray(filter)) {
+            const cleaned = filter.map(item => this.cleanFilter(item)).filter(item => item !== null && item !== undefined);
+            return cleaned.length > 0 ? cleaned : null;
+        }
+
+        const cleaned = {};
+        for (const key in filter) {
+            const value = filter[key];
+
+            if (value === undefined) {
+                continue; // Skip undefined values
+            }
+
+            if (value === null) {
+                cleaned[key] = null;
+                continue;
+            }
+
+            if (typeof value === 'object') {
+                const cleanedValue = this.cleanFilter(value);
+                if (cleanedValue !== null && cleanedValue !== undefined) {
+                    // For AND/OR arrays, only add if they have items
+                    if ((key === 'AND' || key === 'OR') && Array.isArray(cleanedValue) && cleanedValue.length === 0) {
+                        continue;
+                    }
+                    cleaned[key] = cleanedValue;
+                }
+            } else {
+                cleaned[key] = value;
+            }
+        }
+
+        // If cleaned filter only has one condition in an AND/OR, unwrap it
+        if (Object.keys(cleaned).length === 1 && (cleaned.AND || cleaned.OR)) {
+            const array = cleaned.AND || cleaned.OR;
+            if (Array.isArray(array) && array.length === 1) {
+                return array[0];
+            }
+        }
+
+        return Object.keys(cleaned).length > 0 ? cleaned : null;
+    }
+
+    /**
+     * Simplify nested filter by removing parent relation filters
+     * When including appointments from student_tariff, remove {student_tariff: {...}} filters
+     * @param {Object|any} filter - Filter object to simplify
+     * @param {string} parentModel - Parent model name
+     * @returns {Object|null} Simplified filter
+     */
+    #simplifyNestedFilter(filter, parentModel) {
+        if (!filter || typeof filter !== 'object') {
+            return filter;
+        }
+
+        if (Array.isArray(filter)) {
+            const simplified = filter.map(item => this.#simplifyNestedFilter(item, parentModel)).filter(item => item !== null);
+            return simplified.length > 0 ? simplified : null;
+        }
+
+        const simplified = {};
+        for (const key in filter) {
+            const value = filter[key];
+
+            // Skip filters that reference the parent model (we're already in that context)
+            if (key === parentModel) {
+                continue;
+            }
+
+            // Recursively process AND/OR arrays
+            if (key === 'AND' || key === 'OR') {
+                const simplifiedArray = this.#simplifyNestedFilter(value, parentModel);
+                if (simplifiedArray && Array.isArray(simplifiedArray) && simplifiedArray.length > 0) {
+                    simplified[key] = simplifiedArray;
+                }
+            } else {
+                simplified[key] = value;
+            }
+        }
+
+        // If simplified filter only has one condition in an AND/OR, unwrap it
+        if (Object.keys(simplified).length === 1 && (simplified.AND || simplified.OR)) {
+            const array = simplified.AND || simplified.OR;
+            if (array.length === 1) {
+                return array[0];
+            }
+        }
+
+        return Object.keys(simplified).length > 0 ? simplified : null;
     }
 
     /**

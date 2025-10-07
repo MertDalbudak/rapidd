@@ -1,4 +1,4 @@
-const { QueryBuilder, prisma, rls } = require("./QueryBuilder");
+const { QueryBuilder, prisma } = require("./QueryBuilder");
 const {ErrorResponse} = require('./Api');
 
 class Model {
@@ -11,53 +11,23 @@ class Model {
         this.options = options || {}
         this.user = this.options.user || {'id': 1, 'role': 'application'};
         this.user_id = this.user ? this.user.id : null;
-
-        // Initialize queryBuilder for this model instance
-        if (!this.constructor.queryBuilder || this.constructor.queryBuilder.name !== name) {
-            this.constructor.queryBuilder = new QueryBuilder(name, this.constructor);
-        }
     }
 
     _select = (fields) => this.constructor.queryBuilder.select(fields);
     _filter = (q) => this.constructor.queryBuilder.filter(q);
     _include = (include) => this.constructor.queryBuilder.include(include, this.user);
-    _getAccessFilter = () => this.getAccessFilterFromRLS(this.user);
-    _hasAccess = (data) => this.hasAccessFromRLS(data, this.user) || false;
+    _getAccessFilter = () => this.constructor.getAccessFilter(this.user);
+    _hasAccess = (data) => this.constructor.hasAccess(data, this.user) || false;
     _omit = () => this.constructor.queryBuilder.omit(this.user);
 
     /**
-     * Get access filter from RLS configuration
-     * @param {Object} user - User object with role
-     * @returns {Object} Access filter object
-     */
-    getAccessFilterFromRLS(user) {
-        if (rls.model[this.name]?.getAccessFilter) {
-            return rls.model[this.name].getAccessFilter(user);
-        }
-        return {};
-    }
-
-    /**
-     * Check if user has access to data from RLS configuration
-     * @param {Object} data - Data to check access for
-     * @param {Object} user - User object with role
-     * @returns {boolean} True if user has access
-     */
-    hasAccessFromRLS(data, user) {
-        if (rls.model[this.name]?.hasAccess) {
-            return rls.model[this.name].hasAccess(data, user);
-        }
-        return true; // Default to allowing access if no RLS defined
-    }
-
-    /**
-     * 
-     * @param {string} q 
-     * @property {string|Object} include 
+     *
+     * @param {string} q
+     * @property {string|Object} include
      * @param {number} limit
-     * @param {number} offset 
-     * @param {string} sortBy 
-     * @param {'asc'|'desc'} sortOrder 
+     * @param {number} offset
+     * @param {string} sortBy
+     * @param {'asc'|'desc'} sortOrder
      * @returns {Promise<Object[]>}
      */
     _getMany = async (q = {}, include = "", limit = 25, offset = 0, sortBy = "id", sortOrder = "asc", options = {})=>{
@@ -82,8 +52,8 @@ class Model {
         });
     }
     /**
-     * @param {number} id 
-     * @param {string | Object} include 
+     * @param {number} id
+     * @param {string | Object} include
      * @returns {Promise<{} | null>}
      */
     _get = async (id, include, options = {}) =>{
@@ -99,7 +69,7 @@ class Model {
             'omit': {...this._omit(), ...omit},
             ..._options
         });
-        
+
         const _checkExistence = this.prisma.findUnique({
             'where': {
                 'id': id
@@ -110,7 +80,7 @@ class Model {
         });
 
         const [response, checkExistence] = await Promise.all([_response, _checkExistence]);
-        
+
         if(response == null){
             if(checkExistence == null){
                 throw new ErrorResponse("Record not found", 404);
@@ -127,11 +97,6 @@ class Model {
      * @returns {Promise<Object>}
      */
     _create = async (data, options = {}) => {
-        // Check if user can create records
-        if (rls.model[this.name]?.canCreate && !rls.model[this.name].canCreate(this.user)) {
-            throw new ErrorResponse("You don't have permission to create records", 403);
-        }
-
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS
         this.constructor.queryBuilder.create(data, this.user_id);
 
@@ -153,22 +118,6 @@ class Model {
         // GET DATA FIRST
         const current_data = await this._get(id, "ALL");
 
-        // Check update filter from RLS
-        if (rls.model[this.name]?.getUpdateFilter) {
-            const updateFilter = rls.model[this.name].getUpdateFilter(this.user);
-            // Check if the record passes the update filter
-            const canUpdate = await this.prisma.findFirst({
-                where: {
-                    id: id,
-                    ...updateFilter
-                },
-                select: { id: true }
-            });
-            if (!canUpdate) {
-                throw new ErrorResponse("You don't have permission to update this record", 403);
-            }
-        }
-
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS
         this.constructor.queryBuilder.update(id, data, this.user_id);
         return await this.prisma.update({
@@ -182,8 +131,8 @@ class Model {
     }
 
     /**
-     * 
-     * @param {string} q 
+     *
+     * @param {string} q
      * @returns {Promise<number>}
      */
     _count = async (q = {}) => {
@@ -200,22 +149,6 @@ class Model {
         // GET DATA FIRST
         const current_data = await this._get(id);
 
-        // Check delete filter from RLS
-        if (rls.model[this.name]?.getDeleteFilter) {
-            const deleteFilter = rls.model[this.name].getDeleteFilter(this.user);
-            // Check if the record passes the delete filter
-            const canDelete = await this.prisma.findFirst({
-                where: {
-                    id: parseInt(id),
-                    ...deleteFilter
-                },
-                select: { id: true }
-            });
-            if (!canDelete) {
-                throw new ErrorResponse("You don't have permission to delete this record", 403);
-            }
-        }
-
         return await this.prisma.delete({
             'where': {
                 id: parseInt(id)
@@ -226,12 +159,12 @@ class Model {
     }
 
     /**
-     * 
-     * @param {string} q 
+     *
+     * @param {string} q
      * @property {string|Object} include
-     * @param {number} limit 
-     * @param {number} offset 
-     * @param {string} sortBy 
+     * @param {number} limit
+     * @param {number} offset
+     * @param {string} sortBy
      * @param {'asc'|'desc'} sortOrder
      * @returns {Promise<Object[]>}
      */
@@ -239,8 +172,8 @@ class Model {
         return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder);
     }
     /**
-     * @param {number} id 
-     * @param {string | Object} include 
+     * @param {number} id
+     * @param {string | Object} include
      * @returns {Promise<{} | null>}
      */
     async get(id, include, options = {}){
@@ -248,8 +181,8 @@ class Model {
     }
 
     /**
-     * @param {number} id 
-     * @param {{}} data 
+     * @param {number} id
+     * @param {{}} data
      * @returns {Promise<Object>}
      */
     async update(id, data, options = {}){
@@ -257,8 +190,8 @@ class Model {
     }
 
     /**
-     * 
-     * @param {string} q 
+     *
+     * @param {string} q
      * @returns {Promise<number>}
      */
     async count(q = {}) {
@@ -266,7 +199,7 @@ class Model {
     }
 
     /**
-     * @param {number} id 
+     * @param {number} id
      * @returns {Promise<Object>}
      */
     async delete(id, data, options = {}){
@@ -297,7 +230,7 @@ class Model {
     }
 
     /**
-     * 
+     *
      * @returns {Object}
      */
     getAccessFilter(){
@@ -309,8 +242,8 @@ class Model {
     }
 
     /**
-     * 
-     * @param {*} data 
+     *
+     * @param {*} data
      * @returns {boolean}
      */
     hasAccess(data) {
@@ -323,7 +256,8 @@ class Model {
         this.fields = this.prisma.fields;
     }
 
+    static relatedObjects = [];
     static Error = ErrorResponse;
 }
 
-module.exports = {Model, QueryBuilder, prisma, rls};
+module.exports = {Model, QueryBuilder, prisma};

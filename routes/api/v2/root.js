@@ -3,7 +3,6 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const {User, prisma} = require('../../../src/Model/User');
 const {RateLimiter, ErrorResponse} = require('../../../src/Api');
-const api_credentials = require('../../../data/api_credentials');
 const pushLog = require('../../../lib/pushLog');
 
 router.all('*', async function(req, res, next) {

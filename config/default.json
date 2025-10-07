@@ -10,7 +10,7 @@
         }
     },
     "services": {
-        "EC": {
+        "Service1": {
             "hostname": "host.name",
             "path": "/path",
             "secure": true,
@@ -37,7 +37,7 @@
                 }
             }
         },
-        "IDCS": {
+        "Service2": {
             "hostname": "localhost",
             "path": "/path",
             "secure": true,
