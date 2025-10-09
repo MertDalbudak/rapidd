@@ -1,3 +1,5 @@
+<img width="64" height="64" alt="logo" src="https://github.com/user-attachments/assets/706dd13b-212c-4076-b4d7-94dec4001a06" />
+
 # rapidd
 
 **Rapidd** is a powerful Node.js framework that automatically generates production-ready REST APIs from your Prisma schema. It eliminates the need to manually write CRUD endpoints, route handlers, and data validation logic by intelligently building them from your database schema.
@@ -49,6 +51,7 @@ After building, review the generated RLS (Row-Level Security) policy files in yo
 ### 4. Configure Your Application
 
 Create an `app.json` file under the `/config` directory. You can use [config/default.json](config/default.json) as a reference example for the configuration structure.
+Also create an `.env` file in the root directory of your project. You can use [.env.example](.env.example) as a reference for the environment variables needed.
 
 ### 5. Start Your Server
 

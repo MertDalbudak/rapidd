@@ -25,7 +25,7 @@ process.env.TEMPLATE_PATH = path.join(process.env.PUBLIC_PATH, "template");
 process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout");
 
 // REQUIRE CUSTOM DEPENDENCIES
-const {Api, ErrorResponse} = require('./src/Api');
+const {Api, ErrorResponse, apiMiddleware, getTranslation} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
 
@@ -51,26 +51,62 @@ if (NODE_ENV === 'production') {
 }
 
 /**
- * Gets the first accepted language
- * @param {string} remote_lang Language
- * @return {Object}
+ * Gets the first accepted language from Accept-Language header
+ * Parses format: en-US,en;q=0.9,de-DE;q=0.8,de;q=0.7
+ * @param {string} remote_lang Language header value
+ * @return {string} Matched language code
  * @public
  */
 function acceptedLanguage(remote_lang){
-    remote_lang = remote_lang.toLowerCase();
-    const _default = ALLOWED_LANGUAGES.find(allowed => SUPPORTED_LANGUAGES.find(available => available.toLowerCase() == allowed.toLowerCase()));
-    try{
-        remote_lang = remote_lang.split(',').map(s => s.substr(0, 2));
-        for(let i = 0; i < remote_lang.length; i++){
-            const lang = ALLOWED_LANGUAGES.find(e => e.substr(0, 2).toLowerCase() == remote_lang[i]);
-            if(lang != undefined)
-                return lang;
-        }
-        pushLog(`Remotes accepted language is not allowed or not supported.`, 'Remote', 'request');
-    }catch(error) {
-        pushLog(`Cannot understand remotes accepted language.`, 'Remote', 'request');
+    // Get default language (first allowed language that exists in supported languages)
+    const _default = ALLOWED_LANGUAGES.find(allowed =>
+        SUPPORTED_LANGUAGES.find(available => available.toLowerCase() === allowed.toLowerCase())
+    );
+
+    if(!remote_lang || typeof remote_lang !== 'string') {
+        return _default;
     }
-    pushLog(`Setting ${_default} as language.`, 'Remote', 'request');
+
+    try {
+        // Parse Accept-Language header: "en-US,en;q=0.9,de-DE;q=0.8,de;q=0.7"
+        const languages = remote_lang.toLowerCase()
+            .split(',')
+            .map(lang => {
+                const parts = lang.trim().split(';');
+                const code = parts[0].trim();
+                const quality = parts[1] ? parseFloat(parts[1].replace('q=', '')) : 1.0;
+                return { code, quality };
+            })
+            .sort((a, b) => b.quality - a.quality); // Sort by quality value (highest first)
+
+        // Try exact match first (e.g., "en-US" matches "en-US")
+        for(const lang of languages) {
+            const exactMatch = ALLOWED_LANGUAGES.find(allowed =>
+                allowed.toLowerCase() === lang.code
+            );
+            if(exactMatch) {
+                pushLog(`Matched exact language: ${exactMatch}`, 'Remote', 'request');
+                return exactMatch;
+            }
+        }
+
+        // Try language family match (e.g., "en-GB" matches "en-US" if "en-GB" not available)
+        for(const lang of languages) {
+            const langPrefix = lang.code.split('-')[0]; // Get "en" from "en-US"
+            const familyMatch = ALLOWED_LANGUAGES.find(allowed =>
+                allowed.toLowerCase().startsWith(langPrefix + '-')
+            );
+            if(familyMatch) {
+                pushLog(`Matched language family: ${familyMatch} for ${lang.code}`, 'Remote', 'request');
+                return familyMatch;
+            }
+        }
+
+        pushLog(`No matching language found in Accept-Language header. Using default: ${_default}`, 'Remote', 'request');
+    } catch(error) {
+        pushLog(`Error parsing Accept-Language header: ${error.message}. Using default: ${_default}`, 'Remote', 'request');
+    }
+
     return _default;
 }
 
@@ -90,7 +126,8 @@ const corsOptions = {
             return callback(null, true);
         }
         else {
-            return callback(new ErrorResponse(`Blocked by CORS policy: ${origin}`, 403), false);
+            const message = getTranslation("cors_blocked", {origin});
+            return callback(new ErrorResponse(message, 403), false);
         }
     },
     'preflightContinue': false
@@ -163,12 +200,18 @@ app.use(async function(req, res, next){
 ///////////// EJS RENDER /////////////
 
 app.use(ejsMiddleware({
-    'template_path': process.env.TEMPLATE_LAYOUT_PATH, 
-    'dictionary_path': process.env.STRINGS_PATH, 
+    'template_path': process.env.TEMPLATE_LAYOUT_PATH,
+    'dictionary_path': process.env.STRINGS_PATH,
     'default_language': "root"
 }));
 
 ///////////// EJS RENDER /////////////
+
+///////////// API MIDDLEWARE /////////////
+
+app.use(apiMiddleware());
+
+///////////// API MIDDLEWARE /////////////
 
 
 /////////////// ROUTER ///////////////
@@ -225,9 +268,14 @@ app.all('*', (req, res)=>{
 // DEFAULT ERROR HANDLER
 app.use((error, req, res, next) => {
     const status = error.status_code || 500;
-    console.log(error instanceof ErrorResponse);
-    
-    const message = Object.getPrototypeOf(error).constructor === Error && NODE_ENV === "production" ? "Something went wrong" : (error.message || error.toString());
+
+    let message;
+    if (error instanceof ErrorResponse) {
+        message = error.message;
+    } else {
+        message = Object.getPrototypeOf(error).constructor === Error && NODE_ENV === "production" ? "Something went wrong" : (error.message || error.toString());
+    }
+
     pushLog(message, status);
     res.status(status).json(Api.errorResponseBody(status, null, message));
 });

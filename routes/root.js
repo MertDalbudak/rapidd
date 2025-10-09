@@ -85,8 +85,8 @@ router.get('/activateUser', Api.asyncHandler(async (req, res, next) => {
         catch(error){
             const qb_error = QueryBuilder.errorHandler(error);
             status_code = error.status_code || qb_error.status_code;
-            response = Api.errorResponseBody(status_code, error?.code, qb_error.message);
-            res.status(status_code).send(response);  
+            response = Api.errorResponseBody(status_code, qb_error.message, error?.code);
+            res.status(status_code).send(response);
         }
     }
     else{
@@ -104,7 +104,7 @@ router.post('/requestResetPassword', async function(req, res) {
             response = {'status': status_code, 'message': "Password reset email sent"};
         }
         else{
-            throw new ErrorResponse(`'email' in body is not type of 'string'. '${typeof payload.email}' given.`, 400);
+            throw new ErrorResponse("email_not_string", 400, {type: typeof payload.email});
         }
     }
     catch(error){
@@ -141,19 +141,19 @@ router.post('/resetPassword', async function(req, res, next) {
                         response = {'status': status_code, 'message': "Password has been changed successfully"};
                     }
                     else{
-                        throw new ErrorResponse("Password couldn't be changed", 400);
+                        throw new ErrorResponse("password_change_failed", 400);
                     }
                 }
                 else{
-                    throw new ErrorResponse("Token is invalid", 400);
+                    throw new ErrorResponse("token_invalid", 400);
                 }
             }
             else{
-                throw new ErrorResponse(`password in body is not type of 'string'. '${typeof payload.password}' given.`, 400);
+                throw new ErrorResponse("password_not_string", 400, {type: typeof payload.password});
             }
         }
         else{
-            throw new ErrorResponse(`token in body is not type of 'string'. '${typeof payload.token}' given.`, 400);
+            throw new ErrorResponse("token_not_string", 400, {type: typeof payload.token});
         }
     }
     catch(error){

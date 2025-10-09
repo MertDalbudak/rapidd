@@ -2,8 +2,13 @@ const router = require('express').Router();
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const {User, prisma} = require('../../../src/Model/User');
-const {RateLimiter, ErrorResponse} = require('../../../src/Api');
+const {rateLimitMiddleware} = require('../../../src/Api');
 const pushLog = require('../../../lib/pushLog');
+
+// Apply rate limiting in production BEFORE authentication to protect database
+if(process.env.NODE_ENV == "production"){
+    router.use(rateLimitMiddleware());
+}
 
 router.all('*', async function(req, res, next) {
     const auth = req.headers.authorization ? Buffer.from(req.headers.authorization.split(' ')[1], 'base64').toString('utf8') : null;
@@ -11,28 +16,15 @@ router.all('*', async function(req, res, next) {
     req.user = null;
     if(req.headers['x-session-token'] != undefined){
         req.session = await prisma.session.findFirst({
-            'where': {
-                'token': req.headers['x-session-token']
-            }
+            'where': {'token': req.headers['x-session-token']},
+            'include': {'user': true}
         });
         if(req.session != null){
-            req.user = await prisma.user.findUnique({
-                'where': {
-                    'id': req.session.user_id
-                }
-            });
+            req.user = req.session.user;
         }
     }
     next();
 });
-
-// Usage of custom limiter
-if(process.env.NODE_ENV == "production"){
-    const rateLimiter = new RateLimiter();
-    const apiRateLimiter = rateLimiter.createLimiter();
-
-    router.use(apiRateLimiter);
-}
 
 router.get('/', async (req, res) =>{
     res.ejsRender('home.ejs', {}).then(file => {
@@ -46,7 +38,7 @@ router.get('/', async (req, res) =>{
 
 router.post('/login', async (req, res)=>{
     let response, status_code = 200;
-    
+
     createSession: try{
         let user = await prisma.user.findUnique({
             where:{
@@ -59,14 +51,13 @@ router.post('/login', async (req, res)=>{
             }
         });
         if(user){
-            if(user.status != "active"){
-                status_code = 403;
-                if(user.status == "inactive"){
-                    throw new ErrorResponse("Your account has been suspended", 403);
-                }
-                if(user.status == "invited"){
-                    throw new ErrorResponse("Email address hasn't been verified yet", 403);
-                }
+            if(user.status == "inactive"){
+                const message = req.getTranslation("account_suspended");
+                return res.sendError(403, message);
+            }
+            if(user.status == "invited"){
+                const message = req.getTranslation("email_not_verified");
+                return res.sendError(403, message);
             }
             if(await bcrypt.compare(req.body.password, user?.hash)){
                 const token = jwt.sign({ 'user_id': user.id, 'timestamp': new Date().getTime() }, process.env.SESSION_SECRET, { expiresIn: '24h' });
@@ -134,8 +125,8 @@ router.post('/resendActivation', async (req, res)=>{
             }
         }
         else{
-            status_code = 404;
-            throw new ErrorResponse("User not found", 404);
+            const message = req.getTranslation("user_not_found");
+            return res.sendError(404, message);
         }
     }
     catch(error){
@@ -150,8 +141,8 @@ router.post('/logout', async (req, res)=>{
     let response, status_code = 200;
     try{
         if(req.session == null){
-            status_code = 400;
-            throw new ErrorResponse('No active session', 401);
+            const message = req.getTranslation("no_active_session");
+            return res.sendError(401, message);
         }
         await prisma.session.delete({
             'where': {

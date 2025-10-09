@@ -1,5 +1,9 @@
 const path = require('path');
 const Redis = require('ioredis');
+const { LanguageDict } = require('../lib/LanguageDict');
+
+// Initialize LanguageDict once at module load
+LanguageDict.initialize(process.env.STRINGS_PATH, "en-US");
 
 const configPath = "./config/rate-limit.json";
 const redisMaxTimout = 1000 * 10; // 10 seconds
@@ -30,7 +34,7 @@ class Api {
      * @param {string} error_message
      * @returns {{'status_code': number, 'error': number, 'message': string}}
      */
-    static errorResponseBody = (status_code, code, error_message) => {
+    static errorResponseBody = (status_code, error_message, code) => {
         return {
             status_code: status_code,
             ...(code != null ? { error_code: code } : {}),
@@ -47,7 +51,7 @@ class Api {
         if(user.role == "application" || required_roles.includes(user.role)){
             return true;
         }
-        throw new ErrorResponse("Insufficient permissions", 403);
+        throw new ErrorResponse("insufficient_permissions", 403);
         
     };
 
@@ -189,7 +193,7 @@ class RateLimiter {
                 this.setRateLimitHeaders(res, pathConfig.maxRequests || maxRequests, result.count, result.resetTime);
 
                 if (!result.allowed) {
-                    throw new ErrorResponse("Rate limit exceeded", 429);
+                    throw new ErrorResponse("rate_limit_exceeded", 429);
                 }
 
                 next();
@@ -207,7 +211,7 @@ class RateLimiter {
                     this.setRateLimitHeaders(res, effectiveMaxRequests, fallbackResult.count, fallbackResult.resetTime);
 
                     if (!fallbackResult.allowed) {
-                        throw new ErrorResponse("Rate limit exceeded", 429);
+                        throw new ErrorResponse("rate_limit_exceeded", 429);
                     }
 
                     return next();
@@ -362,7 +366,7 @@ class RateLimiter {
                 this.setRateLimitHeaders(res, maxRequests, count, resetTime);
 
                 if (!allowed) {
-                    throw new ErrorResponse("Rate limit exceeded", 429);
+                    throw new ErrorResponse("rate_limit_exceeded", 429);
                 }
 
                 next();
@@ -386,8 +390,11 @@ class RateLimiter {
 
 class ErrorResponse extends Error {
     /**
-     * @param {string} message
-     * @param {number} status_code
+     * @param {string} message - Error message
+     * @param {number} status_code - HTTP status code
+     *
+     * @example
+     * new ErrorResponse("Record not found", 404)
      */
     constructor(message, status_code = 500) {
         super(message);
@@ -401,4 +408,124 @@ class ErrorResponse extends Error {
     }
 }
 
-module.exports = { Api, RateLimiter, ErrorResponse };
+/**
+ * Middleware to attach Api utilities to req/res objects
+ * This eliminates the need to import Api in every route file
+ *
+ * Usage in main.js:
+ *   const { apiMiddleware } = require('./src/Api');
+ *   app.use(apiMiddleware());
+ *
+ * Then in route files:
+ *   res.sendList(data, meta);
+ *   res.sendError(statusCode, code, message);
+ *   throw new req.ErrorResponse("error_code", 400);
+ *
+ * @param {Object} options - Configuration options
+ * @param {boolean} options.attachToRequest - Attach utilities to req object (default: true)
+ * @param {boolean} options.attachToResponse - Attach utilities to res object (default: true)
+ * @returns {Function} Express middleware
+ */
+function apiMiddleware(options = {}) {
+    const {
+        attachToRequest = true,
+        attachToResponse = true
+    } = options;
+
+    return (req, res, next) => {
+        // Attach to request object for throwing errors easily
+        if (attachToRequest) {
+            req.Api = Api;
+            req.getTranslation = (...args) => LanguageDict.get(args[0], args[1] || null, args[2] || (req.language || "en-US"));
+        }
+
+        // Attach to response object for sending formatted responses
+        if (attachToResponse) {
+            /**
+             * 
+             * @param {*} status_code 
+             * @param {*} message 
+             * @returns 
+             */
+            res.sendResponse = (status_code, message) => res.status(status_code).json({'status_code': status_code, 'message': message});
+            
+            
+            res.ErrorResponse = ErrorResponse;
+            /**
+             * Send a list response with pagination metadata
+             * @param {Object[]} data - Array of data items
+             * @param {{take: number, skip: number, total: number}} meta - Pagination metadata
+             */
+            res.sendList = function(data, meta) {
+                return res.json(Api.getListResponseBody(data, meta));
+            };
+
+            /**
+             * Send an error response
+             * @param {number} status_code - HTTP status code
+             * @param {number} code - Error code
+             * @param {string} message - Error message
+             */
+            res.sendError = (status_code, message, code) => {
+                console.error(`Error ${status_code}: ${message} (code: ${code})`);
+                return res.status(status_code).json(Api.errorResponseBody(status_code, message, code));
+            }
+        }
+
+        next();
+    };
+}
+
+/**
+ * Global rate limiter instance (singleton)
+ * Initialized lazily on first access
+ */
+let globalRateLimiter = null;
+
+/**
+ * Get or create the global RateLimiter instance
+ * @param {Object} redisConfig - Optional Redis configuration
+ * @returns {RateLimiter}
+ */
+function getRateLimiter(redisConfig = {}) {
+    if (!globalRateLimiter) {
+        globalRateLimiter = new RateLimiter(redisConfig);
+    }
+    return globalRateLimiter;
+}
+
+/**
+ * Convenience middleware for applying rate limiting
+ * Uses a singleton RateLimiter instance for efficiency
+ *
+ * Usage:
+ *   const { rateLimitMiddleware } = require('./src/Api');
+ *   router.use(rateLimitMiddleware()); // Use defaults
+ *   router.use(rateLimitMiddleware({ windowMs: 60000, maxRequests: 100 }));
+ *
+ * @param {Object} options - Rate limit options
+ * @param {number} options.windowMs - Time window in milliseconds
+ * @param {number} options.maxRequests - Maximum requests per window
+ * @param {Object} options.redisConfig - Redis configuration
+ * @returns {Function} Express middleware
+ */
+function rateLimitMiddleware(options = {}) {
+    const { windowMs, maxRequests, redisConfig } = options;
+    const limiter = getRateLimiter(redisConfig);
+    return limiter.createLimiter(windowMs, maxRequests);
+}
+
+
+function getTranslation(key, data = null, language = "en-US") {
+    return LanguageDict.get(key, data, language);
+}
+
+module.exports = {
+    Api,
+    RateLimiter,
+    ErrorResponse,
+    apiMiddleware,
+    rateLimitMiddleware,
+    getRateLimiter,
+    getTranslation
+};

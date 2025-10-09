@@ -1,5 +1,5 @@
 const { QueryBuilder, prisma } = require("./QueryBuilder");
-const {ErrorResponse} = require('./Api');
+const {ErrorResponse, getTranslation} = require('./Api');
 
 class Model {
     /**
@@ -37,7 +37,8 @@ class Model {
         sortBy = sortBy.trim();
         sortOrder = sortOrder.trim();
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
-            throw new ErrorResponse(`Parameter sortBy '${sortBy}' is not a valid field of ${this.constructor.name}`, 400);
+            const message = getTranslation("invalid_sort_field", {sortBy, modelName: this.constructor.name});
+            throw new ErrorResponse(message, 400);
         }
 
         // Query the database using Prisma with filters, pagination, and limits
@@ -58,37 +59,40 @@ class Model {
      */
     _get = async (id, include, options = {}) =>{
         const {omit, ..._options} = options;
-        id = Number(id)
+        id = Number(id);
         // To determine if the record is inaccessible, either due to non-existence or insufficient permissions, two simultaneous queries are performed.
         const _response = this.prisma.findUnique({
             'where': {
-                'id': id,
-                ...this.getAccessFilter()
+                'id': id
             },
             'include': this.include(include),
             'omit': {...this._omit(), ...omit},
             ..._options
         });
-
-        const _checkExistence = this.prisma.findUnique({
+        
+        const _checkPermission = this.prisma.findUnique({
             'where': {
-                'id': id
+                'id': id,
+                ...this.getAccessFilter()
             },
             'select': {
                 'id': true
             }
         });
 
-        const [response, checkExistence] = await Promise.all([_response, _checkExistence]);
-
-        if(response == null){
-            if(checkExistence == null){
-                throw new ErrorResponse("Record not found", 404);
+        const [response, checkPermission] = await Promise.all([_response, _checkPermission]);
+        if(response){
+            if(checkPermission){
+                if(response.id != checkExistence?.id){   // IN CASE access_filter CONTAINS id FIELD
+                    throw new ErrorResponse(getTranslation("no_permission"), 403);
+                }
             }
-            throw new ErrorResponse("No permission", 403);
+            else{
+                throw new ErrorResponse(getTranslation("no_permission"), 403);
+            }
         }
-        if(response.id != checkExistence?.id){   // IN CASE access_filter CONTAINS id FIELD
-            throw new ErrorResponse("No permission", 403);
+        else{
+            throw new ErrorResponse(getTranslation("record_not_found"), 404);
         }
         return response;
     }
