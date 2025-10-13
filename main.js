@@ -25,9 +25,11 @@ process.env.TEMPLATE_PATH = path.join(process.env.PUBLIC_PATH, "template");
 process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout");
 
 // REQUIRE CUSTOM DEPENDENCIES
-const {Api, ErrorResponse, apiMiddleware, getTranslation} = require('./src/Api');
+const {Api, ErrorResponse, apiMiddleware} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
+const { authenticateUser } = require('./middleware/auth');
+const { setRLSContext } = require('./middleware/rls');
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
 const SUPPORTED_LANGUAGES = fs.readdirSync(process.env.STRINGS_PATH).map(e => path.parse(e).name);
@@ -126,8 +128,7 @@ const corsOptions = {
             return callback(null, true);
         }
         else {
-            const message = getTranslation("cors_blocked", {origin});
-            return callback(new ErrorResponse(message, 403), false);
+            return callback(new ErrorResponse(403, "cors_blocked", {origin}), false);
         }
     },
     'preflightContinue': false
@@ -236,6 +237,9 @@ app.post('/lang/:lang', function(req, res){
     }
 });
 
+app.use(authenticateUser);
+app.use(setRLSContext);
+
 // LOAD ALL ROUTERS IN /routes
 function init_router_directory(route_path){
     const relative_path = '/' + path.relative(process.env.ROUTES_PATH, route_path).replace('\\', '/');
@@ -243,10 +247,11 @@ function init_router_directory(route_path){
     const dir_content = fs.readdirSync(route_path, {withFileTypes: true}).sort((a, b)=> (a.name == 'root.js' ? -2 : a.isDirectory() ? 0 : -1) - (b.name == 'root.js' ? -2 : b.isDirectory() ? 0 : -1))
     dir_content.forEach(function(file) {
         if(!file.isDirectory()){
-            const route = file.name == "root.js" ? relative_path : `${relative_path.length > 1 ? relative_path : ''}/${path.parse(file.name).name}`;
-            
-            app.use(route, require(path.join(route_path, file.name)));
-            console.log(relative_path + '/' + file.name);
+            if(path.parse(file.name).ext == ".js"){
+                const route = file.name == "root.js" ? relative_path : `${relative_path.length > 1 ? relative_path : ''}/${path.parse(file.name).name}`;             
+                app.use(route, require(path.join(route_path, file.name)));
+                console.log(relative_path + '/' + file.name);
+            }
         }
         else{
             init_router_directory(path.join(route_path, file.name));
@@ -268,16 +273,17 @@ app.all('*', (req, res)=>{
 // DEFAULT ERROR HANDLER
 app.use((error, req, res, next) => {
     const status = error.status_code || 500;
-
+    console.error(error);
+    
     let message;
     if (error instanceof ErrorResponse) {
-        message = error.message;
+        return res.status(status).json(error.toJSON(req.language));
     } else {
         message = Object.getPrototypeOf(error).constructor === Error && NODE_ENV === "production" ? "Something went wrong" : (error.message || error.toString());
     }
 
     pushLog(message, status);
-    res.status(status).json(Api.errorResponseBody(status, null, message));
+    return res.status(status).json(Api.errorResponseBody(status, message));
 });
 
 /////////////// ROUTER ///////////////

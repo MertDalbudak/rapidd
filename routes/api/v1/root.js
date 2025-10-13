@@ -1,165 +1,105 @@
-const router = require('express').Router();
-const jwt = require('jsonwebtoken');
-const bcrypt = require('bcrypt');
-const {User, prisma} = require('../../../src/Model/User');
+const express = require('express');
+const {
+    authenticateUser,
+    register,
+    login,
+    logout,
+    refreshToken,
+    getCurrentUser,
+    googleAuth,
+    facebookAuth,
+    requireAuth,
+} = require('../../../middleware/auth');
+
+const router = express.Router();
 const {rateLimitMiddleware} = require('../../../src/Api');
-const pushLog = require('../../../lib/pushLog');
 
 // Apply rate limiting in production BEFORE authentication to protect database
 if(process.env.NODE_ENV == "production"){
     router.use(rateLimitMiddleware());
 }
 
-router.all('*', async function(req, res, next) {
-    const auth = req.headers.authorization ? Buffer.from(req.headers.authorization.split(' ')[1], 'base64').toString('utf8') : null;
-    req.session = null;
-    req.user = null;
-    if(req.headers['x-session-token'] != undefined){
-        req.session = await prisma.session.findFirst({
-            'where': {'token': req.headers['x-session-token']},
-            'include': {'user': true}
-        });
-        if(req.session != null){
-            req.user = req.session.user;
-        }
-    }
-    next();
-});
+router.all('*', authenticateUser);
 
-router.get('/', async (req, res) =>{
-    res.ejsRender('home.ejs', {}).then(file => {
-        res.clearCookie('msgs');
-        res.send(file);
-    }).catch(error => {
-        pushLog(error, "rendering home");
-        res.sendStatus(500).end();
-    });
-});
+/**
+ * POST /auth/register
+ * Register neuer User (Student oder Company)
+ * 
+ * Body:
+ * {
+ *   "email": "user@example.com",
+ *   "password": "securePassword123",
+ *   "role": "STUDENT" | "COMPANY",
+ *   "firstName": "John",      // für STUDENT
+ *   "lastName": "Doe",         // für STUDENT
+ *   "companyName": "Acme Inc"  // für COMPANY
+ * }
+ */
+router.post('/register', register);
 
-router.post('/login', async (req, res)=>{
-    let response, status_code = 200;
+/**
+ * POST /auth/login
+ * Login mit Email und Passwort
+ * 
+ * Body:
+ * {
+ *   "email": "user@example.com",
+ *   "password": "securePassword123"
+ * }
+ */
+router.post('/login', login);
 
-    createSession: try{
-        let user = await prisma.user.findUnique({
-            where:{
-                'username': req.body.user
-            },
-            select: {
-                'id': true,
-                'status': true,
-                'hash': true
-            }
-        });
-        if(user){
-            if(user.status == "inactive"){
-                const message = req.getTranslation("account_suspended");
-                return res.sendError(403, message);
-            }
-            if(user.status == "invited"){
-                const message = req.getTranslation("email_not_verified");
-                return res.sendError(403, message);
-            }
-            if(await bcrypt.compare(req.body.password, user?.hash)){
-                const token = jwt.sign({ 'user_id': user.id, 'timestamp': new Date().getTime() }, process.env.SESSION_SECRET, { expiresIn: '24h' });
-                const expiration = Date.now() + parseInt(process.env.SESSION_MAX_AGE);
-                await prisma.session.create({
-                    'data':{
-                        'user_id': user.id,
-                        'token': token,
-                        'expires_at': new Date(expiration)
-                    }
-                });
-                response = {
-                    'status': "success",
-                    'session_token': token
-                }
-                break createSession;
-            }
-        }
-        status_code = 401;
-        response = {
-            'status': "failed",
-            'message': "Username or password is not valid"
-        }
-    }
-    catch(error){
-        console.error(error);
-        status_code = status_code != 200 ? status_code : 500;
-        response = {'status_code': status_code, 'message': error.toString()};
-    }
-    res.status(status_code).send(response);
-});
+/**
+ * POST /auth/logout
+ * Logout User und lösche Session
+ * 
+ * Body:
+ * {
+ *   "refreshToken": "..."
+ * }
+ */
+router.post('/logout', logout);
 
-// RESEND ACTIVATION
+/**
+ * POST /auth/refresh
+ * Refresh Access Token mit Refresh Token
+ * 
+ * Body:
+ * {
+ *   "refreshToken": "..."
+ * }
+ */
+router.post('/refresh', refreshToken);
 
-router.post('/resendActivation', async (req, res)=>{
-    let response, status_code = 200, payload = req.body;
-    try {
-        let user;
-        if(payload.user.includes('@')){
-            user = await prisma.user.findUnique({
-                'select': {'id': true},
-                'where': {
-                    'email': payload.user,
-                    'status': "invited"
-                }
-            });
-        }
-        else{
-            user = await prisma.user.findUnique({
-                'select': {'id': true},
-                'where': {
-                    'username': payload.user,
-                    'status': "invited"
-                }
-            });
-        }
-        if(user){
-            const user_id = user.id;
-            user = new User({'user_id': user.id});
-            await user.sendValidationMail(user_id, "activation");
+/**
+ * GET /auth/me
+ * Hole aktuellen eingeloggten User
+ * Requires: Authentication
+ */
+router.get('/me', requireAuth, getCurrentUser);
 
-            response = {
-                'status': "success",
-                'message': "Activation mail has been send"
-            }
-        }
-        else{
-            const message = req.getTranslation("user_not_found");
-            return res.sendError(404, message);
-        }
-    }
-    catch(error){
-        console.error(error);
-        status_code = status_code != 200 ? status_code : 500;
-        response = {'status_code': status_code, 'message': error.toString()};
-    }
-    res.status(status_code).send(response);
-});
+/**
+ * POST /auth/google
+ * Google SSO Login/Register
+ * 
+ * Body:
+ * {
+ *   "googleToken": "...",  // Google OAuth Token vom Frontend
+ *   "role": "STUDENT"      // Nur bei neuen Usern nötig
+ * }
+ */
+router.post('/google', googleAuth);
 
-router.post('/logout', async (req, res)=>{
-    let response, status_code = 200;
-    try{
-        if(req.session == null){
-            const message = req.getTranslation("no_active_session");
-            return res.sendError(401, message);
-        }
-        await prisma.session.delete({
-            'where': {
-                'token': req.session.token
-            }
-        });
-        response = {
-            'status': "success",
-            'message': "Session token has been terminated"
-        }
-    }
-    catch(error){
-        console.error(error);
-        status_code = status_code != 200 ? status_code : 500;
-        response = {'status_code': status_code, 'message': error.toString()};
-    }
-    res.status(status_code).send(response);
-});
+/**
+ * POST /auth/facebook
+ * Facebook SSO Login/Register
+ *
+ * Body:
+ * {
+ *   "facebookToken": "...",  // Facebook OAuth Token vom Frontend
+ *   "role": "STUDENT"         // Nur bei neuen Usern nötig
+ * }
+ */
+router.post('/facebook', facebookAuth);
 
 module.exports = router;

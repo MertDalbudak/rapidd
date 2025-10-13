@@ -104,7 +104,7 @@ router.post('/requestResetPassword', async function(req, res) {
             response = {'status': status_code, 'message': "Password reset email sent"};
         }
         else{
-            throw new ErrorResponse("email_not_string", 400, {type: typeof payload.email});
+            throw new ErrorResponse(400, "email_not_string", {type: typeof payload.email});
         }
     }
     catch(error){
@@ -141,19 +141,19 @@ router.post('/resetPassword', async function(req, res, next) {
                         response = {'status': status_code, 'message': "Password has been changed successfully"};
                     }
                     else{
-                        throw new ErrorResponse("password_change_failed", 400);
+                        throw new ErrorResponse(400, "password_change_failed");
                     }
                 }
                 else{
-                    throw new ErrorResponse("token_invalid", 400);
+                    throw new ErrorResponse(400, "token_invalid");
                 }
             }
             else{
-                throw new ErrorResponse("password_not_string", 400, {type: typeof payload.password});
+                throw new ErrorResponse(400, "password_not_string", {type: typeof payload.password});
             }
         }
         else{
-            throw new ErrorResponse("token_not_string", 400, {type: typeof payload.token});
+            throw new ErrorResponse(400, "token_not_string", {type: typeof payload.token});
         }
     }
     catch(error){

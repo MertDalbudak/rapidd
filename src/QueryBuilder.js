@@ -1,5 +1,5 @@
 const {prisma, Prisma, rls} = require('../rapidd/rapidd');
-const { ErrorResponse, getTranslation} = require('./Api');
+const { ErrorResponse } = require('./Api');
 const path = require('path');
 const fs = require('fs');
 
@@ -9,13 +9,10 @@ class QueryBuilder {
     /**
      * Initialize QueryBuilder with model name and configuration
      * @param {string} name - The model name
-     * @param {Object} model - Model configuration object
      */
-    constructor(name, model) {
-        this.name = name;
-        this.model = model;
+    constructor(name) {
+        this.name = name.toLowerCase();
         this.fields = prisma[this.name].fields;
-        this.inaccessible_fields = this.model.inaccessible_fields;
         this._relationshipsCache = null;
     }
 
@@ -108,7 +105,7 @@ class QueryBuilder {
                 const trimmedValue = value ? value.trim() : null;
 
                 if (relation.length === 0 && !this.fields[trimmedKey]) {
-                    throw new ErrorResponse(getTranslation("invalid_filter_field", {field: trimmedKey}), 400);
+                    throw new ErrorResponse(400, "invalid_filter_field", {field: trimmedKey});
                 }
 
                 let filter = acc;
@@ -117,8 +114,7 @@ class QueryBuilder {
                     if (Array.isArray(_acc)) {
                         rel = _acc.find(rel => rel.name === _curr);
                         if (!rel) {
-                            const error_message = getTranslation("relation_not_exist", {relation: _curr, modelName: Array.isArray(_acc) ? this.model.name : _acc.name});
-                            throw new ErrorResponse(error_message, 400);
+                            throw new ErrorResponse(400, "relation_not_exist", {relation: _curr, modelName: Array.isArray(_acc) ? this.name : _acc.name});
                         }
                     } else {
                         rel = _acc?.relation?.find(rel => rel.name === _curr);
@@ -191,7 +187,7 @@ class QueryBuilder {
                         const [start, end] = operatorValue.split(';').map(v => v.trim());
 
                         if (!start || !end) {
-                            throw new ErrorResponse(getTranslation("between_requires_two_values"), 400);
+                            throw new ErrorResponse(400, "between_requires_two_values");
                         }
 
                         // Check if values are pure numbers
@@ -214,7 +210,7 @@ class QueryBuilder {
                             const startDate = new Date(start);
                             const endDate = new Date(end);
                             if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-                                throw new ErrorResponse(getTranslation("invalid_date_range", {start, end}), 400);
+                                throw new ErrorResponse(400, "invalid_date_range", {start, end});
                             }
                             // Add NOT condition with AND logic (exclude range)
                             filter.NOT = (filter.NOT || []).concat([{
@@ -402,7 +398,7 @@ class QueryBuilder {
                 case 'between:':
                     const [startDate, endDate] = operatorValue.split(';').map(d => d.trim());
                     if (!startDate || !endDate) {
-                        throw new ErrorResponse(getTranslation("between_requires_two_values"), 400);
+                        throw new ErrorResponse(400, "between_requires_two_values");
                     }
 
                     // If both values look like pure numbers (not dates), let the number filter handle it
@@ -415,7 +411,7 @@ class QueryBuilder {
                     const startDateObj = new Date(startDate);
                     const endDateObj = new Date(endDate);
                     if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
-                        throw new ErrorResponse(getTranslation(`Invalid date in between range: ${startDate} or ${endDate}`), 400);
+                        throw new ErrorResponse(400, "invalid_date_range", {start: startDate, end: endDate});
                     }
                     return {
                         gte: startDateObj,
@@ -425,7 +421,7 @@ class QueryBuilder {
                     return null;
             }
         } catch (error) {
-            throw new ErrorResponse(getTranslation("invalid_date_format", {value, error: error.message}), 400);
+            throw new ErrorResponse(400, "invalid_date_format", {value, error: error.message});
         }
     }
 
@@ -795,7 +791,7 @@ class QueryBuilder {
      */
     take(limit) {
         if (!Number.isInteger(limit) || limit <= 0) {
-            throw new ErrorResponse(getTranslation("invalid_limit"), 400);
+            throw new ErrorResponse(400, "invalid_limit");
         }
         return limit > QueryBuilder.API_RESULT_LIMIT ? QueryBuilder.API_RESULT_LIMIT : limit;
     }
@@ -808,10 +804,10 @@ class QueryBuilder {
      */
     sort(sortBy, sortOrder) {
         if (typeof sortBy !== 'string') {
-            throw new ErrorResponse(getTranslation("sortby_must_be_string", {type: typeof sortBy}), 400);
+            throw new ErrorResponse(400, "sortby_must_be_string", {type: typeof sortBy});
         }
         if (typeof sortOrder !== 'string' || (sortOrder != 'desc' && sortOrder != 'asc')) {
-            throw new ErrorResponse(getTranslation("sortorder_invalid", {value: sortOrder}), 400, );
+            throw new ErrorResponse(400, "sortorder_invalid", {value: sortOrder});
         }
         const relation_chain = sortBy.split('.').map(e => e.trim());
         const field_name = relation_chain.pop();
@@ -838,7 +834,7 @@ class QueryBuilder {
             if (this.fields[key] == null) {
                 const relatedObject = this.relatedObjects.find(e => e.name === key);
                 if (relatedObject == null) {
-                    throw new ErrorResponse(getTranslation("unexpected_key", {key}), 400);
+                    throw new ErrorResponse(400, "unexpected_key", {key});
                 } else {
                     if (data[key]) {
                         if (Array.isArray(data[key])) {
@@ -847,7 +843,7 @@ class QueryBuilder {
                                 let relation = false;
                                 for (let _key in data[key][i]) {
                                     if (prisma[relatedObject.object].fields[_key] == null) {
-                                        throw new ErrorResponse(getTranslation("unexpected_key", {key: `${key}.${_key}`}), 400);
+                                        throw new ErrorResponse(400, "unexpected_key", {key: `${key}.${_key}`});
                                     }
                                     if (relatedObject.fields && relatedObject.fields.includes(_key)) {
                                         const sub_data_clone = { ...data[key][i] };
@@ -861,21 +857,13 @@ class QueryBuilder {
                                                         [relPrimaryKey]: data[key][i][_key]
                                                     }
                                                 },
-                                                ...sub_data_clone,
-                                                'createdBy': {
-                                                    'connect': {
-                                                        'id': user_id
-                                                    }
-                                                }
+                                                ...sub_data_clone
                                             };
                                             relation = true;
                                         } else {
                                             delete data[key][i][_key];
                                         }
                                     }
-                                }
-                                if (!relation && data[key][i].id == null) {
-                                    data[key][i].created_by = user_id;
                                 }
                             }
 
@@ -890,7 +878,7 @@ class QueryBuilder {
 
                             for (let _key in data[key]) {
                                 if (prisma[relatedObject.object].fields[_key] == null) {
-                                    throw new ErrorResponse(getTranslation("unexpected_key", {key: `${key}.${_key}`}), 400);
+                                    throw new ErrorResponse(400, "unexpected_key", {key: `${key}.${_key}`});
                                 }
                                 const child_relation = relatedObject?.relation?.find(e => e.field === _key);
                                 if (child_relation) {
@@ -907,8 +895,7 @@ class QueryBuilder {
                             }
                             data[key] = {
                                 'create': {
-                                    ...data[key],
-                                    'createdBy': { 'connect': { 'id': user_id } }
+                                    ...data[key]
                                 }
                             };
                         }
@@ -928,7 +915,6 @@ class QueryBuilder {
                 }
             }
         }
-        data.createdBy = { 'connect': { 'id': user_id } };
     }
 
     /**
@@ -944,7 +930,7 @@ class QueryBuilder {
             if (this.fields[key] == null) {
                 const relatedObject = this.relatedObjects.find(e => e.name === key);
                 if (relatedObject == null) {
-                    throw new ErrorResponse(getTranslation("unexpected_key", {key}), 400);
+                    throw new ErrorResponse(400, "unexpected_key", {key});
                 } else {
                     if (data[key]) {
                         if (Array.isArray(data[key])) {
@@ -970,11 +956,6 @@ class QueryBuilder {
                 }
             }
         }
-        
-        // Only add updatedBy if we still have data to update
-        if (Object.keys(data).length > 0) {
-            data.updatedBy = { 'connect': { 'id': user_id } };
-        }
     }
     
     /**
@@ -992,7 +973,7 @@ class QueryBuilder {
             // Validate all fields
             for (let _key in dataArray[i]) {
                 if (prisma[relatedObject.object].fields[_key] == null) {
-                    throw new ErrorResponse(getTranslation("unexpected_key", {key: `${relatedObject.name}.${_key}`}), 400);
+                    throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
                 }
             }
             
@@ -1011,7 +992,7 @@ class QueryBuilder {
                     'where': {
                         [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
                     },
-                    'data': { ...e, 'updated_by': user_id }
+                    'data': { ...e }
                 };
             }),
             'upsert': dataArray.filter(e => e.id == null).map(e => {
@@ -1030,8 +1011,8 @@ class QueryBuilder {
                 }
                 return {
                     'where': where,
-                    'create': { ...e, 'created_by': user_id },
-                    'update': { ...e, 'updated_by': user_id }
+                    'create': { ...e },
+                    'update': { ...e }
                 };
             })
         };
@@ -1048,7 +1029,7 @@ class QueryBuilder {
         // Validate all fields first
         for (let _key in dataObj) {
             if (prisma[relatedObject.object].fields[_key] == null) {
-                throw new ErrorResponse(getTranslation("unexpected_key", {key: `${relatedObject.name}.${_key}`}), 400);
+                throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
             }
         }
     
@@ -1102,15 +1083,13 @@ class QueryBuilder {
         
         if (hasCreateContent) {
             upsertObj.create = {
-                ...createData,
-                'createdBy': { 'connect': { 'id': user_id } }
+                ...createData
             };
         }
-        
+
         if (hasUpdateContent) {
             upsertObj.update = {
-                ...updateData,
-                'updatedBy': { 'connect': { 'id': user_id } }
+                ...updateData
             };
         }
     

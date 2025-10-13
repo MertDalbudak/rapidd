@@ -29,17 +29,13 @@ class Api {
     };
 
     /**
-     * @param {number} status_code
-     * @param {number} code
+     * 
+     * @param {number} status_code 
      * @param {string} error_message
-     * @returns {{'status_code': number, 'error': number, 'message': string}}
+     * @returns 
      */
-    static errorResponseBody = (status_code, error_message, code) => {
-        return {
-            status_code: status_code,
-            ...(code != null ? { error_code: code } : {}),
-            message: error_message?.message || error_message,
-        };
+    static errorResponseBody = (status_code, error_message) => {
+        return (new ErrorBasicResponse(error_message, status_code)).toJSON();
     };
 
     /**
@@ -51,8 +47,8 @@ class Api {
         if(user.role == "application" || required_roles.includes(user.role)){
             return true;
         }
-        throw new ErrorResponse("insufficient_permissions", 403);
-        
+        throw new ErrorResponse(403, "insufficient_permissions");
+
     };
 
     /**
@@ -193,7 +189,7 @@ class RateLimiter {
                 this.setRateLimitHeaders(res, pathConfig.maxRequests || maxRequests, result.count, result.resetTime);
 
                 if (!result.allowed) {
-                    throw new ErrorResponse("rate_limit_exceeded", 429);
+                    throw new ErrorResponse(429, "rate_limit_exceeded");
                 }
 
                 next();
@@ -211,7 +207,7 @@ class RateLimiter {
                     this.setRateLimitHeaders(res, effectiveMaxRequests, fallbackResult.count, fallbackResult.resetTime);
 
                     if (!fallbackResult.allowed) {
-                        throw new ErrorResponse("rate_limit_exceeded", 429);
+                        throw new ErrorResponse(429, "rate_limit_exceeded");
                     }
 
                     return next();
@@ -366,7 +362,7 @@ class RateLimiter {
                 this.setRateLimitHeaders(res, maxRequests, count, resetTime);
 
                 if (!allowed) {
-                    throw new ErrorResponse("rate_limit_exceeded", 429);
+                    throw new ErrorResponse(429, "rate_limit_exceeded");
                 }
 
                 next();
@@ -388,13 +384,13 @@ class RateLimiter {
     }
 }
 
-class ErrorResponse extends Error {
+class ErrorBasicResponse extends Error {
     /**
      * @param {string} message - Error message
      * @param {number} status_code - HTTP status code
      *
      * @example
-     * new ErrorResponse("Record not found", 404)
+     * new ErrorBasicResponse("Record not found", 404)
      */
     constructor(message, status_code = 500) {
         super(message);
@@ -404,6 +400,27 @@ class ErrorResponse extends Error {
         return {
             status_code: this.status_code,
             message: this.message,
+        };
+    }
+}
+
+class ErrorResponse extends ErrorBasicResponse {
+    /**
+     * 
+     * @param {number} status_code 
+     * @param {string} message 
+     * @param {object?} data 
+     * 
+     * @returns {status_code: number, message: string, data: object|null}
+     */
+    constructor(status_code, message, data = null) {
+        super(message, status_code);
+        this.data = data;
+    }
+    toJSON(language = "en-US") {
+        return {
+            status_code: this.status_code,
+            message: LanguageDict.get(this.message, this.data, language)
         };
     }
 }
@@ -418,7 +435,7 @@ class ErrorResponse extends Error {
  *
  * Then in route files:
  *   res.sendList(data, meta);
- *   res.sendError(statusCode, code, message);
+ *   res.sendError(statusCode, message);
  *   throw new req.ErrorResponse("error_code", 400);
  *
  * @param {Object} options - Configuration options
@@ -442,12 +459,16 @@ function apiMiddleware(options = {}) {
         // Attach to response object for sending formatted responses
         if (attachToResponse) {
             /**
-             * 
-             * @param {*} status_code 
-             * @param {*} message 
-             * @returns 
+             * Send a response with optional translation support
+             * @param {number} status_code - HTTP status code
+             * @param {string} message - Message or translation key
+             * @param {Object} params - Translation parameters (optional)
+             * @returns
              */
-            res.sendResponse = (status_code, message) => res.status(status_code).json({'status_code': status_code, 'message': message});
+            res.sendResponse = (status_code, message, params = null) => {
+                const translatedMessage = LanguageDict.get(message, params, req.language || "en-US");
+                return res.status(status_code).json({'status_code': status_code, 'message': translatedMessage});
+            };
             
             
             res.ErrorResponse = ErrorResponse;
@@ -461,17 +482,20 @@ function apiMiddleware(options = {}) {
             };
 
             /**
-             * Send an error response
+             * Send an error response with translation support
              * @param {number} status_code - HTTP status code
-             * @param {number} code - Error code
-             * @param {string} message - Error message
+             * @param {string} message - Error message or translation key
+             * @param {Object|number} paramsOrCode - Translation parameters or error code
+             * @param {number} code - Error code (if paramsOrCode is params object)
              */
-            res.sendError = (status_code, message, code) => {
-                console.error(`Error ${status_code}: ${message} (code: ${code})`);
-                return res.status(status_code).json(Api.errorResponseBody(status_code, message, code));
+            res.sendError = (status_code, message, data = null) => {
+                const language = req.language || "en-US";
+                const error = new ErrorResponse(status_code, message, data);
+                
+                console.error(`Error ${status_code}: ${message}`);
+                return res.status(status_code).json(error.toJSON(language));
             }
         }
-
         next();
     };
 }

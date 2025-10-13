@@ -66,7 +66,7 @@ Helper.getPageName = (page) =>{
     if(typeof page == "string"){
         return page.split('.')[0];
     }
-    throw new ErrorResponse("string_expected", 400, {type: typeof page});
+    throw new ErrorResponse(400, "string_expected", {type: typeof page});
 }
 
 Helper.addToClipboard = (content) => `<a href="javascript:addToClipboard('${content}')" class="addToClipboard" title="Copy to clipboard"></a>`;

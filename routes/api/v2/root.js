@@ -57,14 +57,4 @@ router.all('*', async function(req, res, next) {
     }
 });
 
-router.get('/', async (req, res) =>{
-    res.ejsRender('home.ejs', {}).then(file => {
-        res.clearCookie('msgs');
-        res.send(file);
-    }).catch(error => {
-        pushLog(error, "rendering home");
-        res.sendStatus(500).end();
-    });
-});
-
 module.exports = router;
