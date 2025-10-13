@@ -11,8 +11,9 @@ class QueryBuilder {
      * @param {string} name - The model name
      */
     constructor(name) {
-        this.name = name.toLowerCase();
-        this.fields = prisma[this.name].fields;
+        this.name = name;
+        this.prismaName = name.toLowerCase();
+        this.fields = prisma[this.prismaName].fields;
         this._relationshipsCache = null;
     }
 
@@ -494,8 +495,8 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply RLS access filter for this relation (only for list relations)
-        if (relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+        // Apply RLS access filter for this relation (for all relations, not just list relations)
+        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
             const accessFilter = rls.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
@@ -568,15 +569,15 @@ class QueryBuilder {
             }
         }
 
-        // Apply RLS access filter for this relation (only for list relations)
-        if (typeof content === 'object' && relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+        // Apply RLS access filter for this relation (for all relations, not just list relations)
+        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
             const accessFilter = rls.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
                 if (content === true) {
                     content = { where: simplifiedFilter };
-                } else {
+                } else if (typeof content === 'object') {
                     content.where = simplifiedFilter;
                 }
             }
@@ -609,8 +610,8 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply RLS access filter for this relation (only for list relations)
-        if (relation.object && rls.model[relation.object]?.getAccessFilter && this.#isListRelation(relation)) {
+        // Apply RLS access filter for this relation (for all relations, not just list relations)
+        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
             const accessFilter = rls.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
@@ -1156,37 +1157,6 @@ class QueryBuilder {
                 }
                 return true;
             });
-    }
-
-    /**
-     * Check if a relation is a list relation (one-to-many or many-to-many)
-     * @param {Object} relation - Relation configuration
-     * @returns {boolean} True if relation is a list relation
-     */
-    #isListRelation(relation) {
-        // Many-to-many relations have a fields array (composite keys for join tables)
-        if (Array.isArray(relation.fields)) {
-            return true;
-        }
-
-        // Check the actual Prisma schema to determine if it's a list relation
-        if (relation.object) {
-            try {
-                const model = Prisma.dmmf.datamodel.models.find(m => m.name === this.name.toLowerCase());
-                if (model) {
-                    const field = model.fields.find(f => f.name === relation.name);
-                    if (field) {
-                        // If the field has isList: true, it's a list relation
-                        return field.isList === true;
-                    }
-                }
-            } catch (error) {
-                console.error(`Error checking relation type for ${relation.name}:`, error);
-            }
-        }
-
-        // Fallback: relations without a field are likely list relations
-        return !relation.field;
     }
 
     /**

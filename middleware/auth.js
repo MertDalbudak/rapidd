@@ -4,6 +4,8 @@ const { PrismaClient } = require('../rapidd/rapidd');
 const { RestApi } = require('../lib/RestApi');
 const { ErrorResponse } = require('../src/Api');
 
+const SALT_ROUNDS = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;
+
 const authPrisma = new PrismaClient();
 
 // ============================================
@@ -13,8 +15,9 @@ const authPrisma = new PrismaClient();
 /**
  * Generate JWT Access Token
  */
-function generateAccessToken(user) {
+function generateAccessToken(user, sessionId = null) {
     return jwt.sign({
+        sessionId,
         userId: user.id,
         email: user.email,
         role: user.role
@@ -165,7 +168,7 @@ async function authenticateUser(req, res, next) {
         const authHeader = req.headers.authorization;
         
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        // Kein Token = kein User (OK für öffentliche Routes)
+            // Kein Token = kein User (OK für öffentliche Routes)
             return next();
         }
 
@@ -179,23 +182,33 @@ async function authenticateUser(req, res, next) {
         }
 
         // User aus DB laden (mit authPrisma, OHNE RLS!)
-        const user = await authPrisma.user.findUnique({
-            where: { id: decoded.userId },
+        const session = await authPrisma.session.findUnique({
+            where: { id: decoded.sessionId },
             select: {
-                id: true,
-                email: true,
-                role: true,
-            },
+                user: {
+                    select: {
+                        id: true,
+                        email: true,
+                        role: true,
+                        emailVerified: true,
+                        studentProfile: {
+                            select: { id: true, firstName: true, lastName: true }
+                        },
+                        companyProfile: {
+                            select: { id: true, companyName: true, isVerified: true }
+                        }
+                    }
+                }
+            }
         });
 
-        if (!user) {
+        if (!session) {
             return next(); // User existiert nicht mehr
         }
 
         // User an Request hängen
-        req.user = user;
+        req.user = session.user;
         
-        // Last Login updaten (async, ohne auf Ergebnis zu warten)
         next();
     } catch (error) {
         console.error('Auth Error:', error);
@@ -218,16 +231,16 @@ function requireAuth(req, res, next) {
  * Middleware: Route erfordert bestimmte Rolle(n)
  */
 function requireRole(...roles) {
-return (req, res, next) => {
-    if (!req.user) {
-        throw new ErrorResponse(401, 'auth_required_message');
-    }
+    return (req, res, next) => {
+        if (!req.user) {
+            throw new ErrorResponse(401, 'auth_required_message');
+        }
 
-    if (!roles.includes(req.user.role)) {
-        throw new ErrorResponse(403, 'forbidden_role_message', {roles: roles.join(', ')});
-    }
-    next();
-};
+        if (!roles.includes(req.user.role)) {
+            throw new ErrorResponse(403, 'forbidden_role_message', {roles: roles.join(', ')});
+        }
+        next();
+    };
 }
 
 /**
@@ -268,47 +281,46 @@ function requireVerifiedCompany(req, res, next) {
  * POST /auth/register - User registrieren
  */
 async function register(req, res) {
-    try {
-        const { email, password, role, firstName, lastName, companyName } = req.body;
+    const { email, password, role, firstName, lastName, companyName } = req.body;
 
-        // Validierung
-        if (!email || !password || !role) {
-            throw new ErrorResponse(400, 'required_fields', {fields: 'email, password, role'});
-        }
+    // Validierung
+    if (!email || !password || !role) {
+        throw new ErrorResponse(400, 'required_fields', {fields: 'email, password, role'});
+    }
 
-        if (!['STUDENT', 'COMPANY'].includes(role)) {
-            throw new ErrorResponse(400, 'invalid_role_message');
-        }
+    if (!['STUDENT', 'COMPANY'].includes(role)) {
+        throw new ErrorResponse(400, 'invalid_role_message');
+    }
 
-        // Check ob Email bereits existiert
-        const existingUser = await authPrisma.user.findUnique({
-            where: { email },
-        });
+    // Check ob Email bereits existiert
+    const existingUser = await authPrisma.user.findUnique({
+        where: { email },
+    });
 
-        if (existingUser) {
-            throw new ErrorResponse(409, 'email_already_registered_message');
-        }
+    if (existingUser) {
+        throw new ErrorResponse(409, 'email_already_registered_message');
+    }
 
-        // Passwort hashen
-        const hashedPassword = await bcrypt.hash(password, 10);
+    // Passwort hashen
+    const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
 
-        // User erstellen mit Profil
-        const user = await authPrisma.user.create({
+    // User erstellen mit Profil
+    const user = await authPrisma.user.create({
         data: {
             email,
             password: hashedPassword,
             role,
             authProvider: 'LOCAL',
-            createdBy: 'system', // Initial registration
+            createdBy: 'system', // System für initial registration
             updatedBy: 'system',
             // Student Profil
             ...(role === 'STUDENT' && {
                 studentProfile: {
                     create: {
-                    firstName: firstName || '',
-                    lastName: lastName || '',
-                    createdBy: 'system',
-                    updatedBy: 'system',
+                        firstName: firstName || '',
+                        lastName: lastName || '',
+                        createdBy: 'system',
+                        updatedBy: 'system',
                     },
                 },
             }),
@@ -316,9 +328,10 @@ async function register(req, res) {
             ...(role === 'COMPANY' && {
                 companyProfile: {
                     create: {
-                    companyName: companyName || '',
-                    createdBy: 'system',
-                    updatedBy: 'system',
+                        companyName: companyName || '',
+                        description: '',
+                        createdBy: 'system',
+                        updatedBy: 'system',
                     },
                 },
             }),
@@ -334,14 +347,34 @@ async function register(req, res) {
                 select: { id: true, companyName: true },
             },
         },
+    });
+
+    // Für COMPANY: Automatisch OWNER Member erstellen
+    if (role === 'COMPANY' && user.companyProfile) {
+        await authPrisma.companyMember.create({
+            data: {
+                companyId: user.companyProfile.id,
+                userId: user.id,
+                role: 'OWNER',
+                status: 'ACTIVE',
+                canEditCompany: true,
+                canManageJobs: true,
+                canViewApplications: true,
+                canManageApplications: true,
+                canManageMembers: true,
+                canManageSubscription: true,
+                createdBy: 'system',
+                updatedBy: 'system',
+            },
         });
+    }
 
-        // Tokens generieren
-        const accessToken = generateAccessToken(user);
-        const refreshToken = generateRefreshToken(user);
+    // Tokens generieren
+    const accessToken = generateAccessToken(user);
+    const refreshToken = generateRefreshToken(user);
 
-        // Session erstellen
-        await authPrisma.session.create({
+    // Session erstellen
+    await authPrisma.session.create({
         data: {
             userId: user.id,
             token: refreshToken,
@@ -350,17 +383,13 @@ async function register(req, res) {
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 Tage
             createdBy: user.id,
         },
-        });
+    });
 
-        res.status(201).json({
-            user,
-            accessToken,
-            refreshToken,
-        });
-    } catch (error) {
-        console.error('Registration Error:', error);
-        throw new ErrorResponse(500, 'registration_failed');
-    }
+    res.status(201).json({
+        user,
+        accessToken,
+        refreshToken,
+    });
 }
 
 /**
@@ -380,7 +409,15 @@ async function login(req, res) {
             id: true,
             email: true,
             role: true,
-            hash: true
+            password: true,
+            emailVerified: true,
+            authProvider: true,
+            studentProfile: {
+                select: { id: true, firstName: true, lastName: true }
+            },
+            companyProfile: {
+                select: { id: true, companyName: true, isVerified: true }
+            }
         },
     });
     
@@ -388,28 +425,37 @@ async function login(req, res) {
         throw new ErrorResponse(401, 'invalid_credentials_message');
     }
 
+    // Check Auth Provider
+    if (user.authProvider !== 'LOCAL') {
+        throw new ErrorResponse(400, 'invalid_login_method', {provider: user.authProvider});
+    }
+
     // Passwort prüfen
-    const validPassword = await bcrypt.compare(password, user.hash);
+    const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
         throw new ErrorResponse(401, 'invalid_credentials_message');
     }
 
     // Passwort aus Response entfernen
-    delete user.hash;
+    delete user.password;
 
     // Tokens generieren
-    const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
     // Session erstellen
-    await authPrisma.session.create({
+    const session = await authPrisma.session.create({
         data: {
-            user_id: user.id,
+            userId: user.id,
             token: refreshToken,
-            expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)
+            ipAddress: req.ip,
+            userAgent: req.headers['user-agent'],
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            createdBy: user.id
         },
     });
+
+    const accessToken = generateAccessToken(user, session.id);
 
     res.json({
         user,
@@ -445,13 +491,13 @@ async function refreshToken(req, res) {
             },
             include: {
                 user: {
-                select: {
-                    id: true,
-                    email: true,
-                    role: true,
-                    studentProfile: { select: { id: true } },
-                    companyProfile: { select: { id: true } },
-                },
+                    select: {
+                        id: true,
+                        email: true,
+                        role: true,
+                        studentProfile: { select: { id: true } },
+                        companyProfile: { select: { id: true } },
+                    },
                 },
             },
         });
@@ -476,12 +522,24 @@ async function refreshToken(req, res) {
 async function logout(req, res) {
     try {
         const { refreshToken } = req.body;
+        const authHeader = req.headers.authorization;
 
-        if (refreshToken) {
-        // Session löschen
-        await authPrisma.session.deleteMany({
-            where: { token: refreshToken },
-        });
+        const token = authHeader?.substring(7);
+
+        // Token verifizieren
+        const decoded = verifyToken(token);
+        
+        if (!decoded) {
+            return next(); // Ungültiger Token = kein User
+        }
+
+        if (refreshToken || token) {
+            // Session löschen
+            await authPrisma.session.deleteMany({
+                where: {
+                    OR: [{token: refreshToken}, { id: decoded.sessionId }]
+                }
+            });
         }
 
         res.json({ message: req.getTranslation('logged_out_successfully') });
@@ -516,24 +574,24 @@ async function googleAuth(req, res) {
         // Verify Google Token and get user info
         let googleUser;
         try {
-        googleUser = await verifyGoogleToken(googleToken);
+            googleUser = await verifyGoogleToken(googleToken);
         } catch (error) {
             throw new ErrorResponse(401, 'invalid_token', {provider: 'Google'});
         }
 
         // Check ob User mit dieser Email existiert
         let user = await authPrisma.user.findUnique({
-        where: { email: googleUser.email },
-        include: {
-            studentProfile: true,
-            companyProfile: true,
-            ssoAccounts: true,
-        },
+            where: { email: googleUser.email },
+            include: {
+                studentProfile: true,
+                companyProfile: true,
+                ssoAccounts: true,
+            },
         });
 
         if (user) {
             // User existiert - SSO Account aktualisieren/erstellen
-            const ssoAccount = await authPrisma.sSOAccount.upsert({
+            await authPrisma.sSOAccount.upsert({
                 where: {
                     provider_providerId: {
                         provider: 'GOOGLE',
@@ -561,46 +619,67 @@ async function googleAuth(req, res) {
 
             user = await authPrisma.user.create({
                 data: {
-                email: googleUser.email,
-                emailVerified: googleUser.emailVerified ? new Date() : null, // Google Email verification status
-                authProvider: 'GOOGLE',
-                role,
-                createdBy: 'system',
-                updatedBy: 'system',
-                ssoAccounts: {
-                    create: {
-                    provider: 'GOOGLE',
-                    providerId: googleUser.id,
-                    providerEmail: googleUser.email,
+                    email: googleUser.email,
+                    emailVerified: googleUser.emailVerified ? new Date() : null,
+                    authProvider: 'GOOGLE',
+                    role,
                     createdBy: 'system',
                     updatedBy: 'system',
+                    ssoAccounts: {
+                        create: {
+                            provider: 'GOOGLE',
+                            providerId: googleUser.id,
+                            providerEmail: googleUser.email,
+                            createdBy: 'system',
+                            updatedBy: 'system',
+                        },
                     },
-                },
-                ...(role === 'STUDENT' && {
-                    studentProfile: {
-                    create: {
-                        firstName: googleUser.firstName || '',
-                        lastName: googleUser.lastName || '',
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                    },
-                }),
-                ...(role === 'COMPANY' && {
-                    companyProfile: {
-                    create: {
-                        companyName: '',
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                    },
-                }),
+                    ...(role === 'STUDENT' && {
+                        studentProfile: {
+                            create: {
+                                firstName: googleUser.firstName || '',
+                                lastName: googleUser.lastName || '',
+                                createdBy: 'system',
+                                updatedBy: 'system',
+                            },
+                        },
+                    }),
+                    ...(role === 'COMPANY' && {
+                        companyProfile: {
+                            create: {
+                                companyName: '',
+                                description: '',
+                                createdBy: 'system',
+                                updatedBy: 'system',
+                            },
+                        },
+                    }),
                 },
                 include: {
-                studentProfile: true,
-                companyProfile: true,
+                    studentProfile: true,
+                    companyProfile: true,
                 },
             });
+
+            // Für COMPANY: Automatisch OWNER Member erstellen
+            if (role === 'COMPANY' && user.companyProfile) {
+                await authPrisma.companyMember.create({
+                    data: {
+                        companyId: user.companyProfile.id,
+                        userId: user.id,
+                        role: 'OWNER',
+                        status: 'ACTIVE',
+                        canEditCompany: true,
+                        canManageJobs: true,
+                        canViewApplications: true,
+                        canManageApplications: true,
+                        canManageMembers: true,
+                        canManageSubscription: true,
+                        createdBy: 'system',
+                        updatedBy: 'system',
+                    },
+                });
+            }
         }
 
         // Tokens generieren
@@ -644,7 +723,7 @@ async function facebookAuth(req, res) {
         // Verify Facebook Token and get user info
         let facebookUser;
         try {
-        facebookUser = await verifyFacebookToken(facebookToken);
+            facebookUser = await verifyFacebookToken(facebookToken);
         } catch (error) {
             throw new ErrorResponse(401, 'invalid_token', {provider: 'Facebook'});
         }
@@ -660,27 +739,27 @@ async function facebookAuth(req, res) {
         });
 
         if (user) {
-        // User existiert - SSO Account aktualisieren/erstellen
-        const ssoAccount = await authPrisma.sSOAccount.upsert({
-            where: {
-            provider_providerId: {
-                provider: 'FACEBOOK',
-                providerId: facebookUser.id,
-            },
-            },
-            create: {
-                userId: user.id,
-                provider: 'FACEBOOK',
-                providerId: facebookUser.id,
-                providerEmail: facebookUser.email,
-                createdBy: user.id,
-                updatedBy: user.id,
-            },
-            update: {
-                providerEmail: facebookUser.email,
-                updatedBy: user.id,
-            },
-        });
+            // User existiert - SSO Account aktualisieren/erstellen
+            await authPrisma.sSOAccount.upsert({
+                where: {
+                    provider_providerId: {
+                        provider: 'FACEBOOK',
+                        providerId: facebookUser.id,
+                    },
+                },
+                create: {
+                    userId: user.id,
+                    provider: 'FACEBOOK',
+                    providerId: facebookUser.id,
+                    providerEmail: facebookUser.email,
+                    createdBy: user.id,
+                    updatedBy: user.id,
+                },
+                update: {
+                    providerEmail: facebookUser.email,
+                    updatedBy: user.id,
+                },
+            });
         } else {
             // Create new User
             if (!role || !['STUDENT', 'COMPANY'].includes(role)) {
@@ -718,6 +797,7 @@ async function facebookAuth(req, res) {
                         companyProfile: {
                             create: {
                                 companyName: '',
+                                description: '',
                                 createdBy: 'system',
                                 updatedBy: 'system',
                             },
@@ -729,6 +809,26 @@ async function facebookAuth(req, res) {
                     companyProfile: true,
                 },
             });
+
+            // Für COMPANY: Automatisch OWNER Member erstellen
+            if (role === 'COMPANY' && user.companyProfile) {
+                await authPrisma.companyMember.create({
+                    data: {
+                        companyId: user.companyProfile.id,
+                        userId: user.id,
+                        role: 'OWNER',
+                        status: 'ACTIVE',
+                        canEditCompany: true,
+                        canManageJobs: true,
+                        canViewApplications: true,
+                        canManageApplications: true,
+                        canManageMembers: true,
+                        canManageSubscription: true,
+                        createdBy: 'system',
+                        updatedBy: 'system',
+                    },
+                });
+            }
         }
 
         // Tokens generieren
