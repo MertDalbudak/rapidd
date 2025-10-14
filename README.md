@@ -9,7 +9,7 @@
 Rapidd analyzes your Prisma schema and automatically generates:
 - **REST API endpoints** for all models (GET, POST, PUT, DELETE)
 - **Query capabilities** with filtering, sorting, pagination, and relations
-- **Row-Level Security (RLS)** policies for fine-grained access control
+- **Access Control Layer (ACL)** policies for fine-grained access control
 - **Request validation** based on your schema constraints
 - **Response formatting** with consistent data structures
 
@@ -19,7 +19,7 @@ This means you can go from a database schema to a fully functional API in minute
 
 - **Zero Boilerplate**: No need to write repetitive CRUD operations
 - **Type-Safe**: Leverages Prisma's type safety throughout your API
-- **Security First**: Built-in RLS policies ensure data access is controlled at the row level
+- **Security First**: Built-in ACL policies ensure data access is controlled at the row level
 - **Production Ready**: Includes rate limiting, error handling, and Redis caching out of the box
 - **Flexible**: Override or extend generated endpoints with custom logic when needed
 - **Fast Development**: Build complex APIs in a fraction of the time
@@ -46,7 +46,7 @@ npx rapidd build
 
 ### 3. Configure Row-Level Security
 
-After building, review the generated RLS (Row-Level Security) policy files in your project. These files define access control rules for each model. Customize them according to your security requirements.
+After building, review the generated ACL (Access Control Layer) policy files in your project. These files define access control rules for each model. Customize them according to your security requirements.
 
 ### 4. Configure Your Application
 
