@@ -10,59 +10,65 @@
         }
     },
     "services": {
-        "Service1": {
-            "hostname": "host.name",
-            "path": "/path",
+        "GoogleOAuth": {
+            "hostname": "oauth2.googleapis.com",
+            "path": "",
             "secure": true,
             "port": 443,
-            "authorization": {
-                "type": "Basic",
-                "username": "user",
-                "password": "password"
-            },
             "headers": {
-                "Accept": "*/*"
+                "Accept": "application/json"
             },
             "queries": {},
             "endpoints": {
-                "allAccounts": {
-                    "path": "/accounts",
+                "verifyToken": {
+                    "path": "/tokeninfo",
                     "method": "GET",
-                    "headers": {
-                        "Accept": "application/json"
-                    },
-                    "queries": {
-                        "onlyData": true
-                    }
+                    "headers": {},
+                    "queries": {}
                 }
             }
         },
-        "Service2": {
-            "hostname": "localhost",
-            "path": "/path",
+        "GoogleAPI": {
+            "hostname": "www.googleapis.com",
+            "path": "/oauth2/v2",
             "secure": true,
             "port": 443,
-            "authorization": {
-                "type": "OAuth2",
-                "hostname": "https://oauth.ident",
-                "auth_path": null,
-                "token_path": "/oauth2/v1/token",
-                "client_id": "id",
-                "client_secret": "secret",
-                "params": {
-                    
-                }
+            "headers": {
+                "Accept": "application/json"
             },
-            "headers": {},
             "queries": {},
             "endpoints": {
-                "getUser": {
-                    "path": "/Users/{{id}}",
+                "getUserInfo": {
+                    "path": "/userinfo",
                     "method": "GET",
-                    "headers": {
-                        "Content-Type": "application/scim+json"
-                    },
+                    "headers": {},
                     "queries": {}
+                }
+            }
+        },
+        "FacebookGraph": {
+            "hostname": "graph.facebook.com",
+            "path": "/v18.0",
+            "secure": true,
+            "port": 443,
+            "headers": {
+                "Accept": "application/json"
+            },
+            "queries": {},
+            "endpoints": {
+                "debugToken": {
+                    "path": "/debug_token",
+                    "method": "GET",
+                    "headers": {},
+                    "queries": {}
+                },
+                "getUserInfo": {
+                    "path": "/me",
+                    "method": "GET",
+                    "headers": {},
+                    "queries": {
+                        "fields": "id,email,name,first_name,last_name,picture"
+                    }
                 }
             }
         }

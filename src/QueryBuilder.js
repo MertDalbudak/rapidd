@@ -1,4 +1,4 @@
-const {prisma, Prisma, rls} = require('../rapidd/rapidd');
+const {prisma, prismaTransaction, Prisma, acl} = require('../rapidd/rapidd');
 const { ErrorResponse } = require('./Api');
 const path = require('path');
 const fs = require('fs');
@@ -495,9 +495,9 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply RLS access filter for this relation (for all relations, not just list relations)
-        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
-            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+        // Apply ACL access filter for this relation (for all relations, not just list relations)
+        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+            const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
@@ -569,9 +569,9 @@ class QueryBuilder {
             }
         }
 
-        // Apply RLS access filter for this relation (for all relations, not just list relations)
-        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
-            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+        // Apply ACL access filter for this relation (for all relations, not just list relations)
+        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+            const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
@@ -610,9 +610,9 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply RLS access filter for this relation (for all relations, not just list relations)
-        if (relation.object && rls.model[relation.object]?.getAccessFilter) {
-            const accessFilter = rls.model[relation.object].getAccessFilter(user);
+        // Apply ACL access filter for this relation (for all relations, not just list relations)
+        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+            const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
             const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
@@ -750,11 +750,11 @@ class QueryBuilder {
      * @returns {Object} Prisma omit object
      */
     omit(user, inaccessible_fields = null) {
-        // Get omit fields from RLS if available
+        // Get omit fields from ACL if available
         let omit_fields = inaccessible_fields;
 
-        if (!omit_fields && rls.model[this.name]?.getOmitFields) {
-            omit_fields = rls.model[this.name].getOmitFields(user);
+        if (!omit_fields && acl.model[this.name]?.getOmitFields) {
+            omit_fields = acl.model[this.name].getOmitFields(user);
         }
 
         if (omit_fields && Array.isArray(omit_fields)) {
@@ -773,8 +773,8 @@ class QueryBuilder {
      * @returns {Object} Prisma omit object for the related model
      */
     getRelatedOmit(relatedModelName, user) {
-        if (rls.model[relatedModelName]?.getOmitFields) {
-            const omit_fields = rls.model[relatedModelName].getOmitFields(user);
+        if (acl.model[relatedModelName]?.getOmitFields) {
+            const omit_fields = acl.model[relatedModelName].getOmitFields(user);
             if (omit_fields && Array.isArray(omit_fields)) {
                 return omit_fields.reduce((acc, curr) => {
                     acc[curr] = true;
@@ -1419,4 +1419,4 @@ QueryBuilder.errorHandler = (error, data = {})=>{
     return {'status_code': status_code, 'message': message};
 }
 
-module.exports = {QueryBuilder, prisma};
+module.exports = {QueryBuilder, prisma, prismaTransaction};
