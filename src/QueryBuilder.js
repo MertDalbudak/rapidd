@@ -12,11 +12,14 @@ class QueryBuilder {
      */
     constructor(name) {
         this.name = name;
-        this.prismaName = name.toLowerCase();
-        this.fields = prisma[this.prismaName].fields;
         this._relationshipsCache = null;
     }
-
+    get fields(){
+        return this.getDmmfModel().fields.reduce((acc, field) => {
+            acc[field.name] = field;
+            return acc;
+        }, {});
+    }
     /**
      * Load relationships from relationships.json file
      * @returns {Object} Relationships configuration for this model
@@ -45,12 +48,21 @@ class QueryBuilder {
     }
 
     /**
+     * Get DMMF model object by name
+     * @param {string} name - The model name
+     * @returns {Object} DMMF model object
+     */
+    getDmmfModel(name = this.name) {
+        return Prisma.dmmf.datamodel.models.find(m => m.name === name);
+    }
+
+    /**
      * Get primary key field(s) for a given model
      * @param {string} modelName - The model name
      * @returns {string|Array} Primary key field name or array of field names for composite keys
      */
-    getPrimaryKey(modelName) {
-        const model = Prisma.dmmf.datamodel.models.find(m => m.name === modelName.toLowerCase());
+    getPrimaryKey(modelName = this.name) {
+        const model = this.getDmmfModel(modelName);
         if (!model) {
             // Fallback to 'id' if model not found
             return 'id';
@@ -475,19 +487,13 @@ class QueryBuilder {
      * Build deep relationship include object with access controls
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
+     * @param {string} parentModel - Parent model name that owns this relation
      * @returns {Object} Prisma include/select object
      */
-    #includeDeepRelationships(relation, user) {
+    #includeDeepRelationships(relation, user, parentModel = null) {
+        const currentParent = parentModel || this.name;
         const child_relation = relation.relation;
-        let content = {};
-        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
-            content.select = relation.access[user.role].reduce((acc, curr) => {
-                acc[curr] = true;
-                return acc;
-            }, {});
-        } else {
-            content.include = {};
-        }
+        let content = { include: {} };
 
         // Add omit fields for this relation if available
         const omitFields = this.getRelatedOmit(relation.object, user);
@@ -495,11 +501,13 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply ACL access filter for this relation (for all relations, not just list relations)
-        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+        // Apply ACL access filter for this relation (only for list relations)
+        // Prisma only allows 'where' on list relations (arrays), not on singular relations
+        const isListRelation = this.#isListRelation(currentParent, relation.name);
+        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
             const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
                 content.where = simplifiedFilter;
             }
@@ -507,17 +515,11 @@ class QueryBuilder {
 
         if (Array.isArray(child_relation)) {
             for (let i = 0; i < child_relation.length; i++) {
-                const _child_relation = this.#includeDeepRelationships(child_relation[i], user);
-                if (typeof child_relation[i].access !== "object" || child_relation[i].access[user.role] !== false) {
-                    if (content.hasOwnProperty('select')) {
-                        content['select'][child_relation[i].name] = _child_relation;
-                    } else {
-                        content['include'][child_relation[i].name] = _child_relation;
-                    }
-                }
+                const _child_relation = this.#includeDeepRelationships(child_relation[i], user, relation.object);
+                content.include[child_relation[i].name] = _child_relation;
             }
         }
-        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
     }
 
     /**
@@ -550,30 +552,28 @@ class QueryBuilder {
      * Build top-level only relationship include (no deep relations)
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
+     * @param {string} parentModel - Parent model name that owns this relation
      * @returns {Object} Prisma include/select object for top-level only
      */
-    #includeTopLevelOnly(relation, user) {
-        let content = {};
-        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
-            content.select = relation.access[user.role].reduce((acc, curr) => {
-                acc[curr] = true;
-                return acc;
-            }, {});
+    #includeTopLevelOnly(relation, user, parentModel = null) {
+        const currentParent = parentModel || this.name;
+        let content;
+
+        // Check if there are omit fields for this relation
+        const omitFields = this.getRelatedOmit(relation.object, user);
+        if (Object.keys(omitFields).length > 0) {
+            content = { omit: omitFields };
         } else {
-            // Check if there are omit fields for this relation
-            const omitFields = this.getRelatedOmit(relation.object, user);
-            if (Object.keys(omitFields).length > 0) {
-                content = { omit: omitFields };
-            } else {
-                content = true; // Include all fields but no nested relations
-            }
+            content = true; // Include all fields but no nested relations
         }
 
-        // Apply ACL access filter for this relation (for all relations, not just list relations)
-        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+        // Apply ACL access filter for this relation (only for list relations)
+        // Prisma only allows 'where' on list relations (arrays), not on singular relations
+        const isListRelation = this.#isListRelation(currentParent, relation.name);
+        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
             const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
                 if (content === true) {
                     content = { where: simplifiedFilter };
@@ -591,18 +591,12 @@ class QueryBuilder {
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
      * @param {Array} deepPaths - Array of deep paths (e.g., ['agency', 'courses.subject'])
+     * @param {string} parentModel - Parent model name that owns this relation
      * @returns {Object} Prisma include/select object with selective deep relations
      */
-    #includeSelectiveDeepRelationships(relation, user, deepPaths) {
-        let content = {};
-        if (typeof relation.access === "object" && Array.isArray(relation.access[user.role])) {
-            content.select = relation.access[user.role].reduce((acc, curr) => {
-                acc[curr] = true;
-                return acc;
-            }, {});
-        } else {
-            content.include = {};
-        }
+    #includeSelectiveDeepRelationships(relation, user, deepPaths, parentModel = null) {
+        const currentParent = parentModel || this.name;
+        let content = { include: {} };
 
         // Add omit fields for this relation if available
         const omitFields = this.getRelatedOmit(relation.object, user);
@@ -610,11 +604,13 @@ class QueryBuilder {
             content.omit = omitFields;
         }
 
-        // Apply ACL access filter for this relation (for all relations, not just list relations)
-        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+        // Apply ACL access filter for this relation (only for list relations)
+        // Prisma only allows 'where' on list relations (arrays), not on singular relations
+        const isListRelation = this.#isListRelation(currentParent, relation.name);
+        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
             const accessFilter = acl.model[relation.object].getAccessFilter(user);
             const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, this.name);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
             if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
                 content.where = simplifiedFilter;
             }
@@ -645,28 +641,24 @@ class QueryBuilder {
             for (const relationName in pathsByRelation) {
                 const childRelation = childRelationships.find(r => r.name === relationName);
 
-                if (childRelation && (typeof childRelation.access !== "object" || childRelation.access[user.role] !== false)) {
+                if (childRelation) {
                     let childInclude;
                     const childPaths = pathsByRelation[relationName].filter(p => p !== '');
 
                     if (childPaths.length > 0) {
                         // Recursively build selective deep relationships
-                        childInclude = this.#includeSelectiveDeepRelationships(childRelation, user, childPaths);
+                        childInclude = this.#includeSelectiveDeepRelationships(childRelation, user, childPaths, relation.object);
                     } else {
                         // Only include this level
-                        childInclude = this.#includeTopLevelOnly(childRelation, user);
+                        childInclude = this.#includeTopLevelOnly(childRelation, user, relation.object);
                     }
 
-                    if (content.hasOwnProperty('select')) {
-                        content['select'][relationName] = childInclude;
-                    } else {
-                        content['include'][relationName] = childInclude;
-                    }
+                    content.include[relationName] = childInclude;
                 }
             }
         }
 
-        return content.hasOwnProperty('select') || content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
     }
 
     /**
@@ -682,15 +674,13 @@ class QueryBuilder {
             let includeRelated = {};
 
             if (include_query === "ALL") {
-                // Keep the old behavior for "ALL" - load all deep relationships
+                // Load all deep relationships
                 includeRelated = this.relatedObjects.reduce((acc, curr) => {
-                    if (typeof curr.access !== "object" || curr.access[user.role] !== false) {
-                        const rel = this.#includeDeepRelationships(curr, user);
-                        if (exclude_rule && exclude_rule[curr.name]) {
-                            rel.where = exclude_rule[curr.name];
-                        }
-                        acc[curr.name] = rel;
+                    const rel = this.#includeDeepRelationships(curr, user);
+                    if (exclude_rule && exclude_rule[curr.name]) {
+                        rel.where = exclude_rule[curr.name];
                     }
+                    acc[curr.name] = rel;
                     return acc;
                 }, {});
             } else {
@@ -715,7 +705,7 @@ class QueryBuilder {
 
                 // Build include object for each top-level relation
                 this.relatedObjects.forEach(curr => {
-                    if (topLevelIncludes.has(curr.name) && (typeof curr.access !== "object" || curr.access[user.role] !== false)) {
+                    if (topLevelIncludes.has(curr.name)) {
                         let rel;
 
                         if (deepIncludes[curr.name]) {
@@ -829,7 +819,7 @@ class QueryBuilder {
      * @param {Object} data - Data to create
      * @param {number} user_id - ID of creating user
      */
-    create(data, user_id) {
+    create(data, user = null) {
         this.#cleanTimestampFields(data);
         for (let key in data) {
             if (this.fields[key] == null) {
@@ -922,9 +912,9 @@ class QueryBuilder {
      * Process data for update operation with nested relation support
      * @param {number} id - ID of record to update
      * @param {Object} data - Data to update
-     * @param {number} user_id - ID of updating user
+     * @param {Object} user - User object for ACL checks
      */
-    update(id, data, user_id) {
+    update(id, data, user = null) {
         this.#cleanTimestampFields(data);
 
         for (let key in data) {
@@ -935,9 +925,9 @@ class QueryBuilder {
                 } else {
                     if (data[key]) {
                         if (Array.isArray(data[key])) {
-                            data[key] = this.#processArrayRelation(data[key], relatedObject, id, user_id);
+                            data[key] = this.#processArrayRelation(data[key], relatedObject, id, user);
                         } else {
-                            data[key] = this.#processSingleRelation(data[key], relatedObject, user_id);
+                            data[key] = this.#processSingleRelation(data[key], relatedObject, user);
                         }
                     }
                 }
@@ -964,35 +954,48 @@ class QueryBuilder {
      * @param {Array} dataArray - Array of relation data
      * @param {Object} relatedObject - Relation configuration
      * @param {number} parentId - Parent record ID
-     * @param {number} user_id - User ID
+     * @param {Object} user - User object for ACL checks
      * @returns {Object} Prisma array relation operations
      */
-    #processArrayRelation(dataArray, relatedObject, parentId, user_id) {
+    #processArrayRelation(dataArray, relatedObject, parentId, user = null) {
         for (let i = 0; i < dataArray.length; i++) {
             this.#cleanTimestampFields(dataArray[i]);
-            
+
             // Validate all fields
             for (let _key in dataArray[i]) {
                 if (prisma[relatedObject.object].fields[_key] == null) {
                     throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
                 }
             }
-            
+
             // Process nested relations recursively if they exist
             if (relatedObject.relation) {
-                dataArray[i] = this.#processNestedRelations(dataArray[i], relatedObject.relation, user_id);
+                dataArray[i] = this.#processNestedRelations(dataArray[i], relatedObject.relation, user);
             }
         }
-        
+
+        // Get ACL update filter for this relation type
+        const aclFilter = user && acl.model[relatedObject.object]?.getUpdateFilter
+            ? acl.model[relatedObject.object].getUpdateFilter(user)
+            : {};
+        const cleanedFilter = aclFilter && aclFilter !== false ? this.cleanFilter(aclFilter) : null;
+
         return {
             'connect': dataArray.filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length === 1).map(e => {
                 return { [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id'] };
             }),
             'updateMany': dataArray.filter(e => e.id && Object.keys(e).length > 1).map(e => {
+                const where = {
+                    [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
+                };
+
+                // Merge ACL filter directly into where clause (not using AND)
+                if (cleanedFilter && typeof cleanedFilter === 'object' && Object.keys(cleanedFilter).length > 0) {
+                    Object.assign(where, cleanedFilter);
+                }
+
                 return {
-                    'where': {
-                        [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
-                    },
+                    'where': where,
                     'data': { ...e }
                 };
             }),
@@ -1010,6 +1013,12 @@ class QueryBuilder {
                 } else {
                     where[relatedObject.field || relatedObject.foreignKey || 'id'] = e[relatedObject.field || relatedObject.foreignKey || 'id'] || -1;
                 }
+
+                // Merge ACL filter directly into where clause (not using AND)
+                if (cleanedFilter && typeof cleanedFilter === 'object' && Object.keys(cleanedFilter).length > 0) {
+                    Object.assign(where, cleanedFilter);
+                }
+
                 return {
                     'where': where,
                     'create': { ...e },
@@ -1023,21 +1032,21 @@ class QueryBuilder {
      * Process single relation for update operations with create/update separation
      * @param {Object} dataObj - Relation data object
      * @param {Object} relatedObject - Relation configuration
-     * @param {number} user_id - User ID
+     * @param {Object} user - User object for ACL checks
      * @returns {Object|null} Prisma upsert operation or null
      */
-    #processSingleRelation(dataObj, relatedObject, user_id) {
+    #processSingleRelation(dataObj, relatedObject, user = null) {
         // Validate all fields first
         for (let _key in dataObj) {
             if (prisma[relatedObject.object].fields[_key] == null) {
                 throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
             }
         }
-    
+
         // Process nested relations recursively if they exist
         let processedData = dataObj;
         if (relatedObject.relation) {
-            processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user_id);
+            processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user);
         }
     
         // Prepare separate data objects for create and update
@@ -1102,22 +1111,22 @@ class QueryBuilder {
      * Recursively process nested relations in data objects
      * @param {Object} dataObj - Data object to process
      * @param {Array} relatedObjects - Array of relation configurations
-     * @param {number} user_id - User ID
+     * @param {Object} user - User object for ACL checks
      * @returns {Object} Processed data object
      */
-    #processNestedRelations(dataObj, relatedObjects, user_id) {
+    #processNestedRelations(dataObj, relatedObjects, user = null) {
         const processedData = {...dataObj};
-        
+
         for (let key in processedData) {
             const nestedRelation = relatedObjects.find(rel => rel.name === key);
-            
+
             if (nestedRelation && processedData[key] && typeof processedData[key] === 'object') {
                 if (Array.isArray(processedData[key])) {
                     // Process nested array relation recursively
-                    processedData[key] = this.#processArrayRelation(processedData[key], nestedRelation, null, user_id);
+                    processedData[key] = this.#processArrayRelation(processedData[key], nestedRelation, null, user);
                 } else {
                     // Process nested single relation recursively
-                    const nestedResult = this.#processSingleRelation(processedData[key], nestedRelation, user_id);
+                    const nestedResult = this.#processSingleRelation(processedData[key], nestedRelation, user);
                     if (nestedResult) {
                         processedData[key] = nestedResult;
                     } else {
@@ -1126,7 +1135,7 @@ class QueryBuilder {
                 }
             }
         }
-        
+
         return processedData;
     }
     
@@ -1210,6 +1219,32 @@ class QueryBuilder {
         }
 
         return Object.keys(cleaned).length > 0 ? cleaned : null;
+    }
+
+    /**
+     * Check if a relation is a list (array) relation using Prisma DMMF
+     * @param {string} parentModel - The parent model name
+     * @param {string} relationName - The relation field name
+     * @returns {boolean} True if the relation is a list (array) relation
+     */
+    #isListRelation(parentModel, relationName) {
+        try {
+            const model = this.getDmmfModel(parentModel);
+            if (!model) {
+                return false;
+            }
+
+            const field = model.fields.find(f => f.name === relationName);
+            if (!field) {
+                return false;
+            }
+
+            // Check if the field is a list (isList property)
+            return field.isList === true;
+        } catch (error) {
+            console.error(`Failed to check if relation is list: ${parentModel}.${relationName}`, error);
+            return false;
+        }
     }
 
     /**
