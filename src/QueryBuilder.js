@@ -1,7 +1,6 @@
-const {prisma, prismaTransaction, Prisma, acl} = require('../rapidd/rapidd');
+const {prisma, prismaTransaction, acl} = require('../rapidd/rapidd');
 const { ErrorResponse } = require('./Api');
-const path = require('path');
-const fs = require('fs');
+const dmmf = require('../rapidd/dmmf');
 
 const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
 
@@ -14,37 +13,27 @@ class QueryBuilder {
         this.name = name;
         this._relationshipsCache = null;
     }
-    get fields(){
-        return this.getDmmfModel().fields.reduce((acc, field) => {
-            acc[field.name] = field;
-            return acc;
-        }, {});
-    }
+
     /**
-     * Load relationships from relationships.json file
-     * @returns {Object} Relationships configuration for this model
+     * Get all fields for this model from DMMF
+     * @returns {Object} Object with field names as keys and field objects as values
+     */
+    get fields() {
+        return dmmf.getFields(this.name);
+    }
+
+    /**
+     * Get relationships configuration for this model from DMMF
+     * Builds relationships dynamically from Prisma schema instead of relationships.json
+     * @returns {Array} Array of relationship configurations
      */
     get relatedObjects() {
         if (this._relationshipsCache) {
             return this._relationshipsCache;
         }
 
-        try {
-            const relationshipsPath = path.resolve(__dirname, '../rapidd/relationships.json');
-            const relationships = JSON.parse(fs.readFileSync(relationshipsPath, 'utf8'));
-            const modelRelationships = relationships[this.name] || {};
-
-            // Convert to array format expected by existing code
-            this._relationshipsCache = Object.entries(modelRelationships).map(([name, config]) => ({
-                name,
-                ...config
-            }));
-
-            return this._relationshipsCache;
-        } catch (error) {
-            console.error(`Failed to load relationships for ${this.name}:`, error);
-            return [];
-        }
+        this._relationshipsCache = dmmf.buildRelationships(this.name);
+        return this._relationshipsCache;
     }
 
     /**
@@ -53,7 +42,7 @@ class QueryBuilder {
      * @returns {Object} DMMF model object
      */
     getDmmfModel(name = this.name) {
-        return Prisma.dmmf.datamodel.models.find(m => m.name === name);
+        return dmmf.getModel(name);
     }
 
     /**
@@ -62,25 +51,7 @@ class QueryBuilder {
      * @returns {string|Array} Primary key field name or array of field names for composite keys
      */
     getPrimaryKey(modelName = this.name) {
-        const model = this.getDmmfModel(modelName);
-        if (!model) {
-            // Fallback to 'id' if model not found
-            return 'id';
-        }
-
-        // Check for composite primary key
-        if (model.primaryKey && model.primaryKey.fields && model.primaryKey.fields.length > 0) {
-            return model.primaryKey.fields.length === 1 ? model.primaryKey.fields[0] : model.primaryKey.fields;
-        }
-
-        // Check for single primary key field
-        const idField = model.fields.find(f => f.isId);
-        if (idField) {
-            return idField.name;
-        }
-
-        // Default fallback
-        return 'id';
+        return dmmf.getPrimaryKey(modelName);
     }
 
     /**
@@ -531,21 +502,7 @@ class QueryBuilder {
         if (!modelName) {
             return [];
         }
-
-        try {
-            const relationshipsPath = path.resolve(__dirname, '../rapidd/relationships.json');
-            const relationships = JSON.parse(fs.readFileSync(relationshipsPath, 'utf8'));
-            const modelRelationships = relationships[modelName] || {};
-
-            // Convert to array format
-            return Object.entries(modelRelationships).map(([name, config]) => ({
-                name,
-                ...config
-            }));
-        } catch (error) {
-            console.error(`Failed to load relationships for ${modelName}:`, error);
-            return [];
-        }
+        return dmmf.buildRelationships(modelName);
     }
 
     /**
@@ -1228,23 +1185,7 @@ class QueryBuilder {
      * @returns {boolean} True if the relation is a list (array) relation
      */
     #isListRelation(parentModel, relationName) {
-        try {
-            const model = this.getDmmfModel(parentModel);
-            if (!model) {
-                return false;
-            }
-
-            const field = model.fields.find(f => f.name === relationName);
-            if (!field) {
-                return false;
-            }
-
-            // Check if the field is a list (isList property)
-            return field.isList === true;
-        } catch (error) {
-            console.error(`Failed to check if relation is list: ${parentModel}.${relationName}`, error);
-            return false;
-        }
+        return dmmf.isListRelation(parentModel, relationName);
     }
 
     /**

@@ -1,12 +1,10 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const { PrismaClient } = require('../rapidd/rapidd');
+const { authPrisma } = require('../rapidd/rapidd');
 const { RestApi } = require('../lib/RestApi');
 const { ErrorResponse } = require('../src/Api');
 
 const SALT_ROUNDS = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;
-
-const authPrisma = new PrismaClient();
 
 // ============================================
 // JWT HELPER FUNCTIONS
@@ -181,33 +179,34 @@ async function authenticateUser(req, res, next) {
             return next(); // Ungültiger Token = kein User
         }
 
-        // User aus DB laden (mit authPrisma, OHNE RLS!)
-        const session = await authPrisma.session.findUnique({
+        // TODO: Customize session/user query for your schema
+        // Load user from session - adjust model names and relations for your schema
+        const session = await authPrisma.sessions.findUnique({
             where: { id: decoded.sessionId },
             select: {
+                // TODO: Replace with your user relation name
                 user: {
                     select: {
                         id: true,
                         email: true,
                         role: true,
-                        emailVerified: true,
-                        studentProfile: {
-                            select: { id: true, firstName: true, lastName: true }
-                        },
-                        companyProfile: {
-                            select: { id: true, companyName: true, isVerified: true }
-                        }
+                        // TODO: Add any additional user fields/relations you need
                     }
                 }
             }
         });
 
-        if (!session) {
-            return next(); // User existiert nicht mehr
+        if (!session || !session.user) {
+            return next(); // Session/User not found
         }
 
-        // User an Request hängen
-        req.user = session.user;
+        // TODO: Map to your desired req.user structure
+        req.user = {
+            id: session.user.id,
+            email: session.user.email,
+            role: session.user.role,
+            // TODO: Add any additional fields from your schema
+        };
         
         next();
     } catch (error) {
@@ -258,42 +257,30 @@ function requireVerified(req, res, next) {
     next();
 }
 
-/**
- * Middleware: Company muss verifiziert sein
- */
-function requireVerifiedCompany(req, res, next) {
-    if (!req.user || req.user.role !== 'COMPANY') {
-        throw new ErrorResponse(403, 'company_account_required');
-    }
-
-    if (!req.user.companyProfile?.isVerified) {
-        throw new ErrorResponse(403, 'company_verification_required_message');
-    }
-
-    next();
-}
-
 // ============================================
 // AUTH ROUTES / HANDLERS
 // ============================================
 
 /**
- * POST /auth/register - User registrieren
+ * POST /auth/register - User registration
+ * TODO: Customize this function for your schema
  */
 async function register(req, res) {
-    const { email, password, role, firstName, lastName, companyName } = req.body;
+    const { email, password } = req.body;
 
-    // Validierung
-    if (!email || !password || !role) {
-        throw new ErrorResponse(400, 'required_fields', {fields: 'email, password, role'});
+    // Validation
+    if (!email || !password) {
+        throw new ErrorResponse(400, 'required_fields', {fields: 'email, password'});
     }
 
-    if (!['STUDENT', 'COMPANY'].includes(role)) {
-        throw new ErrorResponse(400, 'invalid_role_message');
-    }
+    // TODO: Adjust role validation for your schema
+    // if (!['USER', 'ADMIN'].includes(role)) {
+    //     throw new ErrorResponse(400, 'invalid_role_message');
+    // }
 
-    // Check ob Email bereits existiert
-    const existingUser = await authPrisma.user.findUnique({
+    // Check if email already exists
+    // TODO: Replace 'users' with your user model name
+    const existingUser = await authPrisma.users.findUnique({
         where: { email },
     });
 
@@ -301,87 +288,41 @@ async function register(req, res) {
         throw new ErrorResponse(409, 'email_already_registered_message');
     }
 
-    // Passwort hashen
+    // Hash password
     const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
 
-    // User erstellen mit Profil
-    const user = await authPrisma.user.create({
+    // TODO: Customize user creation for your schema
+    const user = await authPrisma.users.create({
         data: {
             email,
             password: hashedPassword,
-            role,
-            authProvider: 'LOCAL',
-            createdBy: 'system', // System für initial registration
-            updatedBy: 'system',
-            // Student Profil
-            ...(role === 'STUDENT' && {
-                studentProfile: {
-                    create: {
-                        firstName: firstName || '',
-                        lastName: lastName || '',
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                },
-            }),
-            // Company Profil
-            ...(role === 'COMPANY' && {
-                companyProfile: {
-                    create: {
-                        companyName: companyName || '',
-                        description: '',
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                },
-            }),
+            // TODO: Add your schema-specific fields
+            // role,
+            // createdBy: 'system',
         },
         select: {
             id: true,
             email: true,
-            role: true,
-            studentProfile: {
-                select: { id: true, firstName: true, lastName: true },
-            },
-            companyProfile: {
-                select: { id: true, companyName: true },
-            },
+            // TODO: Add fields you need in the response
         },
     });
 
-    // Für COMPANY: Automatisch OWNER Member erstellen
-    if (role === 'COMPANY' && user.companyProfile) {
-        await authPrisma.companyMember.create({
-            data: {
-                companyId: user.companyProfile.id,
-                userId: user.id,
-                role: 'OWNER',
-                status: 'ACTIVE',
-                canEditCompany: true,
-                canManageJobs: true,
-                canViewApplications: true,
-                canManageApplications: true,
-                canManageMembers: true,
-                canManageSubscription: true,
-                createdBy: 'system',
-                updatedBy: 'system',
-            },
-        });
-    }
+    // TODO: Create any related records (profiles, etc.) for your schema
 
-    // Tokens generieren
+    // Generate tokens
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // Session erstellen
-    await authPrisma.session.create({
+    // Create session
+    // TODO: Replace 'sessions' with your session model name
+    await authPrisma.sessions.create({
         data: {
             userId: user.id,
             token: refreshToken,
             ipAddress: req.ip,
             userAgent: req.headers['user-agent'],
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 Tage
-            createdBy: user.id,
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+            // TODO: Add any additional session fields
         },
     });
 
@@ -394,6 +335,7 @@ async function register(req, res) {
 
 /**
  * POST /auth/login - User login
+ * TODO: Customize this function for your schema
  */
 async function login(req, res) {
     const { email, password } = req.body;
@@ -402,63 +344,60 @@ async function login(req, res) {
         throw new ErrorResponse(400, 'required_fields', {fields: 'email, password'});
     }
 
-    // User finden
-    const user = await authPrisma.user.findUnique({
+    // TODO: Replace 'users' with your user model name and adjust fields
+    const user = await authPrisma.users.findUnique({
         where: { email },
         select: {
             id: true,
             email: true,
-            role: true,
             password: true,
-            emailVerified: true,
-            authProvider: true,
-            studentProfile: {
-                select: { id: true, firstName: true, lastName: true }
-            },
-            companyProfile: {
-                select: { id: true, companyName: true, isVerified: true }
-            }
+            // TODO: Add your schema-specific fields (role, etc.)
         },
     });
-    
+
     if (!user) {
         throw new ErrorResponse(401, 'invalid_credentials_message');
     }
 
-    // Check Auth Provider
-    if (user.authProvider !== 'LOCAL') {
-        throw new ErrorResponse(400, 'invalid_login_method', {provider: user.authProvider});
-    }
+    // TODO: If you have authProvider field, check it here
+    // if (user.authProvider !== 'LOCAL') {
+    //     throw new ErrorResponse(400, 'invalid_login_method', {provider: user.authProvider});
+    // }
 
-    // Passwort prüfen
+    // Verify password
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
         throw new ErrorResponse(401, 'invalid_credentials_message');
     }
 
-    // Passwort aus Response entfernen
-    delete user.password;
-
-    // Tokens generieren
+    // Generate tokens
     const refreshToken = generateRefreshToken(user);
 
-    // Session erstellen
-    const session = await authPrisma.session.create({
+    // Create session
+    // TODO: Replace 'sessions' with your session model name
+    const session = await authPrisma.sessions.create({
         data: {
             userId: user.id,
             token: refreshToken,
             ipAddress: req.ip,
             userAgent: req.headers['user-agent'],
             expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-            createdBy: user.id
+            // TODO: Add any additional session fields
         },
     });
 
     const accessToken = generateAccessToken(user, session.id);
 
+    // TODO: Build response user object for your schema
+    const responseUser = {
+        id: user.id,
+        email: user.email,
+        // TODO: Add additional fields
+    };
+
     res.json({
-        user,
+        user: responseUser,
         accessToken,
         refreshToken,
     });
@@ -466,6 +405,7 @@ async function login(req, res) {
 
 /**
  * POST /auth/refresh - Refresh Access Token
+ * TODO: Customize this function for your schema
  */
 async function refreshToken(req, res) {
     try {
@@ -475,38 +415,37 @@ async function refreshToken(req, res) {
             throw new ErrorResponse(400, 'refresh_token_required');
         }
 
-        // Token verifizieren
+        // Verify token
         const decoded = verifyToken(refreshToken, process.env.JWT_REFRESH_SECRET);
 
         if (!decoded) {
             throw new ErrorResponse(401, 'invalid_refresh_token');
         }
 
-        // Session prüfen
-        const session = await authPrisma.session.findFirst({
+        // TODO: Replace 'sessions' with your session model and adjust user relation
+        const session = await authPrisma.sessions.findFirst({
             where: {
                 token: refreshToken,
                 userId: decoded.userId,
                 expiresAt: { gt: new Date() },
             },
             include: {
+                // TODO: Replace with your user relation name
                 user: {
                     select: {
                         id: true,
                         email: true,
-                        role: true,
-                        studentProfile: { select: { id: true } },
-                        companyProfile: { select: { id: true } },
+                        // TODO: Add fields needed for token generation
                     },
                 },
             },
         });
 
-        if (!session) {
+        if (!session || !session.user) {
             throw new ErrorResponse(401, 'session_expired_or_invalid');
         }
 
-        // Neuen Access Token generieren
+        // Generate new access token
         const accessToken = generateAccessToken(session.user);
 
         res.json({ accessToken });
@@ -518,6 +457,7 @@ async function refreshToken(req, res) {
 
 /**
  * POST /auth/logout - User logout
+ * TODO: Customize this function for your schema
  */
 async function logout(req, res) {
     try {
@@ -526,23 +466,27 @@ async function logout(req, res) {
 
         const token = authHeader?.substring(7);
 
-        // Token verifizieren
+        // Verify token
         const decoded = verifyToken(token);
-        
+
         if (!decoded) {
-            return next(); // Ungültiger Token = kein User
+            // No valid token, but still return success
+            return res.json({ message: 'logged_out_successfully' });
         }
 
-        if (refreshToken || token) {
-            // Session löschen
-            await authPrisma.session.deleteMany({
+        if (refreshToken || decoded.sessionId) {
+            // TODO: Replace 'sessions' with your session model name
+            await authPrisma.sessions.deleteMany({
                 where: {
-                    OR: [{token: refreshToken}, { id: decoded.sessionId }]
+                    OR: [
+                        { token: refreshToken },
+                        { id: decoded.sessionId }
+                    ].filter(Boolean)
                 }
             });
         }
 
-        res.json({ message: req.getTranslation('logged_out_successfully') });
+        res.json({ message: 'logged_out_successfully' });
     } catch (error) {
         console.error('Logout Error:', error);
         throw new ErrorResponse(500, 'logout_failed');
@@ -562,10 +506,11 @@ async function getCurrentUser(req, res) {
 
 /**
  * POST /auth/google - Google SSO Login
+ * TODO: Customize this function for your schema
  */
 async function googleAuth(req, res) {
     try {
-        const { googleToken, role } = req.body; // Google OAuth Token vom Frontend
+        const { googleToken } = req.body;
 
         if (!googleToken) {
             throw new ErrorResponse(400, 'field_required', {field: 'googleToken'});
@@ -579,122 +524,40 @@ async function googleAuth(req, res) {
             throw new ErrorResponse(401, 'invalid_token', {provider: 'Google'});
         }
 
-        // Check ob User mit dieser Email existiert
-        let user = await authPrisma.user.findUnique({
+        // TODO: Customize user lookup and creation for your schema
+        // Check if user with this email exists
+        let user = await authPrisma.users.findUnique({
             where: { email: googleUser.email },
-            include: {
-                studentProfile: true,
-                companyProfile: true,
-                ssoAccounts: true,
-            },
         });
 
-        if (user) {
-            // User existiert - SSO Account aktualisieren/erstellen
-            await authPrisma.sSOAccount.upsert({
-                where: {
-                    provider_providerId: {
-                        provider: 'GOOGLE',
-                        providerId: googleUser.id,
-                    }
-                },
-                create: {
-                    userId: user.id,
-                    provider: 'GOOGLE',
-                    providerId: googleUser.id,
-                    providerEmail: googleUser.email,
-                    createdBy: user.id,
-                    updatedBy: user.id,
-                },
-                update: {
-                    providerEmail: googleUser.email,
-                    updatedBy: user.id,
-                },
-            });
-        } else {
-            // Create New User
-            if (!role || !['STUDENT', 'COMPANY'].includes(role)) {
-                throw new ErrorResponse(400, 'role_required_for_new_users_message');
-            }
-
-            user = await authPrisma.user.create({
+        if (!user) {
+            // TODO: Create new user for your schema
+            user = await authPrisma.users.create({
                 data: {
                     email: googleUser.email,
-                    emailVerified: googleUser.emailVerified ? new Date() : null,
-                    authProvider: 'GOOGLE',
-                    role,
-                    createdBy: 'system',
-                    updatedBy: 'system',
-                    ssoAccounts: {
-                        create: {
-                            provider: 'GOOGLE',
-                            providerId: googleUser.id,
-                            providerEmail: googleUser.email,
-                            createdBy: 'system',
-                            updatedBy: 'system',
-                        },
-                    },
-                    ...(role === 'STUDENT' && {
-                        studentProfile: {
-                            create: {
-                                firstName: googleUser.firstName || '',
-                                lastName: googleUser.lastName || '',
-                                createdBy: 'system',
-                                updatedBy: 'system',
-                            },
-                        },
-                    }),
-                    ...(role === 'COMPANY' && {
-                        companyProfile: {
-                            create: {
-                                companyName: '',
-                                description: '',
-                                createdBy: 'system',
-                                updatedBy: 'system',
-                            },
-                        },
-                    }),
-                },
-                include: {
-                    studentProfile: true,
-                    companyProfile: true,
+                    // TODO: Add your schema-specific fields
+                    // emailVerified: googleUser.emailVerified ? new Date() : null,
+                    // authProvider: 'GOOGLE',
                 },
             });
 
-            // Für COMPANY: Automatisch OWNER Member erstellen
-            if (role === 'COMPANY' && user.companyProfile) {
-                await authPrisma.companyMember.create({
-                    data: {
-                        companyId: user.companyProfile.id,
-                        userId: user.id,
-                        role: 'OWNER',
-                        status: 'ACTIVE',
-                        canEditCompany: true,
-                        canManageJobs: true,
-                        canViewApplications: true,
-                        canManageApplications: true,
-                        canManageMembers: true,
-                        canManageSubscription: true,
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                });
-            }
+            // TODO: Create any related records (SSO accounts, profiles, etc.)
         }
 
-        // Tokens generieren
+        // Generate tokens
         const accessToken = generateAccessToken(user);
         const refreshToken = generateRefreshToken(user);
 
-        // Session erstellen
-        await authPrisma.session.create({
+        // Create session
+        // TODO: Replace 'sessions' with your session model name
+        await authPrisma.sessions.create({
             data: {
                 userId: user.id,
                 token: refreshToken,
                 ipAddress: req.ip,
                 userAgent: req.headers['user-agent'],
                 expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                createdBy: user.id,
+                // TODO: Add any additional session fields
             }
         });
 
@@ -711,10 +574,11 @@ async function googleAuth(req, res) {
 
 /**
  * POST /auth/facebook - Facebook SSO Login
+ * TODO: Customize this function for your schema
  */
 async function facebookAuth(req, res) {
     try {
-        const { facebookToken, role } = req.body; // Facebook OAuth Token vom Frontend
+        const { facebookToken } = req.body;
 
         if (!facebookToken) {
             throw new ErrorResponse(400, 'field_required', {field: 'facebookToken'});
@@ -728,122 +592,40 @@ async function facebookAuth(req, res) {
             throw new ErrorResponse(401, 'invalid_token', {provider: 'Facebook'});
         }
 
-        // Check ob User mit dieser Email existiert
-        let user = await authPrisma.user.findUnique({
+        // TODO: Customize user lookup and creation for your schema
+        // Check if user with this email exists
+        let user = await authPrisma.users.findUnique({
             where: { email: facebookUser.email },
-            include: {
-                studentProfile: true,
-                companyProfile: true,
-                ssoAccounts: true,
-            },
         });
 
-        if (user) {
-            // User existiert - SSO Account aktualisieren/erstellen
-            await authPrisma.sSOAccount.upsert({
-                where: {
-                    provider_providerId: {
-                        provider: 'FACEBOOK',
-                        providerId: facebookUser.id,
-                    },
-                },
-                create: {
-                    userId: user.id,
-                    provider: 'FACEBOOK',
-                    providerId: facebookUser.id,
-                    providerEmail: facebookUser.email,
-                    createdBy: user.id,
-                    updatedBy: user.id,
-                },
-                update: {
-                    providerEmail: facebookUser.email,
-                    updatedBy: user.id,
-                },
-            });
-        } else {
-            // Create new User
-            if (!role || !['STUDENT', 'COMPANY'].includes(role)) {
-                throw new ErrorResponse(400, 'role_required_for_new_users_message');
-            }
-
-            user = await authPrisma.user.create({
+        if (!user) {
+            // TODO: Create new user for your schema
+            user = await authPrisma.users.create({
                 data: {
                     email: facebookUser.email,
-                    emailVerified: new Date(), // Facebook Email ist bereits verifiziert
-                    authProvider: 'FACEBOOK',
-                    role,
-                    createdBy: 'system',
-                    updatedBy: 'system',
-                    ssoAccounts: {
-                        create: {
-                            provider: 'FACEBOOK',
-                            providerId: facebookUser.id,
-                            providerEmail: facebookUser.email,
-                            createdBy: 'system',
-                            updatedBy: 'system',
-                        },
-                    },
-                    ...(role === 'STUDENT' && {
-                        studentProfile: {
-                            create: {
-                                firstName: facebookUser.firstName || '',
-                                lastName: facebookUser.lastName || '',
-                                createdBy: 'system',
-                                updatedBy: 'system',
-                            },
-                        },
-                    }),
-                    ...(role === 'COMPANY' && {
-                        companyProfile: {
-                            create: {
-                                companyName: '',
-                                description: '',
-                                createdBy: 'system',
-                                updatedBy: 'system',
-                            },
-                        },
-                    }),
-                },
-                include: {
-                    studentProfile: true,
-                    companyProfile: true,
+                    // TODO: Add your schema-specific fields
+                    // emailVerified: new Date(),
+                    // authProvider: 'FACEBOOK',
                 },
             });
 
-            // Für COMPANY: Automatisch OWNER Member erstellen
-            if (role === 'COMPANY' && user.companyProfile) {
-                await authPrisma.companyMember.create({
-                    data: {
-                        companyId: user.companyProfile.id,
-                        userId: user.id,
-                        role: 'OWNER',
-                        status: 'ACTIVE',
-                        canEditCompany: true,
-                        canManageJobs: true,
-                        canViewApplications: true,
-                        canManageApplications: true,
-                        canManageMembers: true,
-                        canManageSubscription: true,
-                        createdBy: 'system',
-                        updatedBy: 'system',
-                    },
-                });
-            }
+            // TODO: Create any related records (SSO accounts, profiles, etc.)
         }
 
-        // Tokens generieren
+        // Generate tokens
         const accessToken = generateAccessToken(user);
         const refreshToken = generateRefreshToken(user);
 
-        // Session erstellen
-        await authPrisma.session.create({
+        // Create session
+        // TODO: Replace 'sessions' with your session model name
+        await authPrisma.sessions.create({
             data: {
                 userId: user.id,
                 token: refreshToken,
                 ipAddress: req.ip,
                 userAgent: req.headers['user-agent'],
                 expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                createdBy: user.id,
+                // TODO: Add any additional session fields
             },
         });
 
@@ -868,7 +650,6 @@ module.exports = {
     requireAuth,
     requireRole,
     requireVerified,
-    requireVerifiedCompany,
 
     // Route Handlers
     register,
