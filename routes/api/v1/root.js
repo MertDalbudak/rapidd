@@ -6,7 +6,7 @@ const {
     logout,
     getCurrentUser,
     requireAuth,
-} = require('../../../middleware/auth');
+} = require('../../../rapidd/auth');
 
 const router = express.Router();
 const { rateLimitMiddleware } = require('../../../src/Api');

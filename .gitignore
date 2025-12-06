@@ -5,5 +5,4 @@
 compose.yml
 /logs
 /data/api_credentials.json
-/config/app.json
 /prisma/client

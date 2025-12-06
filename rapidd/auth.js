@@ -1,6 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
-const { authPrisma } = require('../rapidd/rapidd');
+const { authPrisma } = require('./rapidd');
 const { ErrorResponse } = require('../src/Api');
 
 const SALT_ROUNDS = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;

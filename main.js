@@ -28,8 +28,8 @@ process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout"
 const {Api, ErrorResponse, apiMiddleware} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
-const { authenticateUser } = require('./middleware/auth');
-const { setRLSContext } = require('./middleware/rls');
+const { authenticateUser } = require('./rapidd/auth');
+const { setRLSContext } = require('./rapidd/rls');
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
 const SUPPORTED_LANGUAGES = fs.readdirSync(process.env.STRINGS_PATH).map(e => path.parse(e).name);

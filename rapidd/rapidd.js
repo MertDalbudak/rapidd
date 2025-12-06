@@ -111,6 +111,20 @@ const basePrisma = new PrismaClient({
 // =====================================================
 
 /**
+ * Sanitize value for use in RLS session variables
+ * Prevents SQL injection by escaping quotes and validating input
+ * @param {string|number} value - Value to sanitize
+ * @returns {string} Sanitized value
+ */
+function sanitizeRLSValue(value) {
+    if (value === null || value === undefined) {
+        return '';
+    }
+    // Convert to string and escape single quotes
+    return String(value).replace(/'/g, "''");
+}
+
+/**
  * Sets RLS session variables for the current transaction.
  * PostgreSQL uses SET LOCAL, MySQL uses user-defined variables (@var).
  * @param {Object} tx - Prisma transaction client
@@ -120,12 +134,16 @@ const basePrisma = new PrismaClient({
 async function setRLSVariables(tx, userId, userRole) {
     const { namespace, userId: userIdVar, userRole: userRoleVar } = RLS_CONFIG;
 
+    // Sanitize inputs to prevent SQL injection
+    const safeUserId = sanitizeRLSValue(userId);
+    const safeUserRole = sanitizeRLSValue(userRole);
+
     if (dbProvider === 'mysql') {
-        await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = '${userId}'`);
-        await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = '${userRole}'`);
+        await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = '${safeUserId}'`);
+        await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = '${safeUserRole}'`);
     } else {
-        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userIdVar} = '${userId}'`);
-        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userRoleVar} = '${userRole}'`);
+        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userIdVar} = '${safeUserId}'`);
+        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userRoleVar} = '${safeUserRole}'`);
     }
 }
 
@@ -285,6 +303,9 @@ initializeDMMF();
 // EXPORTS
 // =====================================================
 
+// Lazy-load to avoid circular dependencies
+const getModelMiddleware = () => require('./modelMiddleware').modelMiddleware;
+
 module.exports = {
     // Main clients
     prisma,
@@ -311,5 +332,10 @@ module.exports = {
     dmmf,
 
     // Database info
-    dbProvider
+    dbProvider,
+
+    // Model middleware (lazy-loaded)
+    get modelMiddleware() {
+        return getModelMiddleware();
+    }
 };
