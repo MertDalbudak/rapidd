@@ -4,28 +4,66 @@ const dmmf = require('../rapidd/dmmf');
 
 const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
 
+// Pre-compiled regex patterns for better performance
+const FILTER_PATTERNS = {
+    // Split on comma, but not inside brackets
+    FILTER_SPLIT: /,(?![^\[]*\])/,
+    // ISO date format: 2024-01-01 or 2024-01-01T00:00:00
+    ISO_DATE: /^\d{4}-\d{2}-\d{2}(T.*)?$/,
+    // Pure number (integer or decimal, optionally negative)
+    PURE_NUMBER: /^-?\d+(\.\d+)?$/,
+    // Numeric operators
+    NUMERIC_OPS: ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'],
+    // Date operators
+    DATE_OPS: ['before:', 'after:', 'from:', 'to:', 'on:', 'between:']
+};
+
+/**
+ * QueryBuilder - Builds Prisma queries with relation handling, filtering, and ACL support
+ *
+ * @description
+ * A comprehensive query builder that translates simplified API requests into valid Prisma queries.
+ * Handles nested relations, field validation, filtering with operators, and access control.
+ *
+ * @example
+ * const qb = new QueryBuilder('users');
+ * const filter = qb.filter('name=%John%,age=gt:18');
+ * const include = qb.include('posts.comments', user);
+ */
 class QueryBuilder {
     /**
      * Initialize QueryBuilder with model name and configuration
-     * @param {string} name - The model name
+     * @param {string} name - The Prisma model name (e.g., 'users', 'company_profiles')
      */
     constructor(name) {
+        /** @type {string} The model name */
         this.name = name;
+        /** @private @type {Object[]|null} Cached relationships configuration */
         this._relationshipsCache = null;
+        /** @private @type {Object|null} Cached fields for related models */
+        this._relatedFieldsCache = {};
     }
 
     /**
-     * Get all fields for this model from DMMF
-     * @returns {Object} Object with field names as keys and field objects as values
+     * Get all fields for this model from DMMF (including relation fields)
+     * @returns {Object<string, Object>} Object with field names as keys and DMMF field objects as values
      */
     get fields() {
         return dmmf.getFields(this.name);
     }
 
     /**
+     * Get only scalar fields (non-relation) for this model from DMMF
+     * @returns {Object<string, Object>} Object with scalar field names as keys
+     */
+    get scalarFields() {
+        return dmmf.getScalarFields(this.name);
+    }
+
+    /**
      * Get relationships configuration for this model from DMMF
-     * Builds relationships dynamically from Prisma schema instead of relationships.json
-     * @returns {Array} Array of relationship configurations
+     * Builds relationships dynamically from Prisma schema
+     * @returns {Object[]} Array of relationship configurations with nested relation info
      */
     get relatedObjects() {
         if (this._relationshipsCache) {
@@ -38,8 +76,8 @@ class QueryBuilder {
 
     /**
      * Get DMMF model object by name
-     * @param {string} name - The model name
-     * @returns {Object} DMMF model object
+     * @param {string} [name=this.name] - The model name
+     * @returns {Object|undefined} DMMF model object or undefined if not found
      */
     getDmmfModel(name = this.name) {
         return dmmf.getModel(name);
@@ -47,11 +85,36 @@ class QueryBuilder {
 
     /**
      * Get primary key field(s) for a given model
-     * @param {string} modelName - The model name
-     * @returns {string|Array} Primary key field name or array of field names for composite keys
+     * @param {string} [modelName=this.name] - The model name
+     * @returns {string|string[]} Primary key field name or array of field names for composite keys
      */
     getPrimaryKey(modelName = this.name) {
         return dmmf.getPrimaryKey(modelName);
+    }
+
+    /**
+     * Get fields for a related model (cached for performance)
+     * @param {string} modelName - The related model name
+     * @returns {Object<string, Object>} Object with field names as keys
+     * @private
+     */
+    #getRelatedModelFields(modelName) {
+        if (!this._relatedFieldsCache[modelName]) {
+            this._relatedFieldsCache[modelName] = dmmf.getFields(modelName);
+        }
+        return this._relatedFieldsCache[modelName];
+    }
+
+    /**
+     * Check if a field exists on a model
+     * @param {string} modelName - The model name
+     * @param {string} fieldName - The field name to check
+     * @returns {boolean} True if field exists
+     * @private
+     */
+    #fieldExistsOnModel(modelName, fieldName) {
+        const fields = this.#getRelatedModelFields(modelName);
+        return fields[fieldName] != null;
     }
 
     /**
@@ -81,214 +144,286 @@ class QueryBuilder {
      * @returns {Object} Prisma where object
      */
     filter(q) {
-        if (typeof q === 'string') {
-            return q.split(/,(?![^\[]*\])/).reduce((acc, curr) => {
-                const [key, value] = curr.split('=');
-                const relation = key.split('.').map(e => e.trim());
-                const trimmedKey = relation.pop();
-                const trimmedValue = value ? value.trim() : null;
-
-                if (relation.length === 0 && !this.fields[trimmedKey]) {
-                    throw new ErrorResponse(400, "invalid_filter_field", {field: trimmedKey});
-                }
-
-                let filter = acc;
-                const relationPrisma = relation.reduce((_acc, _curr) => {
-                    let rel;
-                    if (Array.isArray(_acc)) {
-                        rel = _acc.find(rel => rel.name === _curr);
-                        if (!rel) {
-                            throw new ErrorResponse(400, "relation_not_exist", {relation: _curr, modelName: Array.isArray(_acc) ? this.name : _acc.name});
-                        }
-                    } else {
-                        rel = _acc?.relation?.find(rel => rel.name === _curr);
-                    }
-                    if (!filter[rel.name]) {
-                        if (!rel.field || (!prisma[rel.object].fields[rel.field] && (Array.isArray(_acc) ? this.fields[rel.field] : prisma[_acc.object].fields[rel.field]))) {
-                            filter[rel.name] = {};
-                            filter = filter[rel.name];
-                        } else {
-                            const listSearch = {
-                                'some': {}
-                            };
-                            filter[rel.name] = listSearch;
-                            filter = listSearch['some'];
-                        }
-                    } else {
-                        if (filter[rel.name]['some']) {
-                            filter = filter[rel.name]['some'];
-                        } else {
-                            filter = filter[rel.name];
-                        }
-                    }
-
-                    return rel;
-                }, this.relatedObjects);
-
-                // #NULL and not:#NULL handling
-                if (trimmedValue === '#NULL') {
-                    filter[trimmedKey] = null;
-                    return acc;
-                }
-                if (trimmedValue === 'not:#NULL') {
-                    filter[trimmedKey] = { not: null };
-                    return acc;
-                }
-
-                // Universal not: operator for all types
-                if (trimmedValue && trimmedValue.startsWith('not:')) {
-                    const negValue = trimmedValue.substring(4);
-
-                    // not:#NULL (is not null)
-                    if (negValue === '#NULL') {
-                        filter[trimmedKey] = { not: null };
-                        return acc;
-                    }
-
-                    // Array exclusion with wildcards
-                    if (negValue.startsWith('[') && negValue.endsWith(']')) {
-                        let arr;
-                        try {
-                            arr = JSON.parse(negValue);
-                        } catch {
-                            arr = negValue.slice(1, -1).split(',').map(v => v.trim());
-                        }
-                        // If any value contains %, treat as string filter
-                        if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
-                            // Build NOT array for Prisma
-                            filter.NOT = arr.map(v => ({
-                                [trimmedKey]: this.#filterString(v)
-                            }));
-                        } else {
-                            filter[trimmedKey] = { notIn: arr };
-                        }
-                        return acc;
-                    }
-
-                    // Special handling for between: with dates/numbers
-                    if (negValue.startsWith('between:')) {
-                        const operatorValue = negValue.substring('between:'.length);
-                        const [start, end] = operatorValue.split(';').map(v => v.trim());
-
-                        if (!start || !end) {
-                            throw new ErrorResponse(400, "between_requires_two_values");
-                        }
-
-                        // Check if values are pure numbers
-                        const isStartNumber = /^-?\d+(\.\d+)?$/.test(start);
-                        const isEndNumber = /^-?\d+(\.\d+)?$/.test(end);
-
-                        if (isStartNumber && isEndNumber) {
-                            // Handle numeric not:between: - exclude values between start and end
-                            const startNum = parseFloat(start);
-                            const endNum = parseFloat(end);
-                            // Add NOT condition with AND logic (exclude range)
-                            filter.NOT = (filter.NOT || []).concat([{
-                                AND: [
-                                    { [trimmedKey]: { gte: startNum } },
-                                    { [trimmedKey]: { lte: endNum } }
-                                ]
-                            }]);
-                        } else {
-                            // Handle date not:between: - exclude dates between start and end
-                            const startDate = new Date(start);
-                            const endDate = new Date(end);
-                            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-                                throw new ErrorResponse(400, "invalid_date_range", {start, end});
-                            }
-                            // Add NOT condition with AND logic (exclude range)
-                            filter.NOT = (filter.NOT || []).concat([{
-                                AND: [
-                                    { [trimmedKey]: { gte: startDate } },
-                                    { [trimmedKey]: { lte: endDate } }
-                                ]
-                            }]);
-                        }
-                        return acc;
-                    }
-
-                    // Date
-                    const dateFilter = this.#filterDateTime(negValue);
-                    if (dateFilter) {
-                        filter[trimmedKey] = { not: dateFilter };
-                        return acc;
-                    }
-
-                    // Number
-                    if (!isNaN(negValue) || ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:'].some(op => negValue.startsWith(op))) {
-                        const numFilter = this.#filterNumber(negValue);
-                        if (numFilter) {
-                            filter[trimmedKey] = { not: numFilter };
-                        } else {
-                            filter[trimmedKey] = { not: Number(negValue) };
-                        }
-                        return acc;
-                    }
-
-                    // String
-                    filter[trimmedKey] = { not: this.#filterString(negValue) };
-                    return acc;
-                }
-
-                if (!trimmedValue) {
-                    filter[trimmedKey] = null;
-                } else {
-                    // Check for date patterns first (since between: can be both numeric and date)
-                    const isoDateRegex = /^\d{4}-\d{2}-\d{2}(T.*)?$/;
-                    const dateOperators = ['before:', 'after:', 'from:', 'to:', 'on:'];
-                    const hasDateOperator = dateOperators.some(op => trimmedValue.startsWith(op));
-                    const isBetweenWithDates = trimmedValue.startsWith('between:') &&
-                        (trimmedValue.includes('-') && trimmedValue.includes('T') ||
-                         trimmedValue.substring(8).split(';').some(part => part.trim().match(isoDateRegex)));
-
-                    if (hasDateOperator || isBetweenWithDates || isoDateRegex.test(trimmedValue)) {
-                        const dateFilter = this.#filterDateTime(trimmedValue);
-                        if (dateFilter) {
-                            filter[trimmedKey] = dateFilter;
-                            return acc;
-                        }
-                    }
-
-                    // Try numeric operators
-                    if (!isNaN(trimmedValue) || ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'].some(op => trimmedValue.startsWith(op))) {
-                        const numFilter = this.#filterNumber(trimmedValue);
-                        if (numFilter) {
-                            filter[trimmedKey] = numFilter;
-                            return acc;
-                        }
-                    }
-                    // If numeric parsing failed but it's a number, treat as equals
-                    if (!isNaN(trimmedValue)) {
-                        filter[trimmedKey] = {
-                            'equals': Number(trimmedValue)
-                        };
-                    } 
-                    // For normal array inclusion
-                    else if (trimmedValue.startsWith('[') && trimmedValue.endsWith(']')) {
-                        let arr;
-                        try {
-                            arr = JSON.parse(trimmedValue);
-                        } catch {
-                            arr = trimmedValue.slice(1, -1).split(',').map(v => v.trim());
-                        }
-                        // If any value contains %, treat as string filter
-                        if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
-                            // Build OR array in the current filter context (not top-level)
-                            if (!filter.OR) filter.OR = [];
-                            arr.forEach(v => {
-                                filter.OR.push({ [trimmedKey]: this.#filterString(v) });
-                            });
-                        } else {
-                            filter[trimmedKey] = { in: arr };
-                        }
-                    } else {
-                        filter[trimmedKey] = this.#filterString(trimmedValue);
-                    }
-                }
-                return acc;
-            }, {});
+        if (typeof q !== 'string') {
+            return {};
         }
-        return {};
+
+        const result = {};
+        const filterParts = q.split(FILTER_PATTERNS.FILTER_SPLIT);
+
+        for (const part of filterParts) {
+            const [key, value] = part.split('=');
+            const relationPath = key.split('.').map(e => e.trim());
+            const fieldName = relationPath.pop();
+            const trimmedValue = value?.trim() ?? null;
+
+            // Validate field exists on model (for non-relation filters)
+            if (relationPath.length === 0 && !this.fields[fieldName]) {
+                throw new ErrorResponse(400, "invalid_filter_field", {field: fieldName});
+            }
+
+            // Navigate to the correct filter context for nested relations
+            const filterContext = this.#navigateToFilterContext(result, relationPath);
+
+            // Apply the filter value
+            this.#applyFilterValue(filterContext, fieldName, trimmedValue);
+        }
+
+        return result;
+    }
+
+    /**
+     * Navigate through relation path and return the filter context object
+     * @param {Object} rootFilter - Root filter object
+     * @param {string[]} relationPath - Array of relation names
+     * @returns {Object} The nested filter context to apply conditions to
+     * @private
+     */
+    #navigateToFilterContext(rootFilter, relationPath) {
+        let filter = rootFilter;
+        let currentRelations = this.relatedObjects;
+
+        for (const relationName of relationPath) {
+            // Find the relation in current context
+            const rel = Array.isArray(currentRelations)
+                ? currentRelations.find(r => r.name === relationName)
+                : currentRelations?.relation?.find(r => r.name === relationName);
+
+            if (!rel) {
+                throw new ErrorResponse(400, "relation_not_exist", {
+                    relation: relationName,
+                    modelName: this.name
+                });
+            }
+
+            // Create or navigate to the relation filter
+            if (!filter[rel.name]) {
+                const parentModelName = Array.isArray(currentRelations) ? this.name : currentRelations.object;
+                const isListRel = rel.isList || dmmf.isListRelation(parentModelName, rel.name);
+
+                if (isListRel && rel.field) {
+                    filter[rel.name] = { some: {} };
+                    filter = filter[rel.name].some;
+                } else {
+                    filter[rel.name] = {};
+                    filter = filter[rel.name];
+                }
+            } else {
+                filter = filter[rel.name].some || filter[rel.name];
+            }
+
+            currentRelations = rel;
+        }
+
+        return filter;
+    }
+
+    /**
+     * Apply a filter value to a field in the filter context
+     * @param {Object} filter - Filter context object
+     * @param {string} fieldName - Field name to filter
+     * @param {string|null} value - Filter value
+     * @private
+     */
+    #applyFilterValue(filter, fieldName, value) {
+        // Handle null values
+        if (value === '#NULL') {
+            filter[fieldName] = null;
+            return;
+        }
+        if (value === 'not:#NULL') {
+            filter[fieldName] = { not: null };
+            return;
+        }
+
+        // Handle not: prefix (negation)
+        if (value?.startsWith('not:')) {
+            this.#applyNegatedFilter(filter, fieldName, value.substring(4));
+            return;
+        }
+
+        // Handle empty/null value
+        if (!value) {
+            filter[fieldName] = null;
+            return;
+        }
+
+        // Try to apply typed filter (date, number, array, string)
+        this.#applyTypedFilter(filter, fieldName, value);
+    }
+
+    /**
+     * Apply a negated filter (not:value)
+     * @param {Object} filter - Filter context
+     * @param {string} fieldName - Field name
+     * @param {string} value - Value after not: prefix
+     * @private
+     */
+    #applyNegatedFilter(filter, fieldName, value) {
+        // not:#NULL
+        if (value === '#NULL') {
+            filter[fieldName] = { not: null };
+            return;
+        }
+
+        // not:[array]
+        if (value.startsWith('[') && value.endsWith(']')) {
+            const arr = this.#parseArrayValue(value);
+            if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
+                filter.NOT = arr.map(v => ({ [fieldName]: this.#filterString(v) }));
+            } else {
+                filter[fieldName] = { notIn: arr };
+            }
+            return;
+        }
+
+        // not:between:
+        if (value.startsWith('between:')) {
+            this.#applyNotBetween(filter, fieldName, value.substring(8));
+            return;
+        }
+
+        // Try date filter
+        const dateFilter = this.#filterDateTime(value);
+        if (dateFilter) {
+            filter[fieldName] = { not: dateFilter };
+            return;
+        }
+
+        // Try number filter
+        if (this.#looksLikeNumber(value)) {
+            const numFilter = this.#filterNumber(value);
+            filter[fieldName] = numFilter ? { not: numFilter } : { not: Number(value) };
+            return;
+        }
+
+        // Default to string filter
+        filter[fieldName] = { not: this.#filterString(value) };
+    }
+
+    /**
+     * Apply not:between: filter
+     * @param {Object} filter - Filter context
+     * @param {string} fieldName - Field name
+     * @param {string} rangeValue - Range value (start;end)
+     * @private
+     */
+    #applyNotBetween(filter, fieldName, rangeValue) {
+        const [start, end] = rangeValue.split(';').map(v => v.trim());
+
+        if (!start || !end) {
+            throw new ErrorResponse(400, "between_requires_two_values");
+        }
+
+        const isNumeric = FILTER_PATTERNS.PURE_NUMBER.test(start) && FILTER_PATTERNS.PURE_NUMBER.test(end);
+
+        if (isNumeric) {
+            filter.NOT = (filter.NOT || []).concat([{
+                AND: [
+                    { [fieldName]: { gte: parseFloat(start) } },
+                    { [fieldName]: { lte: parseFloat(end) } }
+                ]
+            }]);
+        } else {
+            const startDate = new Date(start);
+            const endDate = new Date(end);
+            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+                throw new ErrorResponse(400, "invalid_date_range", {start, end});
+            }
+            filter.NOT = (filter.NOT || []).concat([{
+                AND: [
+                    { [fieldName]: { gte: startDate } },
+                    { [fieldName]: { lte: endDate } }
+                ]
+            }]);
+        }
+    }
+
+    /**
+     * Apply typed filter (auto-detect type: date, number, array, string)
+     * @param {Object} filter - Filter context
+     * @param {string} fieldName - Field name
+     * @param {string} value - Filter value
+     * @private
+     */
+    #applyTypedFilter(filter, fieldName, value) {
+        // Check for date patterns first
+        const hasDateOperator = FILTER_PATTERNS.DATE_OPS.some(op => value.startsWith(op));
+        const isIsoDate = FILTER_PATTERNS.ISO_DATE.test(value);
+        const isBetweenWithDates = value.startsWith('between:') && this.#looksLikeDateRange(value);
+
+        if (hasDateOperator || isIsoDate || isBetweenWithDates) {
+            const dateFilter = this.#filterDateTime(value);
+            if (dateFilter) {
+                filter[fieldName] = dateFilter;
+                return;
+            }
+        }
+
+        // Try numeric filter
+        if (this.#looksLikeNumber(value)) {
+            const numFilter = this.#filterNumber(value);
+            if (numFilter) {
+                filter[fieldName] = numFilter;
+                return;
+            }
+            // Plain number
+            if (!isNaN(value)) {
+                filter[fieldName] = { equals: Number(value) };
+                return;
+            }
+        }
+
+        // Array filter
+        if (value.startsWith('[') && value.endsWith(']')) {
+            const arr = this.#parseArrayValue(value);
+            if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
+                if (!filter.OR) filter.OR = [];
+                arr.forEach(v => filter.OR.push({ [fieldName]: this.#filterString(v) }));
+            } else {
+                filter[fieldName] = { in: arr };
+            }
+            return;
+        }
+
+        // Default to string filter
+        filter[fieldName] = this.#filterString(value);
+    }
+
+    /**
+     * Check if value looks like a number or numeric operator
+     * @param {string} value - Value to check
+     * @returns {boolean}
+     * @private
+     */
+    #looksLikeNumber(value) {
+        return !isNaN(value) || FILTER_PATTERNS.NUMERIC_OPS.some(op => value.startsWith(op));
+    }
+
+    /**
+     * Check if between: value contains dates
+     * @param {string} value - Full between: value
+     * @returns {boolean}
+     * @private
+     */
+    #looksLikeDateRange(value) {
+        const rangeValue = value.substring(8); // Remove 'between:'
+        return (value.includes('-') && value.includes('T')) ||
+            rangeValue.split(';').some(part => FILTER_PATTERNS.ISO_DATE.test(part.trim()));
+    }
+
+    /**
+     * Parse array value from string
+     * @param {string} value - Array string like "[1,2,3]"
+     * @returns {Array}
+     * @private
+     */
+    #parseArrayValue(value) {
+        try {
+            return JSON.parse(value);
+        } catch {
+            return value.slice(1, -1).split(',').map(v => v.trim());
+        }
     }
 
     /**
@@ -333,9 +468,7 @@ class QueryBuilder {
      * @returns {Object|null} Prisma date filter or null
      */
     #filterDateTime(value) {
-        const dateOperators = ['before:', 'after:', 'from:', 'to:', 'between:', 'on:'];
-        const foundOperator = dateOperators.find(op => value.startsWith(op));
-
+        const foundOperator = FILTER_PATTERNS.DATE_OPS.find(op => value.startsWith(op));
         if (!foundOperator) {
             return null;
         }
@@ -343,70 +476,66 @@ class QueryBuilder {
         const operatorValue = value.substring(foundOperator.length);
 
         try {
-            switch (foundOperator) {
-                case 'before:':
-                    const beforeDate = new Date(operatorValue);
-                    if (isNaN(beforeDate.getTime())) {
-                        throw new Error(`Invalid date: ${operatorValue}`);
-                    }
-                    return { lt: beforeDate };
-                case 'after:':
-                    const afterDate = new Date(operatorValue);
-                    if (isNaN(afterDate.getTime())) {
-                        throw new Error(`Invalid date: ${operatorValue}`);
-                    }
-                    return { gt: afterDate };
-                case 'from:':
-                    const fromDate = new Date(operatorValue);
-                    if (isNaN(fromDate.getTime())) {
-                        throw new Error(`Invalid date: ${operatorValue}`);
-                    }
-                    return { gte: fromDate };
-                case 'to:':
-                    const toDate = new Date(operatorValue);
-                    if (isNaN(toDate.getTime())) {
-                        throw new Error(`Invalid date: ${operatorValue}`);
-                    }
-                    return { lte: toDate };
-                case 'on:':
-                    const date = new Date(operatorValue);
-                    if (isNaN(date.getTime())) {
-                        throw new Error(`Invalid date: ${operatorValue}`);
-                    }
-                    const startOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
-                    const endOfDay = new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1);
-                    return {
-                        gte: startOfDay,
-                        lt: endOfDay
-                    };
-                case 'between:':
-                    const [startDate, endDate] = operatorValue.split(';').map(d => d.trim());
-                    if (!startDate || !endDate) {
-                        throw new ErrorResponse(400, "between_requires_two_values");
-                    }
+            // Map operators to Prisma comparison operators
+            const simpleOperatorMap = {
+                'before:': 'lt',
+                'after:': 'gt',
+                'from:': 'gte',
+                'to:': 'lte'
+            };
 
-                    // If both values look like pure numbers (not dates), let the number filter handle it
-                    const isStartNumber = /^-?\d+(\.\d+)?$/.test(startDate);
-                    const isEndNumber = /^-?\d+(\.\d+)?$/.test(endDate);
-                    if (isStartNumber && isEndNumber) {
-                        return null; // Let #filterNumber handle numeric between
-                    }
-
-                    const startDateObj = new Date(startDate);
-                    const endDateObj = new Date(endDate);
-                    if (isNaN(startDateObj.getTime()) || isNaN(endDateObj.getTime())) {
-                        throw new ErrorResponse(400, "invalid_date_range", {start: startDate, end: endDate});
-                    }
-                    return {
-                        gte: startDateObj,
-                        lte: endDateObj
-                    };
-                default:
-                    return null;
+            // Handle simple date operators
+            if (simpleOperatorMap[foundOperator]) {
+                const date = this.#parseDate(operatorValue);
+                return { [simpleOperatorMap[foundOperator]]: date };
             }
+
+            // Handle 'on:' - match entire day
+            if (foundOperator === 'on:') {
+                const date = this.#parseDate(operatorValue);
+                return {
+                    gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
+                    lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1)
+                };
+            }
+
+            // Handle 'between:'
+            if (foundOperator === 'between:') {
+                const [start, end] = operatorValue.split(';').map(d => d.trim());
+                if (!start || !end) {
+                    throw new ErrorResponse(400, "between_requires_two_values");
+                }
+
+                // If both values are pure numbers, let #filterNumber handle it
+                if (FILTER_PATTERNS.PURE_NUMBER.test(start) && FILTER_PATTERNS.PURE_NUMBER.test(end)) {
+                    return null;
+                }
+
+                const startDate = this.#parseDate(start);
+                const endDate = this.#parseDate(end);
+                return { gte: startDate, lte: endDate };
+            }
+
+            return null;
         } catch (error) {
+            if (error instanceof ErrorResponse) throw error;
             throw new ErrorResponse(400, "invalid_date_format", {value, error: error.message});
         }
+    }
+
+    /**
+     * Parse a date string and validate it
+     * @param {string} dateStr - Date string to parse
+     * @returns {Date} Parsed date
+     * @throws {Error} If date is invalid
+     * @private
+     */
+    #parseDate(dateStr) {
+        const date = new Date(dateStr);
+        if (isNaN(date.getTime())) {
+            throw new Error(`Invalid date: ${dateStr}`);
+        }
+        return date;
     }
 
     /**
@@ -414,83 +543,96 @@ class QueryBuilder {
      * @param {string} value - String filter value
      * @returns {Object|boolean} Prisma string filter or boolean value
      */
-    #filterString(value){
-        if (value.startsWith('%') && value.endsWith('%')) {
-            // Remove the outer % signs, then decode the inner content
-            const innerValue = value.slice(1, -1);
-            return {
-                'contains': decodeURIComponent(innerValue)
-            };
+    #filterString(value) {
+        // Handle boolean literals
+        if (value === 'true') return true;
+        if (value === 'false') return false;
+
+        const startsWithWildcard = value.startsWith('%');
+        const endsWithWildcard = value.endsWith('%');
+
+        // %value% -> contains
+        if (startsWithWildcard && endsWithWildcard) {
+            return { contains: decodeURIComponent(value.slice(1, -1)) };
         }
-        else{
-            if(value.startsWith('%')){
-                // Remove the leading %, then decode
-                const innerValue = value.slice(1);
-                return {
-                    'endsWith': decodeURIComponent(innerValue)
-                };
-            }
-            else{
-                if (value.endsWith('%')) {
-                    // Remove the trailing %, then decode
-                    const innerValue = value.slice(0, -1);
-                    return {
-                        'startsWith': decodeURIComponent(innerValue)
-                    };
-                }
-                else{
-                    switch(value){
-                        case "true":
-                            return true;
-                        case "false":
-                            return false;
-                        default:
-                            return {
-                                'equals': decodeURIComponent(value)
-                            };
-                    }
-                }
+        // %value -> endsWith
+        if (startsWithWildcard) {
+            return { endsWith: decodeURIComponent(value.slice(1)) };
+        }
+        // value% -> startsWith
+        if (endsWithWildcard) {
+            return { startsWith: decodeURIComponent(value.slice(0, -1)) };
+        }
+        // exact match
+        return { equals: decodeURIComponent(value) };
+    }
+
+    /**
+     * Build base include content with omit fields and ACL filter
+     * @param {Object} relation - Relation configuration
+     * @param {Object} user - User object with role
+     * @param {string} parentModel - Parent model name
+     * @returns {{content: Object|true, hasContent: boolean}} Include content and whether it has properties
+     * @private
+     */
+    #buildBaseIncludeContent(relation, user, parentModel) {
+        const content = {};
+        let hasContent = false;
+
+        // Add omit fields for this relation if available
+        const omitFields = this.getRelatedOmit(relation.object, user);
+        if (Object.keys(omitFields).length > 0) {
+            content.omit = omitFields;
+            hasContent = true;
+        }
+
+        // Apply ACL access filter (only for list relations - Prisma restriction)
+        const isListRelation = this.#isListRelation(parentModel, relation.name);
+        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
+            const accessFilter = acl.model[relation.object].getAccessFilter(user);
+            const cleanedFilter = this.cleanFilter(accessFilter);
+            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, parentModel);
+            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
+                content.where = simplifiedFilter;
+                hasContent = true;
             }
         }
+
+        return { content, hasContent };
+    }
+
+    /**
+     * Check if include content has meaningful properties
+     * @param {Object} content - Include content object
+     * @returns {boolean}
+     * @private
+     */
+    #hasIncludeContent(content) {
+        return content.omit || content.where ||
+            (content.include && Object.keys(content.include).length > 0);
     }
 
     /**
      * Build deep relationship include object with access controls
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
-     * @param {string} parentModel - Parent model name that owns this relation
-     * @returns {Object} Prisma include/select object
+     * @param {string} [parentModel] - Parent model name that owns this relation
+     * @returns {Object|true} Prisma include/select object
      */
     #includeDeepRelationships(relation, user, parentModel = null) {
         const currentParent = parentModel || this.name;
-        const child_relation = relation.relation;
-        let content = { include: {} };
+        const { content } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        content.include = {};
 
-        // Add omit fields for this relation if available
-        const omitFields = this.getRelatedOmit(relation.object, user);
-        if (Object.keys(omitFields).length > 0) {
-            content.omit = omitFields;
-        }
-
-        // Apply ACL access filter for this relation (only for list relations)
-        // Prisma only allows 'where' on list relations (arrays), not on singular relations
-        const isListRelation = this.#isListRelation(currentParent, relation.name);
-        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
-            const accessFilter = acl.model[relation.object].getAccessFilter(user);
-            const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
-            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
-                content.where = simplifiedFilter;
+        // Recursively include child relations
+        const childRelations = relation.relation;
+        if (Array.isArray(childRelations)) {
+            for (const child of childRelations) {
+                content.include[child.name] = this.#includeDeepRelationships(child, user, relation.object);
             }
         }
 
-        if (Array.isArray(child_relation)) {
-            for (let i = 0; i < child_relation.length; i++) {
-                const _child_relation = this.#includeDeepRelationships(child_relation[i], user, relation.object);
-                content.include[child_relation[i].name] = _child_relation;
-            }
-        }
-        return content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return this.#hasIncludeContent(content) ? content : true;
     }
 
     /**
@@ -499,123 +641,72 @@ class QueryBuilder {
      * @returns {Array} Array of relationship configurations for the model
      */
     #getRelationshipsForModel(modelName) {
-        if (!modelName) {
-            return [];
-        }
-        return dmmf.buildRelationships(modelName);
+        return modelName ? dmmf.buildRelationships(modelName) : [];
     }
 
     /**
      * Build top-level only relationship include (no deep relations)
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
-     * @param {string} parentModel - Parent model name that owns this relation
-     * @returns {Object} Prisma include/select object for top-level only
+     * @param {string} [parentModel] - Parent model name that owns this relation
+     * @returns {Object|true} Prisma include/select object for top-level only
      */
     #includeTopLevelOnly(relation, user, parentModel = null) {
         const currentParent = parentModel || this.name;
-        let content;
-
-        // Check if there are omit fields for this relation
-        const omitFields = this.getRelatedOmit(relation.object, user);
-        if (Object.keys(omitFields).length > 0) {
-            content = { omit: omitFields };
-        } else {
-            content = true; // Include all fields but no nested relations
-        }
-
-        // Apply ACL access filter for this relation (only for list relations)
-        // Prisma only allows 'where' on list relations (arrays), not on singular relations
-        const isListRelation = this.#isListRelation(currentParent, relation.name);
-        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
-            const accessFilter = acl.model[relation.object].getAccessFilter(user);
-            const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
-            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
-                if (content === true) {
-                    content = { where: simplifiedFilter };
-                } else if (typeof content === 'object') {
-                    content.where = simplifiedFilter;
-                }
-            }
-        }
-
-        return content;
+        const { content, hasContent } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        return hasContent ? content : true;
     }
 
     /**
      * Build selective deep relationship include based on dot notation paths
      * @param {Object} relation - Relation configuration
      * @param {Object} user - User object with role
-     * @param {Array} deepPaths - Array of deep paths (e.g., ['agency', 'courses.subject'])
-     * @param {string} parentModel - Parent model name that owns this relation
-     * @returns {Object} Prisma include/select object with selective deep relations
+     * @param {string[]} deepPaths - Array of deep paths (e.g., ['agency', 'courses.subject'])
+     * @param {string} [parentModel] - Parent model name that owns this relation
+     * @returns {Object|true} Prisma include/select object with selective deep relations
      */
     #includeSelectiveDeepRelationships(relation, user, deepPaths, parentModel = null) {
         const currentParent = parentModel || this.name;
-        let content = { include: {} };
+        const { content } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        content.include = {};
 
-        // Add omit fields for this relation if available
-        const omitFields = this.getRelatedOmit(relation.object, user);
-        if (Object.keys(omitFields).length > 0) {
-            content.omit = omitFields;
-        }
-
-        // Apply ACL access filter for this relation (only for list relations)
-        // Prisma only allows 'where' on list relations (arrays), not on singular relations
-        const isListRelation = this.#isListRelation(currentParent, relation.name);
-        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
-            const accessFilter = acl.model[relation.object].getAccessFilter(user);
-            const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, currentParent);
-            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
-                content.where = simplifiedFilter;
-            }
-        }
-
-        // Process each deep path
-        if (deepPaths && deepPaths.length > 0) {
-            const pathsByRelation = {};
-
-            // Group paths by their first level relation
-            deepPaths.forEach(path => {
-                const parts = path.split('.');
-                const firstLevel = parts[0];
-                if (!pathsByRelation[firstLevel]) {
-                    pathsByRelation[firstLevel] = [];
-                }
-                if (parts.length > 1) {
-                    pathsByRelation[firstLevel].push(parts.slice(1).join('.'));
-                } else {
-                    pathsByRelation[firstLevel].push(''); // Mark as include this level
-                }
-            });
-
-            // Load child object's relationships from relationships.json
+        // Process deep paths if any
+        if (deepPaths?.length > 0) {
+            // Group paths by first-level relation
+            const pathsByRelation = this.#groupPathsByFirstLevel(deepPaths);
             const childRelationships = this.#getRelationshipsForModel(relation.object);
 
-            // Build includes for each requested relation
-            for (const relationName in pathsByRelation) {
+            for (const [relationName, paths] of Object.entries(pathsByRelation)) {
                 const childRelation = childRelationships.find(r => r.name === relationName);
+                if (!childRelation) continue;
 
-                if (childRelation) {
-                    let childInclude;
-                    const childPaths = pathsByRelation[relationName].filter(p => p !== '');
-
-                    if (childPaths.length > 0) {
-                        // Recursively build selective deep relationships
-                        childInclude = this.#includeSelectiveDeepRelationships(childRelation, user, childPaths, relation.object);
-                    } else {
-                        // Only include this level
-                        childInclude = this.#includeTopLevelOnly(childRelation, user, relation.object);
-                    }
-
-                    content.include[relationName] = childInclude;
-                }
+                const childPaths = paths.filter(p => p !== '');
+                content.include[relationName] = childPaths.length > 0
+                    ? this.#includeSelectiveDeepRelationships(childRelation, user, childPaths, relation.object)
+                    : this.#includeTopLevelOnly(childRelation, user, relation.object);
             }
         }
 
-        return content.hasOwnProperty('omit') || content.hasOwnProperty('where') || (content.hasOwnProperty('include') && Object.keys(content.include).length > 0) ? content : true;
+        return this.#hasIncludeContent(content) ? content : true;
+    }
+
+    /**
+     * Group dot-notation paths by their first level
+     * @param {string[]} paths - Array of paths like ['agency', 'courses.subject']
+     * @returns {Object<string, string[]>} Paths grouped by first level
+     * @private
+     */
+    #groupPathsByFirstLevel(paths) {
+        const grouped = {};
+        for (const path of paths) {
+            const parts = path.split('.');
+            const firstLevel = parts[0];
+            if (!grouped[firstLevel]) {
+                grouped[firstLevel] = [];
+            }
+            grouped[firstLevel].push(parts.length > 1 ? parts.slice(1).join('.') : '');
+        }
+        return grouped;
     }
 
     /**
@@ -773,137 +864,219 @@ class QueryBuilder {
 
     /**
      * Process data for create operation with relation handling
-     * @param {Object} data - Data to create
-     * @param {number} user_id - ID of creating user
+     * Transforms nested relation data into Prisma create/connect syntax
+     * @param {Object} data - Data to create (mutated in place)
+     * @param {Object} [user=null] - User object for audit fields
      */
     create(data, user = null) {
         this.#cleanTimestampFields(data);
-        for (let key in data) {
-            if (this.fields[key] == null) {
-                const relatedObject = this.relatedObjects.find(e => e.name === key);
-                if (relatedObject == null) {
-                    throw new ErrorResponse(400, "unexpected_key", {key});
-                } else {
-                    if (data[key]) {
-                        if (Array.isArray(data[key])) {
-                            for (let i = 0; i < data[key].length; i++) {
-                                this.#cleanTimestampFields(data[key][i]);
-                                let relation = false;
-                                for (let _key in data[key][i]) {
-                                    if (prisma[relatedObject.object].fields[_key] == null) {
-                                        throw new ErrorResponse(400, "unexpected_key", {key: `${key}.${_key}`});
-                                    }
-                                    if (relatedObject.fields && relatedObject.fields.includes(_key)) {
-                                        const sub_data_clone = { ...data[key][i] };
-                                        delete sub_data_clone[_key];
-                                        const index = relatedObject.fields.findIndex(f => f === _key);
-                                        if (index > 0) {
-                                            const relPrimaryKey = relatedObject.relation[index - 1].foreignKey || this.getPrimaryKey(relatedObject.relation[index - 1].object);
-                                            data[key][i] = {
-                                                [relatedObject.relation[index - 1].name]: {
-                                                    'connect': {
-                                                        [relPrimaryKey]: data[key][i][_key]
-                                                    }
-                                                },
-                                                ...sub_data_clone
-                                            };
-                                            relation = true;
-                                        } else {
-                                            delete data[key][i][_key];
-                                        }
-                                    }
-                                }
-                            }
 
-                            data[key] = {
-                                'create': data[key].filter(e => e.id == null),
-                                'connect': data[key].filter(e => e.id).map(e => ({
-                                    [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
-                                }))
-                            };
-                        } else {
-                            this.#cleanTimestampFields(data[key]);
+        for (const key of Object.keys(data)) {
+            const field = this.fields[key];
+            const isRelationField = field?.kind === 'object';
 
-                            for (let _key in data[key]) {
-                                if (prisma[relatedObject.object].fields[_key] == null) {
-                                    throw new ErrorResponse(400, "unexpected_key", {key: `${key}.${_key}`});
-                                }
-                                const child_relation = relatedObject?.relation?.find(e => e.field === _key);
-                                if (child_relation) {
-                                    if(data[key][_key]){
-                                        const childPrimaryKey = child_relation.foreignKey || this.getPrimaryKey(child_relation.object);
-                                        data[key][child_relation.name] = {
-                                            'connect': {
-                                                [childPrimaryKey]: data[key][_key]
-                                            }
-                                        };
-                                    }
-                                    delete data[key][_key];
-                                }
-                            }
-                            data[key] = {
-                                'create': {
-                                    ...data[key]
-                                }
-                            };
-                        }
-                    }
-                }
+            // Handle relation fields or unknown keys
+            if (field == null || isRelationField) {
+                this.#processCreateRelation(data, key);
             } else {
-                const relatedObject = this.relatedObjects.find(e => e.field === key);
-                if (relatedObject) {
-                    if(data[key]){
-                        data[relatedObject.name] = {
-                            'connect': {
-                                [relatedObject.foreignKey || 'id']: data[key]
-                            }
-                        };
-                    }
-                    delete data[key];
+                // Check if this scalar field is a FK that should become a connect
+                this.#processCreateForeignKey(data, key);
+            }
+        }
+    }
+
+    /**
+     * Process a relation field for create operation
+     * @param {Object} data - Parent data object
+     * @param {string} key - Relation field name
+     * @private
+     */
+    #processCreateRelation(data, key) {
+        const relatedObject = this.relatedObjects.find(e => e.name === key);
+        if (!relatedObject) {
+            throw new ErrorResponse(400, "unexpected_key", {key});
+        }
+
+        if (!data[key]) return;
+
+        if (Array.isArray(data[key])) {
+            data[key] = this.#processCreateArrayRelation(data[key], relatedObject, key);
+        } else {
+            data[key] = this.#processCreateSingleRelation(data[key], relatedObject, key);
+        }
+    }
+
+    /**
+     * Process array relation for create operation
+     * @param {Array} items - Array of relation items
+     * @param {Object} relatedObject - Relation configuration
+     * @param {string} relationName - Name of the relation
+     * @returns {Object} Prisma create/connect structure
+     * @private
+     */
+    #processCreateArrayRelation(items, relatedObject, relationName) {
+        for (let i = 0; i < items.length; i++) {
+            this.#cleanTimestampFields(items[i]);
+            this.#validateAndTransformRelationItem(items[i], relatedObject, relationName);
+        }
+
+        const foreignKey = relatedObject.foreignKey || 'id';
+        return {
+            create: items.filter(e => e.id == null),
+            connect: items.filter(e => e.id).map(e => ({ [foreignKey]: e[foreignKey] }))
+        };
+    }
+
+    /**
+     * Process single relation for create operation
+     * @param {Object} item - Relation data
+     * @param {Object} relatedObject - Relation configuration
+     * @param {string} relationName - Name of the relation
+     * @returns {Object} Prisma create structure
+     * @private
+     */
+    #processCreateSingleRelation(item, relatedObject, relationName) {
+        this.#cleanTimestampFields(item);
+
+        for (const fieldKey of Object.keys(item)) {
+            if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
+                throw new ErrorResponse(400, "unexpected_key", {key: `${relationName}.${fieldKey}`});
+            }
+
+            // Check if this field is a FK that should become a nested connect
+            const childRelation = relatedObject?.relation?.find(e => e.field === fieldKey);
+            if (childRelation && item[fieldKey]) {
+                const childPrimaryKey = childRelation.foreignKey || this.getPrimaryKey(childRelation.object);
+                item[childRelation.name] = {
+                    connect: { [childPrimaryKey]: item[fieldKey] }
+                };
+                delete item[fieldKey];
+            }
+        }
+
+        return { create: { ...item } };
+    }
+
+    /**
+     * Validate relation item fields and transform nested FK references
+     * @param {Object} item - Relation item to validate/transform
+     * @param {Object} relatedObject - Relation configuration
+     * @param {string} relationName - Parent relation name for error messages
+     * @private
+     */
+    #validateAndTransformRelationItem(item, relatedObject, relationName) {
+        for (const fieldKey of Object.keys(item)) {
+            if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
+                throw new ErrorResponse(400, "unexpected_key", {key: `${relationName}.${fieldKey}`});
+            }
+
+            // Handle composite FK fields
+            if (relatedObject.fields?.includes(fieldKey)) {
+                const index = relatedObject.fields.findIndex(f => f === fieldKey);
+                if (index > 0 && relatedObject.relation?.[index - 1]) {
+                    const rel = relatedObject.relation[index - 1];
+                    const relPrimaryKey = rel.foreignKey || this.getPrimaryKey(rel.object);
+                    const restData = { ...item };
+                    delete restData[fieldKey];
+
+                    Object.assign(item, {
+                        [rel.name]: { connect: { [relPrimaryKey]: item[fieldKey] } },
+                        ...restData
+                    });
+                    delete item[fieldKey];
+                } else {
+                    delete item[fieldKey];
                 }
             }
         }
     }
 
     /**
+     * Process a scalar field that might be a FK needing connect transformation
+     * @param {Object} data - Parent data object
+     * @param {string} key - Field name
+     * @private
+     */
+    #processCreateForeignKey(data, key) {
+        const relatedObject = this.relatedObjects.find(e => e.field === key);
+        if (!relatedObject) return;
+
+        if (data[key]) {
+            const foreignKey = relatedObject.foreignKey || 'id';
+            data[relatedObject.name] = {
+                connect: { [foreignKey]: data[key] }
+            };
+        }
+        delete data[key];
+    }
+
+    /**
      * Process data for update operation with nested relation support
-     * @param {number} id - ID of record to update
-     * @param {Object} data - Data to update
-     * @param {Object} user - User object for ACL checks
+     * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
+     * @param {string|number} id - ID of record to update
+     * @param {Object} data - Data to update (mutated in place)
+     * @param {Object} [user=null] - User object for ACL checks
      */
     update(id, data, user = null) {
         this.#cleanTimestampFields(data);
 
-        for (let key in data) {
-            if (this.fields[key] == null) {
-                const relatedObject = this.relatedObjects.find(e => e.name === key);
-                if (relatedObject == null) {
-                    throw new ErrorResponse(400, "unexpected_key", {key});
-                } else {
-                    if (data[key]) {
-                        if (Array.isArray(data[key])) {
-                            data[key] = this.#processArrayRelation(data[key], relatedObject, id, user);
-                        } else {
-                            data[key] = this.#processSingleRelation(data[key], relatedObject, user);
-                        }
-                    }
-                }
+        for (const key of Object.keys(data)) {
+            const field = this.fields[key];
+            const isRelationField = field?.kind === 'object';
+
+            // Handle relation fields or unknown keys
+            if (field == null || isRelationField) {
+                this.#processUpdateRelation(data, key, id, user);
             } else {
-                const relatedObject = this.relatedObjects.find(e => e.field === key);
-                if (relatedObject) {
-                    if (data[key] != null) {
-                        data[relatedObject.name] = {
-                            'connect': {
-                                [relatedObject.foreignKey || 'id']: data[key]
-                            }
-                        };
-                    } else {
-                        data[relatedObject.name] = { 'disconnect': true };
-                    }
-                    delete data[key];
-                }
+                // Check if this scalar field is a FK that should become a connect/disconnect
+                this.#processUpdateForeignKey(data, key);
             }
         }
+    }
+
+    /**
+     * Process a relation field for update operation
+     * @param {Object} data - Parent data object
+     * @param {string} key - Relation field name
+     * @param {string|number} parentId - Parent record ID
+     * @param {Object} user - User for ACL
+     * @private
+     */
+    #processUpdateRelation(data, key, parentId, user) {
+        const relatedObject = this.relatedObjects.find(e => e.name === key);
+        if (!relatedObject) {
+            throw new ErrorResponse(400, "unexpected_key", {key});
+        }
+
+        if (!data[key]) return;
+
+        if (Array.isArray(data[key])) {
+            data[key] = this.#processArrayRelation(data[key], relatedObject, parentId, user);
+        } else {
+            data[key] = this.#processSingleRelation(data[key], relatedObject, user);
+        }
+    }
+
+    /**
+     * Process a scalar field that might be a FK needing connect/disconnect transformation
+     * @param {Object} data - Parent data object
+     * @param {string} key - Field name
+     * @private
+     */
+    #processUpdateForeignKey(data, key) {
+        const relatedObject = this.relatedObjects.find(e => e.field === key);
+        if (!relatedObject) return;
+
+        const foreignKey = relatedObject.foreignKey || 'id';
+
+        if (data[key] != null) {
+            data[relatedObject.name] = {
+                connect: { [foreignKey]: data[key] }
+            };
+        } else {
+            data[relatedObject.name] = { disconnect: true };
+        }
+        delete data[key];
     }
     
     /**
@@ -918,9 +1091,9 @@ class QueryBuilder {
         for (let i = 0; i < dataArray.length; i++) {
             this.#cleanTimestampFields(dataArray[i]);
 
-            // Validate all fields
+            // Validate all fields exist on the related model
             for (let _key in dataArray[i]) {
-                if (prisma[relatedObject.object].fields[_key] == null) {
+                if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
                     throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
                 }
             }
@@ -993,9 +1166,9 @@ class QueryBuilder {
      * @returns {Object|null} Prisma upsert operation or null
      */
     #processSingleRelation(dataObj, relatedObject, user = null) {
-        // Validate all fields first
+        // Validate all fields exist on the related model
         for (let _key in dataObj) {
-            if (prisma[relatedObject.object].fields[_key] == null) {
+            if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
                 throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
             }
         }
@@ -1246,153 +1419,79 @@ class QueryBuilder {
 }
 
 /**
+ * Prisma error code mappings
+ * Maps Prisma error codes to HTTP status codes and user-friendly messages
+ */
+const PRISMA_ERROR_MAP = {
+    // Connection errors
+    P1001: { status: 500, message: 'Connection to the database could not be established' },
+
+    // Query errors (4xx - client errors)
+    P2000: { status: 400, message: 'The provided value for the column is too long' },
+    P2001: { status: 404, message: 'The record searched for in the where condition does not exist' },
+    P2002: { status: 409, message: null }, // Dynamic message for duplicates
+    P2003: { status: 400, message: 'Foreign key constraint failed' },
+    P2004: { status: 400, message: 'A constraint failed on the database' },
+    P2005: { status: 400, message: 'The value stored in the database is invalid for the field type' },
+    P2006: { status: 400, message: 'The provided value is not valid' },
+    P2007: { status: 400, message: 'Data validation error' },
+    P2008: { status: 400, message: 'Failed to parse the query' },
+    P2009: { status: 400, message: 'Failed to validate the query' },
+    P2010: { status: 500, message: 'Raw query failed' },
+    P2011: { status: 400, message: 'Null constraint violation' },
+    P2012: { status: 400, message: 'Missing a required value' },
+    P2013: { status: 400, message: 'Missing the required argument' },
+    P2014: { status: 400, message: 'The change would violate the required relation' },
+    P2015: { status: 404, message: 'A related record could not be found' },
+    P2016: { status: 400, message: 'Query interpretation error' },
+    P2017: { status: 400, message: 'The records for relation are not connected' },
+    P2018: { status: 404, message: 'The required connected records were not found' },
+    P2019: { status: 400, message: 'Input error' },
+    P2020: { status: 400, message: 'Value out of range for the type' },
+    P2021: { status: 404, message: 'The table does not exist in the current database' },
+    P2022: { status: 404, message: 'The column does not exist in the current database' },
+    P2023: { status: 400, message: 'Inconsistent column data' },
+    P2024: { status: 408, message: 'Timed out fetching a new connection from the connection pool' },
+    P2025: { status: 404, message: 'Operation failed: required records not found' },
+    P2026: { status: 400, message: 'Database provider does not support this feature' },
+    P2027: { status: 500, message: 'Multiple errors occurred during query execution' },
+    P2028: { status: 500, message: 'Transaction API error' },
+    P2030: { status: 404, message: 'Cannot find a fulltext index for the search' },
+    P2033: { status: 400, message: 'A number in the query exceeds 64 bit signed integer' },
+    P2034: { status: 409, message: 'Transaction failed due to write conflict or deadlock' }
+};
+
+/**
  * Handle Prisma errors and convert to standardized error responses
  * @param {Error|string} error - Error object or message
- * @param {Object} data - Additional data context
- * @returns {Object} Standardized error response with status_code and message
+ * @param {Object} [data={}] - Additional data context for error messages
+ * @returns {{status_code: number, message: string}} Standardized error response
  */
-QueryBuilder.errorHandler = (error, data = {})=>{
+QueryBuilder.errorHandler = (error, data = {}) => {
     console.error(error);
 
-    let status_code = error.status_code || 500;
-    let message = error instanceof ErrorResponse == false && process.env.NODE_ENV == "production" ? "Something went wrong" :  (error.message || error.toString());
+    // Default values
+    let statusCode = error.status_code || 500;
+    let message = error instanceof ErrorResponse
+        ? error.message
+        : (process.env.NODE_ENV === 'production' ? 'Something went wrong' : (error.message || String(error)));
 
-    if(error?.code){
-        switch(error.code){
-            case "P1001":
-                message = `Connection to the database couldn't be established`;
-                break;
-            case "P2000":
-                status_code = 400;
-                message = `The provided value for the column is too long`;
-                break;
-            case "P2001":
-                status_code = 404;
-                message = `The record searched for in the where condition does not exist`;
-                break;
-            case "P2002":
-                status_code = 409;
-                message = `Duplicate entry for ${error.meta?.modelName}. Record with ${error.meta?.target}: '${data[error.meta?.target]}' already exists`;
-                break;
-            case "P2003":
-                status_code = 400;
-                message = `Foreign key constraint failed`;
-                break;
-            case "P2004":
-                status_code = 400;
-                message = `A constraint failed on the database`;
-                break;
-            case "P2005":
-                status_code = 400;
-                message = `The value stored in the database is invalid for the field's type`;
-                break;
-            case "P2006":
-                status_code = 400;
-                message = `The provided value is not valid`;
-                break;
-            case "P2007":
-                status_code = 400;
-                message = `Data validation error`;
-                break;
-            case "P2008":
-                status_code = 400;
-                message = `Failed to parse the query`;
-                break;
-            case "P2009":
-                status_code = 400;
-                message = `Failed to validate the query`;
-                break;
-            case "P2010":
-                status_code = 500;
-                message = `Raw query failed`;
-                break;
-            case "P2011":
-                status_code = 400;
-                message = `Null constraint violation`;
-                break;
-            case "P2012":
-                status_code = 400;
-                message = `Missing a required value`;
-                break;
-            case "P2013":
-                status_code = 400;
-                message = `Missing the required argument`;
-                break;
-            case "P2014":
-                status_code = 400;
-                message = `The change you are trying to make would violate the required relation`;
-                break;
-            case "P2015":
-                status_code = 404;
-                message = `A related record could not be found`;
-                break;
-            case "P2016":
-                status_code = 400;
-                message = `Query interpretation error`;
-                break;
-            case "P2017":
-                status_code = 400;
-                message = `The records for relation are not connected`;
-                break;
-            case "P2018":
-                status_code = 404;
-                message = `The required connected records were not found`;
-                break;
-            case "P2019":
-                status_code = 400;
-                message = `Input error`;
-                break;
-            case "P2020":
-                status_code = 400;
-                message = `Value out of range for the type`;
-                break;
-            case "P2021":
-                status_code = 404;
-                message = `The table does not exist in the current database`;
-                break;
-            case "P2022":
-                status_code = 404;
-                message = `The column does not exist in the current database`;
-                break;
-            case "P2023":
-                status_code = 400;
-                message = `Inconsistent column data`;
-                break;
-            case "P2024":
-                status_code = 408;
-                message = `Timed out fetching a new connection from the connection pool`;
-                break;
-            case "P2025":
-                status_code = 404;
-                message = `Operation failed because it depends on one or more records that were required but not found`;
-                break;
-            case "P2026":
-                status_code = 400;
-                message = `The current database provider doesn't support a feature that the query used`;
-                break;
-            case "P2027":
-                status_code = 500;
-                message = `Multiple errors occurred on the database during query execution`;
-                break;
-            case "P2028":
-                status_code = 500;
-                message = `Transaction API error`;
-                break;
-            case "P2030":
-                status_code = 404;
-                message = `Cannot find a fulltext index to use for the search`;
-                break;
-            case "P2033":
-                status_code = 400;
-                message = `A number used in the query does not fit into a 64 bit signed integer`;
-                break;
-            case "P2034":
-                status_code = 409;
-                message = `Transaction failed due to a write conflict or a deadlock`;
-                break;
+    // Handle Prisma error codes
+    if (error?.code && PRISMA_ERROR_MAP[error.code]) {
+        const errorInfo = PRISMA_ERROR_MAP[error.code];
+        statusCode = errorInfo.status;
+
+        // Handle dynamic messages (e.g., P2002 duplicate)
+        if (error.code === 'P2002') {
+            const target = error.meta?.target;
+            const modelName = error.meta?.modelName;
+            message = `Duplicate entry for ${modelName}. Record with ${target}: '${data[target]}' already exists`;
+        } else {
+            message = errorInfo.message;
         }
     }
-    return {'status_code': status_code, 'message': message};
-}
+
+    return { status_code: statusCode, message };
+};
 
 module.exports = {QueryBuilder, prisma, prismaTransaction};

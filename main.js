@@ -136,8 +136,6 @@ const corsOptions = {
 
 app.use(cors(NODE_ENV === "production" ? corsOptions : { origin: '*' }));
 
-// USE CORSE
-
 // USE JSON PARSE MIDDLEWARE
 app.use(express.json());
 // USE COOKIE-PARSER MIDDLEWARE
@@ -247,10 +245,9 @@ function init_router_directory(route_path){
     const dir_content = fs.readdirSync(route_path, {withFileTypes: true}).sort((a, b)=> (a.name == 'root.js' ? -2 : a.isDirectory() ? 0 : -1) - (b.name == 'root.js' ? -2 : b.isDirectory() ? 0 : -1))
     dir_content.forEach(function(file) {
         if(!file.isDirectory()){
-            if(path.parse(file.name).ext == ".js"){
+            if(path.parse(file.name).ext == ".js" && file.name.slice(0,1) != '_'){
                 const route = file.name == "root.js" ? relative_path : `${relative_path.length > 1 ? relative_path : ''}/${path.parse(file.name).name}`;             
                 app.use(route, require(path.join(route_path, file.name)));
-                console.log(relative_path + '/' + file.name);
             }
         }
         else{

@@ -53,9 +53,9 @@ function getModel(modelName) {
 }
 
 /**
- * Get all fields for a model
+ * Get all fields for a model (including relation fields)
  * @param {string} modelName - The model name
- * @returns {Object} Object with field names as keys
+ * @returns {Object<string, Object>} Object with field names as keys and DMMF field objects as values
  */
 function getFields(modelName) {
     const model = getModel(modelName);
@@ -64,6 +64,22 @@ function getFields(modelName) {
         acc[field.name] = field;
         return acc;
     }, {});
+}
+
+/**
+ * Get only scalar fields for a model (excludes relation fields)
+ * @param {string} modelName - The model name
+ * @returns {Object<string, Object>} Object with scalar field names as keys
+ */
+function getScalarFields(modelName) {
+    const model = getModel(modelName);
+    if (!model) return {};
+    return model.fields
+        .filter(field => field.kind !== 'object')
+        .reduce((acc, field) => {
+            acc[field.name] = field;
+            return acc;
+        }, {});
 }
 
 /**
@@ -182,6 +198,7 @@ module.exports = {
     getDMMFSync,
     getModel,
     getFields,
+    getScalarFields,
     getPrimaryKey,
     getRelations,
     isListRelation,

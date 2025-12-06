@@ -1,7 +1,6 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const { authPrisma } = require('../rapidd/rapidd');
-const { RestApi } = require('../lib/RestApi');
 const { ErrorResponse } = require('../src/Api');
 
 const SALT_ROUNDS = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) : 10;
@@ -11,31 +10,50 @@ const SALT_ROUNDS = process.env.SALT_ROUNDS ? parseInt(process.env.SALT_ROUNDS) 
 // ============================================
 
 /**
- * Generate JWT Access Token
+ * Generates a JWT access token for a user
+ * @param {Object} user - The user object
+ * @param {string} user.id - User ID
+ * @param {string} user.email - User email
+ * @param {string} [user.role] - User role
+ * @param {string|null} [sessionId=null] - Session ID to include in the token
+ * @returns {string} Signed JWT access token (expires in 1 day)
  */
 function generateAccessToken(user, sessionId = null) {
-    return jwt.sign({
-        sessionId,
-        userId: user.id,
-        email: user.email,
-        role: user.role
-    },
-    process.env.JWT_SECRET,
-    { expiresIn: '1d' });
+    return jwt.sign(
+        {
+            sessionId,
+            userId: user.id,
+            email: user.email,
+            role: user.role
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: '1d' }
+    );
 }
 
 /**
- * Generate JWT Refresh Token
+ * Generates a JWT refresh token for a user
+ * @param {Object} user - The user object
+ * @param {string} user.id - User ID
+ * @param {string} user.email - User email
+ * @returns {string} Signed JWT refresh token (expires in 7 days)
  */
 function generateRefreshToken(user) {
-    return jwt.sign({
-        userId: user.id,
-        email: user.email,
-    }, process.env.JWT_REFRESH_SECRET, { expiresIn: '7d' });
+    return jwt.sign(
+        {
+            userId: user.id,
+            email: user.email,
+        },
+        process.env.JWT_REFRESH_SECRET,
+        { expiresIn: '7d' }
+    );
 }
 
 /**
- * Verify JWT Token
+ * Verifies a JWT token and returns the decoded payload
+ * @param {string} token - The JWT token to verify
+ * @param {string} [secret=process.env.JWT_SECRET] - The secret to use for verification
+ * @returns {Object|null} Decoded token payload, or null if invalid
  */
 function verifyToken(token, secret = process.env.JWT_SECRET) {
     try {
@@ -46,141 +64,32 @@ function verifyToken(token, secret = process.env.JWT_SECRET) {
 }
 
 // ============================================
-// OAUTH2 HELPER FUNCTIONS
-// ============================================
-
-/**
- * Verify Google OAuth2 Token and get user info
- * @param {string} accessToken - Google access token from client
- * @returns {Promise<Object>} User information from Google
- */
-async function verifyGoogleToken(accessToken) {
-    try {
-        // Verify token with Google's tokeninfo endpoint
-        const tokenInfoApi = await RestApi.create('GoogleOAuth', 'verifyToken', {
-            queries: { access_token: accessToken }
-        });
-        const tokenInfo = await tokenInfoApi.get();
-
-        // Check if token is valid and has email scope
-        if (!tokenInfo.email) {
-            throw new ErrorResponse(401, 'token_missing_email');
-        }
-
-        // Get user info from Google
-        const userInfoApi = await RestApi.create('GoogleAPI', 'getUserInfo', {
-            headers: { Authorization: `Bearer ${accessToken}` }
-        });
-        const userInfo = await userInfoApi.get();
-
-        return {
-            id: userInfo.id,
-            email: userInfo.email,
-            name: userInfo.name,
-            firstName: userInfo.given_name || '',
-            lastName: userInfo.family_name || '',
-            picture: userInfo.picture,
-            emailVerified: userInfo.verified_email || false
-        };
-    } catch (error) {
-        console.error('Google token verification failed:', error);
-        throw new ErrorResponse(401, 'invalid_token_message', {message: error.message});
-    }
-}
-
-/**
- * Verify Facebook OAuth2 Token and get user info
- * @param {string} accessToken - Facebook access token from client
- * @returns {Promise<Object>} User information from Facebook
- */
-async function verifyFacebookToken(accessToken) {
-    try {
-        // Facebook requires App Access Token or App ID + App Secret for token verification
-        // Get app access token format: app_id|app_secret
-        const appId = process.env.FACEBOOK_APP_ID;
-        const appSecret = process.env.FACEBOOK_APP_SECRET;
-
-        if (!appId || !appSecret) {
-            throw new ErrorResponse(500, 'oauth_config_missing', {provider: 'Facebook'});
-        }
-
-        const appAccessToken = `${appId}|${appSecret}`;
-
-        // Debug/verify the user token
-        const debugApi = await RestApi.create('FacebookGraph', 'debugToken', {
-            queries: {
-                input_token: accessToken,
-                access_token: appAccessToken
-            }
-        });
-        const debugResponse = await debugApi.get();
-
-        // Check if token is valid
-        if (!debugResponse.data || !debugResponse.data.is_valid) {
-            throw new ErrorResponse(401, 'invalid_token', {provider: 'Facebook'});
-        }
-
-        // Verify the token belongs to our app
-        if (debugResponse.data.app_id !== appId) {
-            throw new ErrorResponse(401, 'token_app_mismatch');
-        }
-
-        // Get user info from Facebook
-        const userInfoApi = await RestApi.create('FacebookGraph', 'getUserInfo', {
-            queries: {
-                access_token: accessToken
-            }
-        });
-        const userInfo = await userInfoApi.get();
-
-        if (!userInfo.email) {
-            throw new ErrorResponse(403, 'oauth_email_permission_missing', {provider: 'Facebook'});
-        }
-
-        return {
-            id: userInfo.id,
-            email: userInfo.email,
-            name: userInfo.name,
-            firstName: userInfo.first_name || '',
-            lastName: userInfo.last_name || '',
-            picture: userInfo.picture?.data?.url || null
-        };
-    } catch (error) {
-        console.error('Facebook token verification failed:', error);
-        throw new ErrorResponse(401, 'invalid_token_message', {message: error.message});
-    }
-}
-
-// ============================================
 // AUTH MIDDLEWARE
 // ============================================
 
 /**
- * Hauptmiddleware: Authentifiziere User aus JWT Token
- * Setzt req.user wenn Token valid ist
- * Läuft für ALLE Routes (auch öffentliche)
+ * Main authentication middleware that extracts and validates JWT from Authorization header.
+ * Sets req.user if token is valid. Runs for ALL routes (including public ones).
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
  */
 async function authenticateUser(req, res, next) {
     try {
-        // Token aus Header holen
         const authHeader = req.headers.authorization;
-        
+
         if (!authHeader || !authHeader.startsWith('Bearer ')) {
-            // Kein Token = kein User (OK für öffentliche Routes)
             return next();
         }
 
-        const token = authHeader.substring(7); // "Bearer " entfernen
-        
-        // Token verifizieren
+        const token = authHeader.substring(7);
         const decoded = verifyToken(token);
-        
+
         if (!decoded) {
-            return next(); // Ungültiger Token = kein User
+            return next();
         }
 
         // TODO: Customize session/user query for your schema
-        // Load user from session - adjust model names and relations for your schema
         const session = await authPrisma.sessions.findUnique({
             where: { id: decoded.sessionId },
             select: {
@@ -197,7 +106,7 @@ async function authenticateUser(req, res, next) {
         });
 
         if (!session || !session.user) {
-            return next(); // Session/User not found
+            return next();
         }
 
         // TODO: Map to your desired req.user structure
@@ -207,17 +116,19 @@ async function authenticateUser(req, res, next) {
             role: session.user.role,
             // TODO: Add any additional fields from your schema
         };
-        
+
         next();
     } catch (error) {
-        console.error('Auth Error:', error);
-        next(); // Bei Fehler weitermachen ohne User
+        next();
     }
 }
 
 /**
- * Middleware: Route erfordert Authentication
- * Muss NACH authenticateUser verwendet werden
+ * Middleware that requires authentication. Must be used AFTER authenticateUser.
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ * @throws {ErrorResponse} 401 if user is not authenticated
  */
 function requireAuth(req, res, next) {
     if (!req.user) {
@@ -227,23 +138,11 @@ function requireAuth(req, res, next) {
 }
 
 /**
- * Middleware: Route erfordert bestimmte Rolle(n)
- */
-function requireRole(...roles) {
-    return (req, res, next) => {
-        if (!req.user) {
-            throw new ErrorResponse(401, 'auth_required_message');
-        }
-
-        if (!roles.includes(req.user.role)) {
-            throw new ErrorResponse(403, 'forbidden_role_message', {roles: roles.join(', ')});
-        }
-        next();
-    };
-}
-
-/**
- * Middleware: User muss verifiziert sein
+ * Middleware that requires email verification
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
+ * @throws {ErrorResponse} 401 if not authenticated, 403 if email not verified
  */
 function requireVerified(req, res, next) {
     if (!req.user) {
@@ -262,15 +161,19 @@ function requireVerified(req, res, next) {
 // ============================================
 
 /**
- * POST /auth/register - User registration
+ * POST /auth/register - Registers a new user
  * TODO: Customize this function for your schema
+ * @param {Object} req - Express request object
+ * @param {Object} req.body - Request body
+ * @param {string} req.body.email - User email
+ * @param {string} req.body.password - User password
+ * @param {Object} res - Express response object
  */
 async function register(req, res) {
     const { email, password } = req.body;
 
-    // Validation
     if (!email || !password) {
-        throw new ErrorResponse(400, 'required_fields', {fields: 'email, password'});
+        throw new ErrorResponse(400, 'required_fields', { fields: 'email, password' });
     }
 
     // TODO: Adjust role validation for your schema
@@ -278,7 +181,6 @@ async function register(req, res) {
     //     throw new ErrorResponse(400, 'invalid_role_message');
     // }
 
-    // Check if email already exists
     // TODO: Replace 'users' with your user model name
     const existingUser = await authPrisma.users.findUnique({
         where: { email },
@@ -288,7 +190,6 @@ async function register(req, res) {
         throw new ErrorResponse(409, 'email_already_registered_message');
     }
 
-    // Hash password
     const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS);
 
     // TODO: Customize user creation for your schema
@@ -297,8 +198,6 @@ async function register(req, res) {
             email,
             password: hashedPassword,
             // TODO: Add your schema-specific fields
-            // role,
-            // createdBy: 'system',
         },
         select: {
             id: true,
@@ -309,11 +208,9 @@ async function register(req, res) {
 
     // TODO: Create any related records (profiles, etc.) for your schema
 
-    // Generate tokens
     const accessToken = generateAccessToken(user);
     const refreshToken = generateRefreshToken(user);
 
-    // Create session
     // TODO: Replace 'sessions' with your session model name
     await authPrisma.sessions.create({
         data: {
@@ -321,7 +218,7 @@ async function register(req, res) {
             token: refreshToken,
             ipAddress: req.ip,
             userAgent: req.headers['user-agent'],
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
             // TODO: Add any additional session fields
         },
     });
@@ -334,14 +231,19 @@ async function register(req, res) {
 }
 
 /**
- * POST /auth/login - User login
+ * POST /auth/login - Authenticates a user with email and password
  * TODO: Customize this function for your schema
+ * @param {Object} req - Express request object
+ * @param {Object} req.body - Request body
+ * @param {string} req.body.email - User email
+ * @param {string} req.body.password - User password
+ * @param {Object} res - Express response object
  */
 async function login(req, res) {
     const { email, password } = req.body;
 
     if (!email || !password) {
-        throw new ErrorResponse(400, 'required_fields', {fields: 'email, password'});
+        throw new ErrorResponse(400, 'required_fields', { fields: 'email, password' });
     }
 
     // TODO: Replace 'users' with your user model name and adjust fields
@@ -364,17 +266,14 @@ async function login(req, res) {
     //     throw new ErrorResponse(400, 'invalid_login_method', {provider: user.authProvider});
     // }
 
-    // Verify password
     const validPassword = await bcrypt.compare(password, user.password);
 
     if (!validPassword) {
         throw new ErrorResponse(401, 'invalid_credentials_message');
     }
 
-    // Generate tokens
     const refreshToken = generateRefreshToken(user);
 
-    // Create session
     // TODO: Replace 'sessions' with your session model name
     const session = await authPrisma.sessions.create({
         data: {
@@ -404,73 +303,21 @@ async function login(req, res) {
 }
 
 /**
- * POST /auth/refresh - Refresh Access Token
+ * POST /auth/logout - Logs out the current user by deleting their session
  * TODO: Customize this function for your schema
- */
-async function refreshToken(req, res) {
-    try {
-        const { refreshToken } = req.body;
-
-        if (!refreshToken) {
-            throw new ErrorResponse(400, 'refresh_token_required');
-        }
-
-        // Verify token
-        const decoded = verifyToken(refreshToken, process.env.JWT_REFRESH_SECRET);
-
-        if (!decoded) {
-            throw new ErrorResponse(401, 'invalid_refresh_token');
-        }
-
-        // TODO: Replace 'sessions' with your session model and adjust user relation
-        const session = await authPrisma.sessions.findFirst({
-            where: {
-                token: refreshToken,
-                userId: decoded.userId,
-                expiresAt: { gt: new Date() },
-            },
-            include: {
-                // TODO: Replace with your user relation name
-                user: {
-                    select: {
-                        id: true,
-                        email: true,
-                        // TODO: Add fields needed for token generation
-                    },
-                },
-            },
-        });
-
-        if (!session || !session.user) {
-            throw new ErrorResponse(401, 'session_expired_or_invalid');
-        }
-
-        // Generate new access token
-        const accessToken = generateAccessToken(session.user);
-
-        res.json({ accessToken });
-    } catch (error) {
-        console.error('Refresh Token Error:', error);
-        throw new ErrorResponse(500, 'token_refresh_failed');
-    }
-}
-
-/**
- * POST /auth/logout - User logout
- * TODO: Customize this function for your schema
+ * @param {Object} req - Express request object
+ * @param {Object} req.body - Request body
+ * @param {string} [req.body.refreshToken] - Refresh token to invalidate
+ * @param {Object} res - Express response object
  */
 async function logout(req, res) {
     try {
         const { refreshToken } = req.body;
         const authHeader = req.headers.authorization;
-
         const token = authHeader?.substring(7);
-
-        // Verify token
         const decoded = verifyToken(token);
 
         if (!decoded) {
-            // No valid token, but still return success
             return res.json({ message: 'logged_out_successfully' });
         }
 
@@ -488,13 +335,15 @@ async function logout(req, res) {
 
         res.json({ message: 'logged_out_successfully' });
     } catch (error) {
-        console.error('Logout Error:', error);
         throw new ErrorResponse(500, 'logout_failed');
     }
 }
 
 /**
- * GET /auth/me - Aktueller User
+ * GET /auth/me - Returns the currently authenticated user
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @throws {ErrorResponse} 401 if not authenticated
  */
 async function getCurrentUser(req, res) {
     if (!req.user) {
@@ -502,142 +351,6 @@ async function getCurrentUser(req, res) {
     }
 
     res.json({ user: req.user });
-}
-
-/**
- * POST /auth/google - Google SSO Login
- * TODO: Customize this function for your schema
- */
-async function googleAuth(req, res) {
-    try {
-        const { googleToken } = req.body;
-
-        if (!googleToken) {
-            throw new ErrorResponse(400, 'field_required', {field: 'googleToken'});
-        }
-
-        // Verify Google Token and get user info
-        let googleUser;
-        try {
-            googleUser = await verifyGoogleToken(googleToken);
-        } catch (error) {
-            throw new ErrorResponse(401, 'invalid_token', {provider: 'Google'});
-        }
-
-        // TODO: Customize user lookup and creation for your schema
-        // Check if user with this email exists
-        let user = await authPrisma.users.findUnique({
-            where: { email: googleUser.email },
-        });
-
-        if (!user) {
-            // TODO: Create new user for your schema
-            user = await authPrisma.users.create({
-                data: {
-                    email: googleUser.email,
-                    // TODO: Add your schema-specific fields
-                    // emailVerified: googleUser.emailVerified ? new Date() : null,
-                    // authProvider: 'GOOGLE',
-                },
-            });
-
-            // TODO: Create any related records (SSO accounts, profiles, etc.)
-        }
-
-        // Generate tokens
-        const accessToken = generateAccessToken(user);
-        const refreshToken = generateRefreshToken(user);
-
-        // Create session
-        // TODO: Replace 'sessions' with your session model name
-        await authPrisma.sessions.create({
-            data: {
-                userId: user.id,
-                token: refreshToken,
-                ipAddress: req.ip,
-                userAgent: req.headers['user-agent'],
-                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                // TODO: Add any additional session fields
-            }
-        });
-
-        res.json({
-            user,
-            accessToken,
-            refreshToken,
-        });
-    } catch (error) {
-        console.error('Google Auth Error:', error);
-        throw new ErrorResponse(500, 'google_auth_failed');
-    }
-}
-
-/**
- * POST /auth/facebook - Facebook SSO Login
- * TODO: Customize this function for your schema
- */
-async function facebookAuth(req, res) {
-    try {
-        const { facebookToken } = req.body;
-
-        if (!facebookToken) {
-            throw new ErrorResponse(400, 'field_required', {field: 'facebookToken'});
-        }
-
-        // Verify Facebook Token and get user info
-        let facebookUser;
-        try {
-            facebookUser = await verifyFacebookToken(facebookToken);
-        } catch (error) {
-            throw new ErrorResponse(401, 'invalid_token', {provider: 'Facebook'});
-        }
-
-        // TODO: Customize user lookup and creation for your schema
-        // Check if user with this email exists
-        let user = await authPrisma.users.findUnique({
-            where: { email: facebookUser.email },
-        });
-
-        if (!user) {
-            // TODO: Create new user for your schema
-            user = await authPrisma.users.create({
-                data: {
-                    email: facebookUser.email,
-                    // TODO: Add your schema-specific fields
-                    // emailVerified: new Date(),
-                    // authProvider: 'FACEBOOK',
-                },
-            });
-
-            // TODO: Create any related records (SSO accounts, profiles, etc.)
-        }
-
-        // Generate tokens
-        const accessToken = generateAccessToken(user);
-        const refreshToken = generateRefreshToken(user);
-
-        // Create session
-        // TODO: Replace 'sessions' with your session model name
-        await authPrisma.sessions.create({
-            data: {
-                userId: user.id,
-                token: refreshToken,
-                ipAddress: req.ip,
-                userAgent: req.headers['user-agent'],
-                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
-                // TODO: Add any additional session fields
-            },
-        });
-
-        res.json({
-            user,
-            accessToken,
-            refreshToken,
-        });
-    } catch (error) {
-        console.error('Facebook Auth Error:', error);
-        throw new ErrorResponse(500, 'facebook_auth_failed');
-    }
 }
 
 // ============================================
@@ -648,22 +361,16 @@ module.exports = {
     // Middleware
     authenticateUser,
     requireAuth,
-    requireRole,
     requireVerified,
 
     // Route Handlers
     register,
     login,
     logout,
-    refreshToken,
     getCurrentUser,
-    googleAuth,
-    facebookAuth,
 
     // Helpers
     generateAccessToken,
     generateRefreshToken,
     verifyToken,
-    verifyGoogleToken,
-    verifyFacebookToken,
 };

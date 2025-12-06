@@ -3,10 +3,10 @@ const { AsyncLocalStorage } = require('async_hooks');
 const acl = require('./acl');
 const dmmf = require('./dmmf');
 
-// Request Context Storage
+/** Request context storage for async operations */
 const requestContext = new AsyncLocalStorage();
 
-// RLS Configuration aus Environment Variables
+/** RLS configuration from environment variables */
 const RLS_CONFIG = {
     namespace: process.env.RLS_NAMESPACE || 'app',
     userId: process.env.RLS_USER_ID || 'current_user_id',
@@ -18,23 +18,9 @@ const RLS_CONFIG = {
 // =====================================================
 
 /**
- * Prisma 7 requires driver adapters for database connections.
- * Supports PostgreSQL and MySQL/MariaDB based on DATABASE_PROVIDER env var
- * or auto-detection from DATABASE_URL.
- *
- * IMPORTANT: The adapter MUST match the provider in prisma/schema.prisma
- * - For PostgreSQL: datasource db { provider = "postgresql" }
- * - For MySQL/MariaDB: datasource db { provider = "mysql" }
- *
- * If you change databases, you must:
- * 1. Update prisma/schema.prisma provider
- * 2. Run: npx prisma generate
- */
-
-/**
- * Detect database provider from connection string
+ * Detects database provider from connection string
  * @param {string} connectionString - Database connection URL
- * @returns {string} 'postgresql' or 'mysql'
+ * @returns {'postgresql'|'mysql'} Detected provider
  */
 function detectProvider(connectionString) {
     if (!connectionString) return 'postgresql';
@@ -45,7 +31,7 @@ function detectProvider(connectionString) {
 }
 
 /**
- * Parse MySQL/MariaDB connection string into config object
+ * Parses MySQL/MariaDB connection string into config object
  * @param {string} connectionString - Database connection URL
  * @returns {Object} Connection config for MariaDB adapter
  */
@@ -56,28 +42,32 @@ function parseMySQLConnectionString(connectionString) {
         port: parseInt(url.port, 10) || 3306,
         user: url.username,
         password: url.password,
-        database: url.pathname.slice(1), // Remove leading /
+        database: url.pathname.slice(1),
         connectionLimit: 10
     };
 }
 
 /**
- * Create database adapter based on provider
+ * Creates a database adapter based on provider.
+ * Prisma 7 requires driver adapters for database connections.
+ *
+ * IMPORTANT: The adapter MUST match the provider in prisma/schema.prisma
+ * - For PostgreSQL: datasource db { provider = "postgresql" }
+ * - For MySQL/MariaDB: datasource db { provider = "mysql" }
+ *
  * @param {string} connectionString - Database connection URL
- * @param {string} provider - Database provider (auto-detected if not provided)
- * @returns {Object} { adapter, pool } - Prisma adapter and underlying pool/connection
+ * @param {string|null} [provider=null] - Database provider (auto-detected if not provided)
+ * @returns {{adapter: Object, pool: Object|null, provider: string}} Prisma adapter and underlying pool
  */
 function createAdapter(connectionString, provider = null) {
     const detectedProvider = provider || process.env.DATABASE_PROVIDER || detectProvider(connectionString);
 
     if (detectedProvider === 'mysql' || detectedProvider === 'mariadb') {
-        // MySQL/MariaDB adapter
         const { PrismaMariaDb } = require('@prisma/adapter-mariadb');
         const config = parseMySQLConnectionString(connectionString);
         const adapter = new PrismaMariaDb(config);
         return { adapter, pool: null, provider: 'mysql' };
     } else {
-        // PostgreSQL adapter (default)
         const { PrismaPg } = require('@prisma/adapter-pg');
         const { Pool } = require('pg');
         const pool = new Pool({ connectionString });
@@ -90,16 +80,16 @@ function createAdapter(connectionString, provider = null) {
 // BASE PRISMA CLIENTS
 // =====================================================
 
-// Create adapters for auth and base clients
 const authConnection = createAdapter(process.env.DATABASE_URL_ADMIN || process.env.DATABASE_URL);
 const baseConnection = createAdapter(process.env.DATABASE_URL);
 
-// Store provider info for RLS compatibility checks
+/** Database provider type ('postgresql' or 'mysql') */
 const dbProvider = baseConnection.provider;
 
 /**
- * ADMIN CLIENT - For authentication operations
- * Uses DATABASE_URL_ADMIN connection for RLS bypass
+ * Admin Prisma client for authentication operations.
+ * Uses DATABASE_URL_ADMIN connection for RLS bypass.
+ * @type {PrismaClient}
  */
 const authPrisma = new PrismaClient({
     adapter: authConnection.adapter,
@@ -107,9 +97,9 @@ const authPrisma = new PrismaClient({
 });
 
 /**
- * BASE CLIENT - Regular user with RLS
- * Uses DATABASE_URL connection
- * Use for all business operations
+ * Base Prisma client for regular user operations with RLS.
+ * Uses DATABASE_URL connection.
+ * @type {PrismaClient}
  */
 const basePrisma = new PrismaClient({
     adapter: baseConnection.adapter,
@@ -121,48 +111,41 @@ const basePrisma = new PrismaClient({
 // =====================================================
 
 /**
- * Set RLS Session Variables
- * PostgreSQL: Uses SET LOCAL for session variables
- * MySQL: Uses user-defined variables (@var)
- * Execute each SET command separately to avoid prepared statement error
+ * Sets RLS session variables for the current transaction.
+ * PostgreSQL uses SET LOCAL, MySQL uses user-defined variables (@var).
+ * @param {Object} tx - Prisma transaction client
+ * @param {string} userId - Current user ID
+ * @param {string} userRole - Current user role
  */
 async function setRLSVariables(tx, userId, userRole) {
-    const namespace = RLS_CONFIG.namespace;
-    const userIdVar = RLS_CONFIG.userId;
-    const userRoleVar = RLS_CONFIG.userRole;
+    const { namespace, userId: userIdVar, userRole: userRoleVar } = RLS_CONFIG;
 
     if (dbProvider === 'mysql') {
-        // MySQL uses user-defined variables
         await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = '${userId}'`);
         await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = '${userRole}'`);
     } else {
-        // PostgreSQL uses session variables
         await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userIdVar} = '${userId}'`);
         await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userRoleVar} = '${userRole}'`);
     }
 }
 
 /**
- * Reset RLS Session Variables
+ * Resets RLS session variables for the current transaction
+ * @param {Object} tx - Prisma transaction client
  */
 async function resetRLSVariables(tx) {
-    const namespace = RLS_CONFIG.namespace;
-    const userIdVar = RLS_CONFIG.userId;
-    const userRoleVar = RLS_CONFIG.userRole;
+    const { namespace, userId: userIdVar, userRole: userRoleVar } = RLS_CONFIG;
 
     try {
         if (dbProvider === 'mysql') {
-            // MySQL: Set variables to NULL to reset
             await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = NULL`);
             await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = NULL`);
         } else {
-            // PostgreSQL: Use RESET command
             await tx.$executeRawUnsafe(`RESET ${namespace}.${userIdVar}`);
             await tx.$executeRawUnsafe(`RESET ${namespace}.${userRoleVar}`);
         }
     } catch (e) {
         // Ignore errors on reset
-        console.error('Failed to reset RLS variables:', e);
     }
 }
 
@@ -171,22 +154,21 @@ async function resetRLSVariables(tx) {
 // =====================================================
 
 /**
- * Extended Prisma Client with automatic RLS context
- * Automatically wraps all operations in RLS context from AsyncLocalStorage
+ * Extended Prisma client with automatic RLS context.
+ * Automatically wraps all operations in RLS context from AsyncLocalStorage.
+ * @type {PrismaClient}
  */
 const prisma = basePrisma.$extends({
     query: {
         async $allOperations({ operation, args, query, model }) {
             const context = requestContext.getStore();
 
-            // No context = no RLS (e.g., system operations)
             if (!context?.userId || !context?.userRole) {
                 return query(args);
             }
 
             const { userId, userRole } = context;
 
-            // For operations that are already transactions, just set the variables
             if (operation === '$transaction') {
                 return basePrisma.$transaction(async (tx) => {
                     await setRLSVariables(tx, userId, userRole);
@@ -194,17 +176,12 @@ const prisma = basePrisma.$extends({
                 });
             }
 
-            // For regular operations, wrap in transaction with RLS
             return basePrisma.$transaction(async (tx) => {
-                // Set session variables
                 await setRLSVariables(tx, userId, userRole);
 
-                // Execute the original query using the transaction client
                 if (model) {
-                    // Model query (e.g., user.findMany())
                     return tx[model][operation](args);
                 } else {
-                    // Raw query or special operation
                     return tx[operation](args);
                 }
             });
@@ -217,7 +194,9 @@ const prisma = basePrisma.$extends({
 // =====================================================
 
 /**
- * Helper for batch operations in single transaction
+ * Executes multiple operations in a single transaction with RLS context
+ * @param {Array<Function>} operations - Array of functions that receive tx and return promises
+ * @returns {Promise<Array>} Results of all operations
  */
 async function prismaTransaction(operations) {
     const context = requestContext.getStore();
@@ -235,12 +214,14 @@ async function prismaTransaction(operations) {
 // =====================================================
 
 /**
- * Express Middleware: Set RLS context from authenticated user
- * Use this AFTER your authentication middleware
+ * Express middleware that sets RLS context from authenticated user.
+ * Use this AFTER your authentication middleware.
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next function
  */
 function setRLSContext(req, res, next) {
     if (req.user) {
-        // Set context for async operations
         requestContext.run(
             {
                 userId: req.user.id,
@@ -254,7 +235,8 @@ function setRLSContext(req, res, next) {
 }
 
 /**
- * Get RLS Config (for SQL generation)
+ * Returns the current RLS configuration
+ * @returns {{namespace: string, userId: string, userRole: string}} RLS config
  */
 function getRLSConfig() {
     return RLS_CONFIG;
@@ -264,10 +246,13 @@ function getRLSConfig() {
 // GRACEFUL SHUTDOWN
 // =====================================================
 
+/**
+ * Disconnects all Prisma clients and closes connection pools
+ * @returns {Promise<void>}
+ */
 async function disconnectAll() {
     await authPrisma.$disconnect();
     await basePrisma.$disconnect();
-    // Close PostgreSQL pools if they exist
     if (authConnection.pool) {
         await authConnection.pool.end();
     }
@@ -281,22 +266,29 @@ process.on('beforeExit', async () => {
 });
 
 // =====================================================
-// EXPORTS
+// INITIALIZATION
 // =====================================================
 
 /**
- * Initialize the DMMF (must be called before using QueryBuilder)
- * This loads the full Prisma DMMF from @prisma/internals
+ * Initializes the DMMF (must be called before using QueryBuilder).
+ * Loads the full Prisma DMMF from @prisma/internals.
  * @returns {Promise<Object>} The loaded DMMF
  */
 async function initializeDMMF() {
     return dmmf.loadDMMF();
 }
 
+// Auto-initialize DMMF on module load
+initializeDMMF();
+
+// =====================================================
+// EXPORTS
+// =====================================================
+
 module.exports = {
     // Main clients
-    prisma,              // Use for regular operations with automatic RLS from context
-    authPrisma,          // Use ONLY for auth operations (login, register, etc.)
+    prisma,
+    authPrisma,
 
     // Transaction helpers
     prismaTransaction,
@@ -312,12 +304,10 @@ module.exports = {
 
     // Utilities
     disconnectAll,
+    initializeDMMF,
     PrismaClient,
     Prisma,
     acl,
-
-    // DMMF
-    initializeDMMF,
     dmmf,
 
     // Database info

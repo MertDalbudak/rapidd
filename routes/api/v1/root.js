@@ -4,43 +4,38 @@ const {
     register,
     login,
     logout,
-    refreshToken,
     getCurrentUser,
-    googleAuth,
-    facebookAuth,
     requireAuth,
 } = require('../../../middleware/auth');
 
 const router = express.Router();
-const {rateLimitMiddleware} = require('../../../src/Api');
+const { rateLimitMiddleware } = require('../../../src/Api');
 
 // Apply rate limiting in production BEFORE authentication to protect database
-if(process.env.NODE_ENV == "production"){
+if (process.env.NODE_ENV === 'production') {
     router.use(rateLimitMiddleware());
 }
 
+// Authenticate all requests
 router.all('*', authenticateUser);
 
 /**
  * POST /auth/register
- * Register neuer User (Student oder Company)
- * 
+ * Register a new user
+ * TODO: Customize request body for your schema
+ *
  * Body:
  * {
  *   "email": "user@example.com",
- *   "password": "securePassword123",
- *   "role": "STUDENT" | "COMPANY",
- *   "firstName": "John",      // für STUDENT
- *   "lastName": "Doe",         // für STUDENT
- *   "companyName": "Acme Inc"  // für COMPANY
+ *   "password": "securePassword123"
  * }
  */
 router.post('/register', register);
 
 /**
  * POST /auth/login
- * Login mit Email und Passwort
- * 
+ * Login with email and password
+ *
  * Body:
  * {
  *   "email": "user@example.com",
@@ -51,8 +46,8 @@ router.post('/login', login);
 
 /**
  * POST /auth/logout
- * Logout User und lösche Session
- * 
+ * Logout user and delete session
+ *
  * Body:
  * {
  *   "refreshToken": "..."
@@ -61,45 +56,10 @@ router.post('/login', login);
 router.post('/logout', logout);
 
 /**
- * POST /auth/refresh
- * Refresh Access Token mit Refresh Token
- * 
- * Body:
- * {
- *   "refreshToken": "..."
- * }
- */
-router.post('/refresh', refreshToken);
-
-/**
  * GET /auth/me
- * Hole aktuellen eingeloggten User
+ * Get current logged in user
  * Requires: Authentication
  */
 router.get('/me', requireAuth, getCurrentUser);
-
-/**
- * POST /auth/google
- * Google SSO Login/Register
- * 
- * Body:
- * {
- *   "googleToken": "...",  // Google OAuth Token vom Frontend
- *   "role": "STUDENT"      // Nur bei neuen Usern nötig
- * }
- */
-router.post('/google', googleAuth);
-
-/**
- * POST /auth/facebook
- * Facebook SSO Login/Register
- *
- * Body:
- * {
- *   "facebookToken": "...",  // Facebook OAuth Token vom Frontend
- *   "role": "STUDENT"         // Nur bei neuen Usern nötig
- * }
- */
-router.post('/facebook', facebookAuth);
 
 module.exports = router;
