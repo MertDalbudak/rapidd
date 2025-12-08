@@ -1,7 +1,7 @@
 {
   "name": "rapidd",
-  "version": "1.4.0",
-  "description": "An node.js example for a customer portal with oracle REST API",
+  "version": "1.4.1",
+  "description": "An node.js example project structure for rapid development of RESTful APIs with built-in ORM, authentication, authorization, file handling, and more.",
   "main": "main.js",
   "scripts": {
     "start": "node main.js",

@@ -198,9 +198,10 @@ class RateLimiter {
                     console.warn("Redis error, falling back to memory:", err.message);
                     this.fallbackToMemory();
 
+                    const effectiveMaxRequests = pathConfig?.maxRequests || maxRequests;
                     const fallbackResult = this.checkRateLimitMemory(
                         key,
-                        windowMs,
+                        pathConfig?.windowMs || windowMs,
                         effectiveMaxRequests,
                         Date.now(),
                     );

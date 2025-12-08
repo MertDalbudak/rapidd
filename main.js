@@ -23,8 +23,8 @@ process.env.PUBLIC_STATIC = path.join(process.env.PUBLIC_PATH, "static");
 process.env.TEMPLATE_PATH = path.join(process.env.PUBLIC_PATH, "template");
 process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout");
 
-// Load model middleware (must be after env paths are set)
-require('./middleware/model');
+// LOAD MIDDLEWARES AFTER SETTING PATHS
+//require('./middleware/model')
 
 // REQUIRE CUSTOM DEPENDENCIES
 const {Api, ErrorResponse, apiMiddleware} = require('./src/Api');
@@ -35,7 +35,6 @@ const { setRLSContext } = require('./rapidd/rls');
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
 const SUPPORTED_LANGUAGES = fs.readdirSync(process.env.STRINGS_PATH).map(e => path.parse(e).name);
-const FILE_NAME_LENGTH = 32;
 const COOKIE_OPTIONS = {
     'path': "/",
     'signed': true,

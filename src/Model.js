@@ -3,8 +3,6 @@ const { acl } = require('../rapidd/rapidd');
 const { modelMiddleware } = require('../rapidd/modelMiddleware');
 const { ErrorResponse } = require('./Api');
 
-const sql_polyfill = require('../middleware/sql_polyfill');
-
 /**
  * Base Model class for Rapidd ORM operations
  * Provides CRUD operations with built-in ACL (Access Control List) and middleware support
@@ -118,8 +116,7 @@ class Model {
 
         sortBy = sortBy?.trim();
         sortOrder = sortOrder?.trim();
-        console.log(sortBy);
-        
+
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
             throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
         }
@@ -193,7 +190,7 @@ class Model {
                 ...this.getAccessFilter()
             },
             'select': {
-                'id': true
+                [this.primaryKey]: true
             }
         });
 
@@ -362,7 +359,7 @@ class Model {
         }
 
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data: JSON.parse(JSON.stringify(data)), unique_key, options });
+        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data, unique_key, options });
         
         if (beforeCtx.abort) {
             return beforeCtx.result;
@@ -387,25 +384,24 @@ class Model {
                 }
             });
 
-            const existingKeys = new Set(existingRecords.map(r => r[targetKey]));
+            const existingKeys = existingRecords.map(r => r[targetKey]);
 
             // Separate data into creates and updates
             const createRecords = [];
             const updateRecords = [];
 
             for (const record of upsertData) {
-                const deepClone = JSON.parse(JSON.stringify(record));
-                if (existingKeys.has(record[targetKey])) {
+                if (existingKeys.find(e => e == record[targetKey])) {
                     // Record exists, prepare for update
-                    const updatePrimaryKey = deepClone[this.primaryKey];
-                    this.queryBuilder.update(updatePrimaryKey, deepClone, this.user);
-                    updateRecords.push(deepClone);
+                    const updatePrimaryKey = record[this.primaryKey];
+                    this.queryBuilder.update(updatePrimaryKey, record, this.user);
+                    updateRecords.push(record);
                 } else {
                     // Record doesn't exist, prepare for create
                     if(validateRelation) {
-                        this.queryBuilder.create(deepClone, this.user);
+                        this.queryBuilder.create(record, this.user);
                     }
-                    createRecords.push(deepClone);
+                    createRecords.push(record);
                 }
             }
 

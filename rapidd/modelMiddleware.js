@@ -27,7 +27,7 @@ const middlewareRegistry = new Map();
  * Supported operations for middleware
  * @type {string[]}
  */
-const OPERATIONS = ['create', 'update', 'upsert', 'delete', 'get', 'getMany', 'count'];
+const OPERATIONS = ['create', 'update', 'upsert', 'upsertMany', 'delete', 'get', 'getMany', 'count'];
 
 /**
  * Supported hooks
