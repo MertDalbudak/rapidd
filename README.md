@@ -165,8 +165,32 @@ const result = await users.getMany({}, 'posts', 10, 0);
 | `create(data, options)` | Create new record |
 | `update(id, data, options)` | Update existing record |
 | `upsert(data, uniqueKey, options)` | Create or update record |
+| `upsertMany(data, uniqueKey, options)` | Batch create or update records |
 | `delete(id, options)` | Delete record |
 | `count(filter)` | Count matching records |
+
+#### Batch Operations
+
+The `upsertMany` method allows efficient batch create/update operations within a single transaction:
+
+```javascript
+const contacts = new Contacts({ user: req.user });
+
+// Batch upsert by unique key
+const result = await contacts.upsertMany([
+    { contact_id: '1', first_name: 'John', email: 'john@example.com' },
+    { contact_id: '2', first_name: 'Jane', email: 'jane@example.com' },
+    { contact_id: '3', first_name: 'Bob', email: 'bob@example.com' }
+], 'contact_id');
+
+// Returns: { created: 2, updated: 1, total: 3 }
+```
+
+The method automatically:
+- Checks which records exist by the unique key
+- Separates data into creates and updates
+- Executes all operations in a single transaction
+- Triggers middleware for `upsertMany` operations
 
 ### QueryBuilder
 
@@ -332,8 +356,8 @@ Model.middleware.use('before', 'delete', async (ctx) => {
 
 | Hook | Operations |
 |------|------------|
-| `before` | `create`, `update`, `upsert`, `delete`, `get`, `getMany`, `count` |
-| `after` | `create`, `update`, `upsert`, `delete`, `get`, `getMany`, `count` |
+| `before` | `create`, `update`, `upsert`, `upsertMany`, `delete`, `get`, `getMany`, `count` |
+| `after` | `create`, `update`, `upsert`, `upsertMany`, `delete`, `get`, `getMany`, `count` |
 
 ---
 

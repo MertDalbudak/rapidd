@@ -3,6 +3,8 @@ const { acl } = require('../rapidd/rapidd');
 const { modelMiddleware } = require('../rapidd/modelMiddleware');
 const { ErrorResponse } = require('./Api');
 
+const sql_polyfill = require('../middleware/sql_polyfill');
+
 /**
  * Base Model class for Rapidd ORM operations
  * Provides CRUD operations with built-in ACL (Access Control List) and middleware support
@@ -116,6 +118,8 @@ class Model {
 
         sortBy = sortBy?.trim();
         sortOrder = sortOrder?.trim();
+        console.log(sortBy);
+        
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
             throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
         }
@@ -312,7 +316,7 @@ class Model {
     async _upsert(data, unique_key = this.primaryKey, options = {}) {
         // Execute before middleware
         const beforeCtx = await this._executeMiddleware('before', 'upsert', { data: { ...data }, unique_key, options });
-
+        
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
@@ -324,7 +328,8 @@ class Model {
         const createData = JSON.parse(JSON.stringify(upsertData));
         const updateData = JSON.parse(JSON.stringify(upsertData));
         this.queryBuilder.create(createData, this.user);
-        this.queryBuilder.update(updateData, this.user);
+        const updatePrimaryKey = updateData[this.primaryKey];
+        this.queryBuilder.update(updatePrimaryKey, updateData, this.user);       
 
         const result = await this.prisma.upsert({
             'where': {
@@ -338,6 +343,119 @@ class Model {
 
         // Execute after middleware
         const afterCtx = await this._executeMiddleware('after', 'upsert', { data: upsertData, result });
+        return afterCtx.result || result;
+    }
+
+    /**
+     * Internal method to create or update multiple records based on unique key
+     * Uses a transaction to atomically handle creates and updates
+     * @param {Object[]} data - Array of record data
+     * @param {string} [unique_key=this.primaryKey] - The unique field to match on
+     * @param {Object} [options={}] - Additional Prisma options
+     * @param {boolean} [validateRelation=false] - Whether to validate relations
+     * @returns {Promise<Object>} Result object with created and updated counts
+     * @protected
+     */
+    async _upsertMany(data, unique_key = this.primaryKey, options = {}, validateRelation = false) {
+        if (!Array.isArray(data) || data.length === 0) {
+            return { created: 0, updated: 0, total: 0 };
+        }
+
+        // Execute before middleware
+        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data: JSON.parse(JSON.stringify(data)), unique_key, options });
+        
+        if (beforeCtx.abort) {
+            return beforeCtx.result;
+        }
+
+        const upsertData = beforeCtx.data || data;
+        const targetKey = beforeCtx.unique_key || unique_key;
+
+        // Extract unique key values to check which records exist
+        const uniqueValues = upsertData.map(record => record[targetKey]).filter(v => v != null);
+
+        const result = await prismaTransaction(async (tx) => {
+            // Find existing records
+            const existingRecords = await tx[this.name].findMany({
+                'where': {
+                    [targetKey]: {
+                        'in': uniqueValues
+                    }
+                },
+                'select': {
+                    [targetKey]: true
+                }
+            });
+
+            const existingKeys = new Set(existingRecords.map(r => r[targetKey]));
+
+            // Separate data into creates and updates
+            const createRecords = [];
+            const updateRecords = [];
+
+            for (const record of upsertData) {
+                const deepClone = JSON.parse(JSON.stringify(record));
+                if (existingKeys.has(record[targetKey])) {
+                    // Record exists, prepare for update
+                    const updatePrimaryKey = deepClone[this.primaryKey];
+                    this.queryBuilder.update(updatePrimaryKey, deepClone, this.user);
+                    updateRecords.push(deepClone);
+                } else {
+                    // Record doesn't exist, prepare for create
+                    if(validateRelation) {
+                        this.queryBuilder.create(deepClone, this.user);
+                    }
+                    createRecords.push(deepClone);
+                }
+            }
+
+            let createdCount = 0;
+            let updatedCount = 0;
+
+            // Batch create
+            if (createRecords.length > 0) {
+                if(validateRelation === false) {
+                    const createResult = await tx[this.name].createMany({
+                        'data': createRecords,
+                        'skipDuplicates': true,
+                        ...(beforeCtx.options || options)
+                    });
+                    createdCount = createResult.count;
+                }
+                else {
+                    for (const createRecord of createRecords) {
+                        await tx[this.name].create({
+                            'data': createRecord,
+                            ...(beforeCtx.options || options)
+                        });
+                        createdCount++;
+                    }
+                }
+            }
+
+            // Batch update
+            if (updateRecords.length > 0) {
+                for (const updateRecord of updateRecords) {
+                    await tx[this.name].update({
+                        'where': {
+                            [targetKey]: updateRecord[targetKey]
+                        },
+                        'data': updateRecord,
+                        ...(beforeCtx.options || options)
+                    });
+                    updatedCount++;
+                }
+            }
+
+            return {
+                created: createdCount,
+                updated: updatedCount,
+                total: createdCount + updatedCount
+            };
+        });
+
+        // Execute after middleware
+        const afterCtx = await this._executeMiddleware('after', 'upsertMany', { data: upsertData, result });
         return afterCtx.result || result;
     }
 
@@ -480,6 +598,24 @@ class Model {
      */
     async upsert(data, unique_key = this.primaryKey, options = {}) {
         return await this._upsert(data, unique_key, options);
+    }
+
+    /**
+     * Create or update multiple records based on unique key
+     * Performs atomic batch operations with transaction support
+     * @param {Object[]} data - Array of record data
+     * @param {string} [unique_key=this.primaryKey] - The unique field to match on
+     * @param {Object} [options={}] - Additional Prisma options
+     * @returns {Promise<Object>} Result with created, updated, and total counts
+     * @example
+     * const result = await contact.upsertMany([
+     *     { contact_id: '1', first_name: 'John' },
+     *     { contact_id: '2', first_name: 'Jane' }
+     * ], 'contact_id');
+     * // { created: 1, updated: 1, total: 2 }
+     */
+    async upsertMany(data, unique_key = this.primaryKey, options = {}) {
+        return await this._upsertMany(data, unique_key, options);
     }
 
     /**

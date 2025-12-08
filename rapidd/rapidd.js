@@ -213,17 +213,22 @@ const prisma = basePrisma.$extends({
 
 /**
  * Executes multiple operations in a single transaction with RLS context
- * @param {Array<Function>} operations - Array of functions that receive tx and return promises
- * @returns {Promise<Array>} Results of all operations
+ * @param {Function|Array<Function>} callback - Function or array of functions that receive tx
+ * @returns {Promise<any>} Result of the operation(s)
  */
-async function prismaTransaction(operations) {
+async function prismaTransaction(callback) {
     const context = requestContext.getStore();
 
     return basePrisma.$transaction(async (tx) => {
         if (context?.userId && context?.userRole) {
             await setRLSVariables(tx, context.userId, context.userRole);
         }
-        return Promise.all(operations.map(op => op(tx)));
+
+        // Handle both single callback and array of callbacks
+        if (Array.isArray(callback)) {
+            return await Promise.all(callback.map(fn => fn(tx)));
+        }
+        return await callback(tx);
     });
 }
 

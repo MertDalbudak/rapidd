@@ -14,7 +14,6 @@ const csrf = require('csurf');
 // SET CONST VARIABLE
 const NODE_ENV = process.env.NODE_ENV;
 
-
 // SET PROCESS ENV VARIABLES
 process.env.ROOT = path.resolve(__dirname);
 process.env.ROUTES_PATH = path.join(process.env.ROOT, "routes");
@@ -23,6 +22,9 @@ process.env.PUBLIC_PATH = path.join(process.env.ROOT, "public");
 process.env.PUBLIC_STATIC = path.join(process.env.PUBLIC_PATH, "static");
 process.env.TEMPLATE_PATH = path.join(process.env.PUBLIC_PATH, "template");
 process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout");
+
+// Load model middleware (must be after env paths are set)
+require('./middleware/model');
 
 // REQUIRE CUSTOM DEPENDENCIES
 const {Api, ErrorResponse, apiMiddleware} = require('./src/Api');
