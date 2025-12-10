@@ -144,7 +144,7 @@ class QueryBuilder {
      * @returns {Object} Prisma where object
      */
     filter(q) {
-        if (typeof q !== 'string') {
+        if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
 
@@ -152,7 +152,11 @@ class QueryBuilder {
         const filterParts = q.split(FILTER_PATTERNS.FILTER_SPLIT);
 
         for (const part of filterParts) {
-            const [key, value] = part.split('=');
+            // Split only on first '=' to handle values containing '='
+            const eqIndex = part.indexOf('=');
+            if (eqIndex === -1) continue; // Skip invalid filter parts without '='
+            const key = part.substring(0, eqIndex);
+            const value = part.substring(eqIndex + 1);
             const relationPath = key.split('.').map(e => e.trim());
             const fieldName = relationPath.pop();
             const trimmedValue = value?.trim() ?? null;
@@ -613,29 +617,6 @@ class QueryBuilder {
     }
 
     /**
-     * Build deep relationship include object with access controls
-     * @param {Object} relation - Relation configuration
-     * @param {Object} user - User object with role
-     * @param {string} [parentModel] - Parent model name that owns this relation
-     * @returns {Object|true} Prisma include/select object
-     */
-    #includeDeepRelationships(relation, user, parentModel = null) {
-        const currentParent = parentModel || this.name;
-        const { content } = this.#buildBaseIncludeContent(relation, user, currentParent);
-        content.include = {};
-
-        // Recursively include child relations
-        const childRelations = relation.relation;
-        if (Array.isArray(childRelations)) {
-            for (const child of childRelations) {
-                content.include[child.name] = this.#includeDeepRelationships(child, user, relation.object);
-            }
-        }
-
-        return this.#hasIncludeContent(content) ? content : true;
-    }
-
-    /**
      * Get relationships configuration for a specific model
      * @param {string} modelName - The model name
      * @returns {Array} Array of relationship configurations for the model
@@ -722,11 +703,15 @@ class QueryBuilder {
             let includeRelated = {};
 
             if (include_query === "ALL") {
-                // Load all deep relationships
+                // Load all first-level relationships only (no deep nesting to avoid endless relation loading)
                 includeRelated = this.relatedObjects.reduce((acc, curr) => {
-                    const rel = this.#includeDeepRelationships(curr, user);
+                    let rel = this.#includeTopLevelOnly(curr, user);
                     if (exclude_rule && exclude_rule[curr.name]) {
-                        rel.where = exclude_rule[curr.name];
+                        if (typeof rel === 'object' && rel !== null) {
+                            rel.where = exclude_rule[curr.name];
+                        } else {
+                            rel = { where: exclude_rule[curr.name] };
+                        }
                     }
                     acc[curr.name] = rel;
                     return acc;
@@ -869,7 +854,14 @@ class QueryBuilder {
      * @param {Object} [user=null] - User object for audit fields
      */
     create(data, user = null) {
-        this.#cleanTimestampFields(data);
+        // Remove fields user shouldn't be able to set
+        const modelAcl = acl.model[this.name];
+        const omitFields = user && modelAcl?.getOmitFields
+            ? modelAcl.getOmitFields(user)
+            : [];
+        for (const field of omitFields) {
+            delete data[field];
+        }
 
         for (const key of Object.keys(data)) {
             const field = this.fields[key];
@@ -877,10 +869,10 @@ class QueryBuilder {
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                this.#processCreateRelation(data, key);
+                this.#processCreateRelation(data, key, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect
-                this.#processCreateForeignKey(data, key);
+                this.#processCreateForeignKey(data, key, user);
             }
         }
     }
@@ -889,9 +881,10 @@ class QueryBuilder {
      * Process a relation field for create operation
      * @param {Object} data - Parent data object
      * @param {string} key - Relation field name
+     * @param {Object} [user=null] - User object for ACL
      * @private
      */
-    #processCreateRelation(data, key) {
+    #processCreateRelation(data, key, user = null) {
         const relatedObject = this.relatedObjects.find(e => e.name === key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", {key});
@@ -900,9 +893,9 @@ class QueryBuilder {
         if (!data[key]) return;
 
         if (Array.isArray(data[key])) {
-            data[key] = this.#processCreateArrayRelation(data[key], relatedObject, key);
+            data[key] = this.#processCreateArrayRelation(data[key], relatedObject, key, user);
         } else {
-            data[key] = this.#processCreateSingleRelation(data[key], relatedObject, key);
+            data[key] = this.#processCreateSingleRelation(data[key], relatedObject, key, user);
         }
     }
 
@@ -911,20 +904,80 @@ class QueryBuilder {
      * @param {Array} items - Array of relation items
      * @param {Object} relatedObject - Relation configuration
      * @param {string} relationName - Name of the relation
+     * @param {Object} [user=null] - User object for ACL
      * @returns {Object} Prisma create/connect structure
      * @private
      */
-    #processCreateArrayRelation(items, relatedObject, relationName) {
+    #processCreateArrayRelation(items, relatedObject, relationName, user = null) {
         for (let i = 0; i < items.length; i++) {
-            this.#cleanTimestampFields(items[i]);
             this.#validateAndTransformRelationItem(items[i], relatedObject, relationName);
         }
 
-        const foreignKey = relatedObject.foreignKey || 'id';
-        return {
-            create: items.filter(e => e.id == null),
-            connect: items.filter(e => e.id).map(e => ({ [foreignKey]: e[foreignKey] }))
-        };
+        const relatedPrimaryKey = this.getPrimaryKey(relatedObject.object);
+        const pkFields = Array.isArray(relatedPrimaryKey) ? relatedPrimaryKey : [relatedPrimaryKey];
+        const foreignKey = relatedObject.foreignKey || pkFields[0];
+
+        // For composite keys, check if ALL PK fields are present
+        const hasCompletePK = (item) => pkFields.every(field => item[field] != null);
+
+        const createItems = items.filter(e => !hasCompletePK(e));
+        const connectItems = items.filter(e => hasCompletePK(e));
+
+        // Get ACL for the related model
+        const relatedAcl = acl.model[relatedObject.object];
+        const accessFilter = user && relatedAcl?.getAccessFilter
+            ? this.cleanFilter(relatedAcl.getAccessFilter(user))
+            : null;
+
+        // Get omit fields for nested creates
+        const omitFields = user && relatedAcl?.getOmitFields
+            ? relatedAcl.getOmitFields(user)
+            : [];
+
+        const result = {};
+
+        if (createItems.length > 0) {
+            // Check canCreate permission for nested creates
+            if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+                throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+            }
+
+            // Remove omitted fields from create items
+            result.create = createItems.map(item => {
+                const cleanedItem = { ...item };
+                for (const field of omitFields) {
+                    delete cleanedItem[field];
+                }
+                return cleanedItem;
+            });
+        }
+
+        if (connectItems.length > 0) {
+            if (pkFields.length > 1) {
+                // Composite key - build composite where clause with ACL
+                result.connect = connectItems.map(e => {
+                    const where = {};
+                    pkFields.forEach(field => { where[field] = e[field]; });
+                    // Apply ACL access filter
+                    if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                        Object.assign(where, accessFilter);
+                    }
+                    return where;
+                });
+            } else {
+                // Simple key with ACL
+                result.connect = connectItems.map(e => {
+                    const where = { [foreignKey]: e[foreignKey] || e[pkFields[0]] };
+                    // Apply ACL access filter
+                    if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                        Object.assign(where, accessFilter);
+                    }
+                    return where;
+                });
+            }
+        }
+
+        return result;
     }
 
     /**
@@ -932,11 +985,26 @@ class QueryBuilder {
      * @param {Object} item - Relation data
      * @param {Object} relatedObject - Relation configuration
      * @param {string} relationName - Name of the relation
+     * @param {Object} [user=null] - User object for ACL
      * @returns {Object} Prisma create structure
      * @private
      */
-    #processCreateSingleRelation(item, relatedObject, relationName) {
-        this.#cleanTimestampFields(item);
+    #processCreateSingleRelation(item, relatedObject, relationName, user = null) {
+        // Get ACL for the related model
+        const relatedAcl = acl.model[relatedObject.object];
+
+        // Check canCreate permission
+        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+            throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        }
+
+        // Get and apply omit fields
+        const omitFields = user && relatedAcl?.getOmitFields
+            ? relatedAcl.getOmitFields(user)
+            : [];
+        for (const field of omitFields) {
+            delete item[field];
+        }
 
         for (const fieldKey of Object.keys(item)) {
             if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
@@ -946,10 +1014,36 @@ class QueryBuilder {
             // Check if this field is a FK that should become a nested connect
             const childRelation = relatedObject?.relation?.find(e => e.field === fieldKey);
             if (childRelation && item[fieldKey]) {
-                const childPrimaryKey = childRelation.foreignKey || this.getPrimaryKey(childRelation.object);
-                item[childRelation.name] = {
-                    connect: { [childPrimaryKey]: item[fieldKey] }
-                };
+                const targetPrimaryKey = childRelation.foreignKey || this.getPrimaryKey(childRelation.object);
+                const connectWhere = {};
+
+                // Handle composite primary keys
+                if (Array.isArray(targetPrimaryKey)) {
+                    // For composite PKs, the value should be an object with all key fields
+                    if (typeof item[fieldKey] === 'object' && item[fieldKey] !== null) {
+                        targetPrimaryKey.forEach(pk => {
+                            if (item[fieldKey][pk] != null) {
+                                connectWhere[pk] = item[fieldKey][pk];
+                            }
+                        });
+                    } else {
+                        // Single value for composite PK - use first field
+                        connectWhere[targetPrimaryKey[0]] = item[fieldKey];
+                    }
+                } else {
+                    connectWhere[targetPrimaryKey] = item[fieldKey];
+                }
+
+                // Apply ACL access filter for connect
+                const childAcl = acl.model[childRelation.object];
+                const accessFilter = user && childAcl?.getAccessFilter
+                    ? this.cleanFilter(childAcl.getAccessFilter(user))
+                    : null;
+                if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                    Object.assign(connectWhere, accessFilter);
+                }
+
+                item[childRelation.name] = { connect: connectWhere };
                 delete item[fieldKey];
             }
         }
@@ -995,17 +1089,29 @@ class QueryBuilder {
      * Process a scalar field that might be a FK needing connect transformation
      * @param {Object} data - Parent data object
      * @param {string} key - Field name
+     * @param {Object} [user=null] - User object for ACL
      * @private
      */
-    #processCreateForeignKey(data, key) {
+    #processCreateForeignKey(data, key, user = null) {
         const relatedObject = this.relatedObjects.find(e => e.field === key);
         if (!relatedObject) return;
 
         if (data[key]) {
-            const foreignKey = relatedObject.foreignKey || 'id';
-            data[relatedObject.name] = {
-                connect: { [foreignKey]: data[key] }
-            };
+            const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
+            const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
+            // Build connect where clause
+            const connectWhere = { [foreignKey]: data[key] };
+
+            // Apply ACL access filter for connect
+            const relatedAcl = acl.model[relatedObject.object];
+            const accessFilter = user && relatedAcl?.getAccessFilter
+                ? this.cleanFilter(relatedAcl.getAccessFilter(user))
+                : null;
+            if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                Object.assign(connectWhere, accessFilter);
+            }
+
+            data[relatedObject.name] = { connect: connectWhere };
         }
         delete data[key];
     }
@@ -1018,7 +1124,14 @@ class QueryBuilder {
      * @param {Object} [user=null] - User object for ACL checks
      */
     update(id, data, user = null) {
-        this.#cleanTimestampFields(data);
+        // Remove fields user shouldn't be able to modify
+        const modelAcl = acl.model[this.name];
+        const omitFields = user && modelAcl?.getOmitFields
+            ? modelAcl.getOmitFields(user)
+            : [];
+        for (const field of omitFields) {
+            delete data[field];
+        }
 
         for (const key of Object.keys(data)) {
             const field = this.fields[key];
@@ -1029,7 +1142,7 @@ class QueryBuilder {
                 this.#processUpdateRelation(data, key, id, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect/disconnect
-                this.#processUpdateForeignKey(data, key);
+                this.#processUpdateForeignKey(data, key, user);
             }
         }
     }
@@ -1061,18 +1174,30 @@ class QueryBuilder {
      * Process a scalar field that might be a FK needing connect/disconnect transformation
      * @param {Object} data - Parent data object
      * @param {string} key - Field name
+     * @param {Object} [user=null] - User object for ACL
      * @private
      */
-    #processUpdateForeignKey(data, key) {
+    #processUpdateForeignKey(data, key, user = null) {
         const relatedObject = this.relatedObjects.find(e => e.field === key);
         if (!relatedObject) return;
 
-        const foreignKey = relatedObject.foreignKey || 'id';
+        const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
+        const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
 
         if (data[key] != null) {
-            data[relatedObject.name] = {
-                connect: { [foreignKey]: data[key] }
-            };
+            // Build connect where clause
+            const connectWhere = { [foreignKey]: data[key] };
+
+            // Apply ACL access filter for connect
+            const relatedAcl = acl.model[relatedObject.object];
+            const accessFilter = user && relatedAcl?.getAccessFilter
+                ? this.cleanFilter(relatedAcl.getAccessFilter(user))
+                : null;
+            if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                Object.assign(connectWhere, accessFilter);
+            }
+
+            data[relatedObject.name] = { connect: connectWhere };
         } else {
             data[relatedObject.name] = { disconnect: true };
         }
@@ -1089,8 +1214,6 @@ class QueryBuilder {
      */
     #processArrayRelation(dataArray, relatedObject, parentId, user = null) {
         for (let i = 0; i < dataArray.length; i++) {
-            this.#cleanTimestampFields(dataArray[i]);
-
             // Validate all fields exist on the related model
             for (let _key in dataArray[i]) {
                 if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
@@ -1104,34 +1227,105 @@ class QueryBuilder {
             }
         }
 
-        // Get ACL update filter for this relation type
-        const aclFilter = user && acl.model[relatedObject.object]?.getUpdateFilter
-            ? acl.model[relatedObject.object].getUpdateFilter(user)
-            : {};
-        const cleanedFilter = aclFilter && aclFilter !== false ? this.cleanFilter(aclFilter) : null;
+        // Get primary key for the related model
+        const relatedPrimaryKey = this.getPrimaryKey(relatedObject.object);
+        const pkFields = Array.isArray(relatedPrimaryKey) ? relatedPrimaryKey : [relatedPrimaryKey];
+        const foreignKey = relatedObject.foreignKey || pkFields[0];
+        const isCompositePK = pkFields.length > 1;
 
-        return {
-            'connect': dataArray.filter(e => !Array.isArray(relatedObject.fields) && Object.keys(e).length === 1).map(e => {
-                return { [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id'] };
-            }),
-            'updateMany': dataArray.filter(e => e.id && Object.keys(e).length > 1).map(e => {
-                const where = {
-                    [relatedObject.foreignKey || 'id']: e[relatedObject.foreignKey || 'id']
-                };
+        // Get ACL filters for the related model
+        const relatedAcl = acl.model[relatedObject.object];
+        const accessFilter = user && relatedAcl?.getAccessFilter
+            ? this.cleanFilter(relatedAcl.getAccessFilter(user))
+            : null;
+        const updateFilter = user && relatedAcl?.getUpdateFilter
+            ? this.cleanFilter(relatedAcl.getUpdateFilter(user))
+            : null;
 
-                // Merge ACL filter directly into where clause (not using AND)
-                if (cleanedFilter && typeof cleanedFilter === 'object' && Object.keys(cleanedFilter).length > 0) {
-                    Object.assign(where, cleanedFilter);
-                }
+        // Get omit fields for create/update operations
+        const omitFields = user && relatedAcl?.getOmitFields
+            ? relatedAcl.getOmitFields(user)
+            : [];
 
-                return {
-                    'where': where,
-                    'data': { ...e }
-                };
-            }),
-            'upsert': dataArray.filter(e => e.id == null).map(e => {
+        // Helper to remove omitted fields from an object
+        const removeOmitFields = (obj) => {
+            const cleaned = { ...obj };
+            for (const field of omitFields) {
+                delete cleaned[field];
+            }
+            return cleaned;
+        };
+
+        // Helper to check if item has ALL PK fields
+        const hasCompletePK = (item) => pkFields.every(field => item[field] != null);
+
+        // Helper to check if item has ONLY the PK/FK fields (for connect)
+        // For n:m relations (composite FK), checks if only the join table FK fields are present
+        const hasOnlyPkFields = (item) => {
+            const keys = Object.keys(item);
+
+            // For n:m relations with composite FK (e.g., StudentCourse with studentId, courseId)
+            if (Array.isArray(relatedObject.fields)) {
+                // Check if all keys are part of the composite FK fields
+                // e.g., { courseId: 5 } should be connect, { courseId: 5, grade: 'A' } should be upsert
+                return keys.every(k => relatedObject.fields.includes(k));
+            }
+
+            if (isCompositePK) {
+                // For composite PK: all keys must be PK fields, and all PK fields must be present
+                return keys.length === pkFields.length && keys.every(k => pkFields.includes(k));
+            }
+            // For simple: only 1 key which is FK or PK
+            return keys.length === 1 && (keys[0] === foreignKey || keys[0] === pkFields[0]);
+        };
+
+        // Helper to merge ACL filter into where clause
+        const mergeAclFilter = (where, aclFilter) => {
+            if (aclFilter && typeof aclFilter === 'object' && Object.keys(aclFilter).length > 0) {
+                Object.assign(where, aclFilter);
+            }
+            return where;
+        };
+
+        // Logic:
+        // - connect: item has ONLY the PK/FK fields (just linking an existing record)
+        // - upsert: item has PK AND additional data fields (update if exists, create if not)
+        // - create: item has NO PK (always create new record)
+        // For n:m relations: { courseId: 5 } -> connect, { courseId: 5, grade: 'A' } -> upsert
+        const connectItems = [];
+        const upsertItems = [];
+        const createItems = [];
+
+        for (const item of dataArray) {
+            if (hasOnlyPkFields(item)) {
+                // Only PK/FK fields provided - connect to existing record
+                connectItems.push(item);
+            } else if (hasCompletePK(item) || Array.isArray(relatedObject.fields)) {
+                // Has PK + data fields OR is n:m relation with extra data - upsert
+                upsertItems.push(item);
+            } else {
+                // No PK - create new record
+                createItems.push(item);
+            }
+        }
+
+        // Check canCreate permission once for items that may create records
+        const canCreate = !user || !relatedAcl?.canCreate || relatedAcl.canCreate(user);
+
+        // If user can't create and has items without PK, throw error
+        if (!canCreate && createItems.length > 0) {
+            throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        }
+
+        const result = {};
+
+        // Build connect array with ACL access filter
+        if (connectItems.length > 0) {
+            result.connect = connectItems.map(e => {
                 const where = {};
                 if (Array.isArray(relatedObject.fields)) {
+                    // n:m relation - build composite key where clause
+                    // e.g., { studentId_courseId: { studentId: parentId, courseId: e.courseId } }
                     const pair_id = {};
                     pair_id[relatedObject.fields[0]] = parentId;
                     for (let field in e) {
@@ -1140,24 +1334,72 @@ class QueryBuilder {
                         }
                     }
                     where[relatedObject.field] = pair_id;
+                } else if (isCompositePK) {
+                    pkFields.forEach(field => { where[field] = e[field]; });
                 } else {
-                    where[relatedObject.field || relatedObject.foreignKey || 'id'] = e[relatedObject.field || relatedObject.foreignKey || 'id'] || -1;
+                    where[foreignKey] = e[foreignKey] || e[pkFields[0]];
                 }
+                // Apply access filter - user must have access to connect to this record
+                return mergeAclFilter(where, accessFilter);
+            });
+        }
 
-                // Merge ACL filter directly into where clause (not using AND)
-                if (cleanedFilter && typeof cleanedFilter === 'object' && Object.keys(cleanedFilter).length > 0) {
-                    Object.assign(where, cleanedFilter);
+        // Build upsert or update array based on canCreate permission
+        if (upsertItems.length > 0) {
+            const buildWhereClause = (e) => {
+                const where = {};
+                if (Array.isArray(relatedObject.fields)) {
+                    // Composite key relation (n:m via join table)
+                    const pair_id = {};
+                    pair_id[relatedObject.fields[0]] = parentId;
+                    for (let field in e) {
+                        if (relatedObject.fields.includes(field)) {
+                            pair_id[field] = e[field];
+                        }
+                    }
+                    where[relatedObject.field] = pair_id;
+                } else if (isCompositePK) {
+                    // Composite PK - all fields must be present
+                    pkFields.forEach(field => { where[field] = e[field]; });
+                } else {
+                    // Simple PK present
+                    where[pkFields[0]] = e[pkFields[0]];
                 }
+                // Apply update filter - user must have permission to update
+                mergeAclFilter(where, updateFilter);
+                return where;
+            };
 
-                return {
-                    'where': where,
-                    'create': { ...e },
-                    'update': { ...e }
-                };
-            })
-        };
+            if (canCreate) {
+                // User can create - use upsert (update if exists, create if not)
+                result.upsert = upsertItems.map(e => {
+                    const cleanedData = removeOmitFields(e);
+                    return {
+                        'where': buildWhereClause(e),
+                        'create': cleanedData,
+                        'update': cleanedData
+                    };
+                });
+            } else {
+                // User cannot create - use update only (fails if record doesn't exist)
+                result.update = upsertItems.map(e => {
+                    const cleanedData = removeOmitFields(e);
+                    return {
+                        'where': buildWhereClause(e),
+                        'data': cleanedData
+                    };
+                });
+            }
+        }
+
+        // Build create array for items without PK (only if canCreate is true)
+        if (createItems.length > 0 && canCreate) {
+            result.create = createItems.map(e => removeOmitFields(e));
+        }
+
+        return result;
     }
-    
+
     /**
      * Process single relation for update operations with create/update separation
      * @param {Object} dataObj - Relation data object
@@ -1166,6 +1408,24 @@ class QueryBuilder {
      * @returns {Object|null} Prisma upsert operation or null
      */
     #processSingleRelation(dataObj, relatedObject, user = null) {
+        // Get ACL for the related model
+        const relatedAcl = acl.model[relatedObject.object];
+
+        // Check canCreate permission since upsert may create new records
+        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+            throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        }
+
+        // Get omit fields
+        const omitFields = user && relatedAcl?.getOmitFields
+            ? relatedAcl.getOmitFields(user)
+            : [];
+
+        // Remove omitted fields from input
+        for (const field of omitFields) {
+            delete dataObj[field];
+        }
+
         // Validate all fields exist on the related model
         for (let _key in dataObj) {
             if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
@@ -1178,24 +1438,35 @@ class QueryBuilder {
         if (relatedObject.relation) {
             processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user);
         }
-    
+
         // Prepare separate data objects for create and update
         let createData = {...processedData};
         let updateData = {...processedData};
         let hasDisconnects = false;
-    
+
         // Process direct relations
         if (relatedObject.relation) {
             for (let relation_key in processedData) {
                 const rel = relatedObject.relation.find(e => e.field === relation_key);
                 if (rel) {
                     if (processedData[relation_key] != null) {
-                        // For both create and update, use connect when value is not null
-                        const connectObj = {
-                            'connect': {
-                                [rel.foreignKey || 'id']: processedData[relation_key]
-                            }
+                        // Build connect where clause
+                        const targetPK = this.getPrimaryKey(rel.object);
+                        const connectKey = rel.foreignKey || (Array.isArray(targetPK) ? targetPK[0] : targetPK);
+                        const connectWhere = {
+                            [connectKey]: processedData[relation_key]
                         };
+
+                        // Apply ACL access filter for connect
+                        const childAcl = acl.model[rel.object];
+                        const accessFilter = user && childAcl?.getAccessFilter
+                            ? this.cleanFilter(childAcl.getAccessFilter(user))
+                            : null;
+                        if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                            Object.assign(connectWhere, accessFilter);
+                        }
+
+                        const connectObj = { 'connect': connectWhere };
                         createData[rel.name] = connectObj;
                         updateData[rel.name] = connectObj;
                     } else {
@@ -1213,14 +1484,14 @@ class QueryBuilder {
                 }
             }
         }
-    
+
         // Check if we have meaningful content for create and update
         const hasCreateContent = this.#hasMeaningfulContent(createData);
         const hasUpdateContent = this.#hasMeaningfulContent(updateData) || hasDisconnects;
-    
+
         // Build upsert object conditionally
         const upsertObj = {};
-        
+
         if (hasCreateContent) {
             upsertObj.create = {
                 ...createData
@@ -1232,7 +1503,7 @@ class QueryBuilder {
                 ...updateData
             };
         }
-    
+
         // Only return upsert if we have at least one operation
         return Object.keys(upsertObj).length > 0 ? { 'upsert': upsertObj } : null;
     }
@@ -1268,18 +1539,7 @@ class QueryBuilder {
 
         return processedData;
     }
-    
-    /**
-     * Remove timestamp fields from data object
-     * @param {Object} dataObj - Data object to clean
-     */
-    #cleanTimestampFields(dataObj) {
-        delete dataObj.created_by;
-        delete dataObj.updated_by;
-        delete dataObj.created_date;
-        delete dataObj.updated_date;
-    }
-    
+
     /**
      * Check if data object contains meaningful content for database operations
      * @param {Object} dataObj - Data object to check
