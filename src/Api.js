@@ -426,6 +426,32 @@ class ErrorResponse extends ErrorBasicResponse {
     }
 }
 
+class Response {
+    /**
+     * @param {number} status_code 
+     * @param {string} message 
+     * @param {object|null} data 
+     */
+    constructor(status_code, message, data = null) {
+        this.status_code = status_code;
+        this.message = message;
+        this.data = data;
+    }
+
+    /**
+     * 
+     * @param {string} language 
+     * @returns {{status_code: number, message: string, data: object|null}}
+     */
+    toJSON(language = "en-US") {
+        return {
+            status_code: this.status_code,
+            message: LanguageDict.get(this.message, this.data, language),
+            data: this.data
+        };
+    }
+}
+
 /**
  * Middleware to attach Api utilities to req/res objects
  * This eliminates the need to import Api in every route file
@@ -548,6 +574,7 @@ function getTranslation(key, data = null, language = "en-US") {
 module.exports = {
     Api,
     RateLimiter,
+    Response,
     ErrorResponse,
     apiMiddleware,
     rateLimitMiddleware,

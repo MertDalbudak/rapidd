@@ -47,7 +47,6 @@ class Auth {
         // Bind methods to preserve 'this' context when used as middleware
         this.authenticate = this.authenticate.bind(this);
         this.requireAuth = this.requireAuth.bind(this);
-        this.register = this.register.bind(this);
         this.login = this.login.bind(this);
         this.logout = this.logout.bind(this);
         this.refresh = this.refresh.bind(this);
@@ -362,73 +361,26 @@ class Auth {
     // ============================================
 
     /**
-     * POST /auth/register
-     */
-    async register(req, res) {
-        const { [this.options.passwordField]: password, ...userData } = req.body;
-
-        // Check required identifier
-        const hasIdentifier = this.options.identifierFields.some(f => userData[f]);
-        if (!hasIdentifier || !password) {
-            throw new ErrorResponse(400, 'identifier_and_password_required');
-        }
-
-        const User = this.getUserModel();
-
-        // Check for existing user
-        for (const field of this.options.identifierFields) {
-            if (userData[field]) {
-                const existing = await User.findUnique({
-                    where: { [field]: userData[field] }
-                }).catch(() => null);
-
-                if (existing) {
-                    throw new ErrorResponse(409, `${field}_already_exists`);
-                }
-            }
-        }
-
-        const hashedPassword = await bcrypt.hash(password, this.options.saltRounds);
-
-        const user = await User.create({
-            data: {
-                ...userData,
-                [this.options.passwordField]: hashedPassword
-            },
-            ...this._buildUserQuery(false)
-        });
-
-        const sanitizedUser = this._sanitizeUser(user);
-
-        // Create session
-        const sessionId = this.generateSessionId();
-        await this.getSessionStore().create(sessionId, sanitizedUser);
-
-        const accessToken = this.generateAccessToken(user, sessionId);
-        const refreshToken = this.generateRefreshToken(user);
-
-        res.status(201).json({
-            user: sanitizedUser,
-            accessToken,
-            refreshToken
-        });
-    }
-
-    /**
      * POST /auth/login
+     * Body: { user: "email or username", password: "..." }
      */
     async login(req, res) {
-        const { [this.options.passwordField]: password, ...identifiers } = req.body;
+        const { user: identifier, password } = req.body;
 
-        // Find which identifier was provided
-        const identifierField = this.options.identifierFields.find(f => identifiers[f]);
-        if (!identifierField || !password) {
-            throw new ErrorResponse(400, 'identifier_and_password_required');
+        if (!identifier || !password) {
+            throw new ErrorResponse(400, 'user_and_password_required');
         }
 
         const User = this.getUserModel();
-        const user = await User.findUnique({
-            where: { [identifierField]: identifiers[identifierField] },
+
+        // Try each identifier field until we find a match
+        let user = null;
+        const search = this.options.identifierFields.reduce((acc, curr) => {
+            acc[curr] = identifier;
+            return acc;
+        }, {});
+        user = await User.findFirst({
+            where: search,
             ...this._buildUserQuery(true)
         });
 
@@ -544,7 +496,6 @@ module.exports = {
     authenticate: (options) => defaultAuth.authenticate(options),
     requireAuth: defaultAuth.requireAuth,
     requireRole: (...roles) => defaultAuth.requireRole(...roles),
-    register: defaultAuth.register,
     login: defaultAuth.login,
     logout: defaultAuth.logout,
     refresh: defaultAuth.refresh,
@@ -552,5 +503,7 @@ module.exports = {
     getSessionStore: () => defaultAuth.getSessionStore(),
     generateAccessToken: (user, sessionId) => defaultAuth.generateAccessToken(user, sessionId),
     generateRefreshToken: (user) => defaultAuth.generateRefreshToken(user),
-    verifyToken: (token, isRefresh) => defaultAuth.verifyToken(token, isRefresh)
+    verifyToken: (token, isRefresh) => defaultAuth.verifyToken(token, isRefresh),
+    hashPassword: (password) => bcrypt.hash(password, defaultAuth.options.saltRounds),
+    comparePassword: (password, hash) => bcrypt.compare(password, hash)
 };

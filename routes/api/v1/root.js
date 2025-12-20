@@ -1,13 +1,19 @@
 const express = require('express');
 const {
     authenticate,
-    register,
     login,
     logout,
     refresh,
     me,
     requireAuth,
+    hashPassword,
+    generateAccessToken,
+    generateRefreshToken,
+    getSessionStore,
 } = require('../../../rapidd/auth');
+const crypto = require('crypto');
+const { authPrisma } = require('../../../rapidd/rapidd');
+const { Response, ErrorResponse } = require('../../../src/Api');
 
 const router = express.Router();
 const { rateLimitMiddleware } = require('../../../src/Api');
@@ -22,23 +28,51 @@ router.use(authenticate());
 
 /**
  * POST /auth/register
- * Register a new user
+ * Register a new user (example - customize as needed)
  *
  * Body:
  * {
  *   "email": "user@example.com",
- *   "password": "securePassword123"
+ *   "password": "securePassword123",
+ *   "name": "John Doe"
  * }
  */
-router.post('/register', register);
+router.post('/register', async (req, res) => {
+    const { email, password, ...userData } = req.body;
+
+    if (!email || !password) {
+        throw new ErrorResponse(400, 'email_and_password_required');
+    }
+
+    // Check if user exists
+    const existing = await authPrisma.users.findUnique({
+        where: { email }
+    }).catch(() => null);
+
+    if (existing) {
+        throw new ErrorResponse(409, 'email_already_exists');
+    }
+
+    // Create user
+    const hashedPassword = await hashPassword(password);
+    const user = await authPrisma.users.create({
+        data: {
+            email,
+            password: hashedPassword,
+            ...userData
+        }
+    });
+    const response = new Response(201, 'user_registered', { userId: user.id });
+    res.status(201).json(response.toJSON(req.language));
+});
 
 /**
  * POST /auth/login
- * Login with email/username and password
+ * Login with user (email/username) and password
  *
  * Body:
  * {
- *   "email": "user@example.com",
+ *   "user": "user@example.com",
  *   "password": "securePassword123"
  * }
  */
