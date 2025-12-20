@@ -1,10 +1,11 @@
 const express = require('express');
 const {
-    authenticateUser,
+    authenticate,
     register,
     login,
     logout,
-    getCurrentUser,
+    refresh,
+    me,
     requireAuth,
 } = require('../../../rapidd/auth');
 
@@ -16,13 +17,12 @@ if (process.env.NODE_ENV === 'production') {
     router.use(rateLimitMiddleware());
 }
 
-// Authenticate all requests
-router.all('*', authenticateUser);
+// Authenticate all requests (supports Basic and Bearer auth)
+router.use(authenticate());
 
 /**
  * POST /auth/register
  * Register a new user
- * TODO: Customize request body for your schema
  *
  * Body:
  * {
@@ -34,7 +34,7 @@ router.post('/register', register);
 
 /**
  * POST /auth/login
- * Login with email and password
+ * Login with email/username and password
  *
  * Body:
  * {
@@ -47,19 +47,25 @@ router.post('/login', login);
 /**
  * POST /auth/logout
  * Logout user and delete session
+ */
+router.post('/logout', logout);
+
+/**
+ * POST /auth/refresh
+ * Refresh access token using refresh token
  *
  * Body:
  * {
  *   "refreshToken": "..."
  * }
  */
-router.post('/logout', logout);
+router.post('/refresh', refresh);
 
 /**
  * GET /auth/me
  * Get current logged in user
  * Requires: Authentication
  */
-router.get('/me', requireAuth, getCurrentUser);
+router.get('/me', requireAuth, me);
 
 module.exports = router;

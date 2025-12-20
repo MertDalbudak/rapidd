@@ -30,7 +30,7 @@ process.env.TEMPLATE_LAYOUT_PATH = path.join(process.env.TEMPLATE_PATH, "layout"
 const {Api, ErrorResponse, apiMiddleware} = require('./src/Api');
 const {ejsMiddleware} = require('./lib/ejsRender');
 const pushLog = require('./lib/pushLog');
-const { authenticateUser } = require('./rapidd/auth');
+const { authenticate } = require('./rapidd/auth');
 const { setRLSContext } = require('./rapidd/rls');
 
 const ALLOWED_LANGUAGES = require('./config/app').languages;
@@ -236,7 +236,7 @@ app.post('/lang/:lang', function(req, res){
     }
 });
 
-app.use(authenticateUser);
+app.use(authenticate());
 app.use(setRLSContext);
 
 // LOAD ALL ROUTERS IN /routes
