@@ -93,7 +93,7 @@ class Model {
      * @private
      */
     async _executeMiddleware(hook, operation, params) {
-        const context = modelMiddleware.createContext(this.name, operation, params, this.user);
+        const context = modelMiddleware.createContext(this, operation, params, this.user);
         return await modelMiddleware.execute(hook, operation, context);
     }
 
@@ -749,9 +749,6 @@ class Model {
         this.name = name;
         this.prisma = prisma[name];
     }
-
-    /** @type {Object[]} Related objects configuration (deprecated, use DMMF) */
-    static relatedObjects = [];
 
     /** @type {typeof ErrorResponse} Error class for throwing API errors */
     static Error = ErrorResponse;

@@ -148,7 +148,7 @@ function getMiddleware(hook, operation, model) {
  * @param {'before'|'after'} hook - Hook type
  * @param {string} operation - Operation name
  * @param {Object} context - Context object to pass through middleware
- * @param {string} context.model - Model name
+ * @param {Model} context.model - Model instance
  * @param {Object} [context.data] - Data for create/update operations
  * @param {*} [context.id] - ID for get/update/delete operations
  * @param {Object} [context.user] - Current user
@@ -157,7 +157,7 @@ function getMiddleware(hook, operation, model) {
  * @returns {Promise<Object>} Modified context
  */
 async function execute(hook, operation, context) {
-    const middlewares = getMiddleware(hook, operation, context.model);
+    const middlewares = getMiddleware(hook, operation, context.model.name);
 
     let ctx = { ...context };
     for (const fn of middlewares) {
@@ -176,7 +176,7 @@ async function execute(hook, operation, context) {
 
 /**
  * Create a middleware context object
- * @param {string} model - Model name
+ * @param {Model} model - Model instance
  * @param {string} operation - Operation being performed
  * @param {Object} params - Operation parameters
  * @param {Object} [user] - Current user
