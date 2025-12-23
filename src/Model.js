@@ -36,7 +36,7 @@ class Model {
      */
     constructor(name, options) {
         this.modelName = name;
-        this.queryBuilder = new QueryBuilder(name);
+        this.queryBuilder = this.constructor.QueryBuilder ?? new QueryBuilder(name);
         this.acl = acl.model[name] || {};
         this.options = options || {};
         this.user = this.options.user || { 'id': 1, 'role': 'application' };
@@ -241,7 +241,6 @@ class Model {
         // CREATE
         const result = await this.prisma.create({
             'data': createData,
-            'include': this.include('ALL'),
             ...(beforeCtx.options || options)
         });
 
@@ -334,7 +333,6 @@ class Model {
             },
             'create': createData,
             'update': updateData,
-            'include': this.include('ALL'),
             ...(beforeCtx.options || options)
         });
 
@@ -357,6 +355,9 @@ class Model {
         if (!Array.isArray(data) || data.length === 0) {
             return { created: 0, updated: 0, total: 0 };
         }
+        const accessFilter = this.getAccessFilter();
+        const canCreate = this.canCreate();
+        const updateFilter = this.getUpdateFilter();
 
         // Execute before middleware
         const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data, unique_key, options });
@@ -377,7 +378,8 @@ class Model {
                 'where': {
                     [targetKey]: {
                         'in': uniqueValues
-                    }
+                    },
+                    ...accessFilter
                 },
                 'select': {
                     [targetKey]: true
@@ -410,6 +412,9 @@ class Model {
 
             // Batch create
             if (createRecords.length > 0) {
+                if(canCreate === false) {
+                    throw new ErrorResponse(403, "no_permission_to_create");
+                }
                 if(validateRelation === false) {
                     const createResult = await tx[this.name].createMany({
                         'data': createRecords,
@@ -431,10 +436,14 @@ class Model {
 
             // Batch update
             if (updateRecords.length > 0) {
+                if (updateFilter === false) {
+                    throw new ErrorResponse(403, "no_permission_to_update");
+                }
                 for (const updateRecord of updateRecords) {
                     await tx[this.name].update({
                         'where': {
-                            [targetKey]: updateRecord[targetKey]
+                            [targetKey]: updateRecord[targetKey],
+                            ...updateFilter,
                         },
                         'data': updateRecord,
                         ...(beforeCtx.options || options)
@@ -504,18 +513,24 @@ class Model {
 
         // Support soft delete via middleware
         if (beforeCtx.softDelete && beforeCtx.data) {
-            const result = await this.prisma.update({
-                'where': {
-                    [this.primaryKey]: targetId,
-                    ...deleteFilter
-                },
-                'data': beforeCtx.data,
-                'select': this.select(),
-                ...(beforeCtx.options || options)
-            });
+            try {
+                const result = await this.prisma.update({
+                    'where': {
+                        [this.primaryKey]: targetId,
+                        ...deleteFilter
+                    },
+                    'data': beforeCtx.data,
+                    'select': {
+                        [this.primaryKey]: true
+                    },
+                    ...(beforeCtx.options || options)
+                });
 
-            const afterCtx = await this._executeMiddleware('after', 'delete', { id: targetId, result, softDelete: true });
-            return afterCtx.result || result;
+                const afterCtx = await this._executeMiddleware('after', 'delete', { id: targetId, result, softDelete: true });
+                return afterCtx.result || result;
+            } catch (error) {
+                throw new ErrorResponse(403, "no_permission", { error });
+            }
         }
 
         const result = await this.prisma.delete({
@@ -523,7 +538,9 @@ class Model {
                 [this.primaryKey]: targetId,
                 ...deleteFilter
             },
-            'select': this.select(),
+            'select': {
+                [this.primaryKey]: true
+            },
             ...(beforeCtx.options || options)
         });
 
@@ -739,6 +756,17 @@ class Model {
             return {};
         }
         return filter;
+    }
+
+    /**
+     * Removes relation data from a data object
+     * @param {*} data 
+     */
+    removeRelationData(data){
+        for(let i = 0; i < this.queryBuilder.relatedObjects.length; i++){
+            delete data[this.queryBuilder.relatedObjects[i].name];
+        }
+        return data;
     }
 
     /**

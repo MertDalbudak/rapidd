@@ -1,6 +1,5 @@
 const express = require('express');
 const {
-    authenticate,
     login,
     logout,
     refresh,
@@ -11,7 +10,6 @@ const {
     generateRefreshToken,
     getSessionStore,
 } = require('../../../rapidd/auth');
-const crypto = require('crypto');
 const { authPrisma } = require('../../../rapidd/rapidd');
 const { Response, ErrorResponse } = require('../../../src/Api');
 
@@ -22,9 +20,6 @@ const { rateLimitMiddleware } = require('../../../src/Api');
 if (process.env.NODE_ENV === 'production') {
     router.use(rateLimitMiddleware());
 }
-
-// Authenticate all requests (supports Basic and Bearer auth)
-router.use(authenticate());
 
 /**
  * POST /auth/register
