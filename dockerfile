@@ -1,54 +1,58 @@
-# Stage 1: Builder
-FROM node:lts-alpine AS builder
+# Stage 1: Install all dependencies and build TypeScript
+FROM node:24-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files first for caching
+COPY package.json package-lock.json ./
+RUN npm ci --no-audit --no-fund
+
+COPY tsconfig.json ./
+COPY main.ts ./
+COPY src ./src
+COPY routes ./routes
+
+RUN npx tsc
+
+# Stage 2: Production dependencies + Prisma client
+FROM node:24-alpine AS deps
+
+WORKDIR /app
+
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
-# Copy Prisma schema and generate client for Alpine Linux
 COPY prisma ./prisma
 RUN npx prisma generate --generator client
 
-# Stage 2: Runtime
-FROM node:lts-alpine
+# Stage 3: Runtime
+FROM node:24-alpine
 
 WORKDIR /app
 
-# Create non-root user for security
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S rapidd -u 1001
 
-# Copy only production dependencies from builder
-COPY --from=builder --chown=rapidd:nodejs /app/node_modules ./node_modules
-COPY --from=builder --chown=rapidd:nodejs /app/package.json ./package.json
+# Production node_modules with Prisma client
+COPY --from=deps --chown=rapidd:nodejs /app/node_modules ./node_modules
+COPY --from=deps --chown=rapidd:nodejs /app/package.json ./package.json
 
-# Copy Prisma schema and generated client from builder
-COPY --from=builder --chown=rapidd:nodejs /app/prisma ./prisma
+# Prisma schema + generated client
+COPY --from=deps --chown=rapidd:nodejs /app/prisma ./prisma
 
-# Copy only necessary application files
-COPY --chown=rapidd:nodejs main.js ./
-COPY --chown=rapidd:nodejs lib ./lib
-COPY --chown=rapidd:nodejs src ./src
-COPY --chown=rapidd:nodejs routes ./routes
-COPY --chown=rapidd:nodejs public ./public
-COPY --chown=rapidd:nodejs strings ./strings
+# Compiled TypeScript output
+COPY --from=builder --chown=rapidd:nodejs /app/dist ./dist
+
+# Runtime assets
 COPY --chown=rapidd:nodejs config ./config
-COPY --chown=rapidd:nodejs rapidd ./rapidd
-COPY --chown=rapidd:nodejs middleware ./middleware
+COPY --chown=rapidd:nodejs strings ./strings
+COPY --chown=rapidd:nodejs public ./public
 
-# Create logs directory with proper permissions
 RUN mkdir -p logs && chown -R rapidd:nodejs logs
 
-# Update packages and clean cache
 RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
-# Switch to non-root user
 USER rapidd
 
-# Expose port (adjust if your app uses a different port)
-EXPOSE 80
+EXPOSE 3000
 
-# Use exec form for proper signal handling
-ENTRYPOINT ["node", "main.js"]
+ENTRYPOINT ["node", "dist/main.js"]

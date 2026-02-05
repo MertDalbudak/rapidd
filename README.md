@@ -2,14 +2,16 @@
 
 # Rapidd
 
-**Rapidd** is a powerful Node.js framework that automatically generates production-ready REST APIs from your Prisma schema. It eliminates the need to manually write CRUD endpoints, route handlers, and data validation logic by intelligently building them from your database schema.
+**Rapidd** is a TypeScript/Fastify framework that automatically generates production-ready REST APIs from your Prisma schema. It eliminates the need to manually write CRUD endpoints, route handlers, and data validation logic by intelligently building them from your database schema.
 
 ## Features
 
 - **Schema-Driven API Generation** - Auto-generate REST endpoints from Prisma schema
+- **TypeScript First** - Full type safety across models, routes, and middleware
+- **Fastify 5** - High-performance HTTP server with plugin architecture
 - **Multi-Database Support** - PostgreSQL and MySQL/MariaDB via Prisma adapters
 - **Row-Level Security (RLS)** - Database-enforced security via session variables
-- **Access Control Layer (ACL)** - Fine-grained model-level permissions
+- **Access Control Layer (ACL)** - Fine-grained model-level permissions with relation filtering
 - **Advanced Query Building** - Filtering, sorting, pagination, and relation loading
 - **Model Middleware** - Before/after hooks for all CRUD operations
 - **JWT Authentication** - Built-in auth with access/refresh token rotation
@@ -34,6 +36,7 @@
   - [Pagination](#pagination)
 - [Authentication](#authentication)
 - [API Reference](#api-reference)
+- [Docker](#docker)
 - [Examples](#examples)
 
 ---
@@ -64,7 +67,7 @@ npx prisma generate
 
 ### 4. Build Your API
 
-Run the Rapidd build command to generate API endpoints and ACL rules:
+Run the Rapidd build command to generate models, routes, and ACL rules:
 
 ```bash
 npx @rapidd/build
@@ -92,9 +95,14 @@ ALLOWED_ORIGINS="localhost,example.com"
 COOKIE_SECRET="cookie-secret"
 ```
 
-### 6. Start Server
+### 6. Build & Start
 
 ```bash
+# Development (with hot reload)
+npm run dev
+
+# Production
+npm run build
 npm start
 ```
 
@@ -114,18 +122,31 @@ Your API is now live at `http://localhost:3000`!
 | `JWT_SECRET` | Yes | - | Secret for access tokens |
 | `JWT_REFRESH_SECRET` | Yes | - | Secret for refresh tokens |
 | `PORT` | No | 3000 | Server port |
+| `HOST` | No | 0.0.0.0 | Server bind address |
 | `NODE_ENV` | No | development | `development` or `production` |
 | `ALLOWED_ORIGINS` | No | * | Comma-separated allowed CORS origins |
 | `COOKIE_SECRET` | No | - | Secret for signed cookies |
-| `SALT_ROUNDS` | No | 10 | bcrypt salt rounds |
+| `AUTH_SALT_ROUNDS` | No | 10 | bcrypt salt rounds |
+| `AUTH_SESSION_STORAGE` | No | redis | Session store (`redis` or `memory`) |
+| `AUTH_SESSION_TTL` | No | 86400 | Session TTL in seconds |
+| `AUTH_ACCESS_TOKEN_EXPIRY` | No | 1d | JWT access token expiry |
+| `AUTH_REFRESH_TOKEN_EXPIRY` | No | 7d | JWT refresh token expiry |
+| `DB_USER_TABLE` | No | users | Prisma user model name |
 | `API_RESULT_LIMIT` | No | 500 | Max results per query |
+| `RATE_LIMIT_WINDOW_MS` | No | 900000 | Rate limit window in ms |
+| `RATE_LIMIT_MAX_REQUESTS` | No | 100 | Max requests per window |
+| `REDIS_HOST` | No | localhost | Redis host |
+| `REDIS_PORT` | No | 6379 | Redis port |
+| `REDIS_PASSWORD` | No | - | Redis password |
+| `REDIS_DB_RATE_LIMIT` | No | 0 | Redis DB for rate limiting |
+| `REDIS_DB_AUTH` | No | 1 | Redis DB for auth sessions |
 | `RLS_NAMESPACE` | No | app | RLS variable namespace |
 | `RLS_USER_ID` | No | current_user_id | RLS user ID variable name |
 | `RLS_USER_ROLE` | No | current_user_role | RLS user role variable name |
 
 ### Config Files
 
-- `config/app.js` - Application settings (languages, etc.)
+- `config/app.json` - Application settings (languages, etc.)
 - `config/rate-limit.json` - Rate limiting configuration
 
 ---
@@ -136,23 +157,27 @@ Your API is now live at `http://localhost:3000`!
 
 The `Model` class provides a high-level ORM interface with built-in ACL integration.
 
-```javascript
-const { Model } = require('./src/Model');
+```typescript
+import { Model } from './src/orm/Model';
+import { QueryBuilder, prisma } from './src/orm/QueryBuilder';
+import type { ModelOptions, GetManyResult } from './src/types';
 
-class Users extends Model {
-    constructor(options) {
+export class Users extends Model {
+    constructor(options?: ModelOptions) {
         super('users', options);
     }
 
     // Add custom methods
-    async findByEmail(email) {
+    async findByEmail(email: string) {
         const result = await this.getMany({ email });
         return result.data[0];
     }
+
+    static override QueryBuilder = new QueryBuilder('users');
 }
 
 // Usage
-const users = new Users({ user: req.user });
+const users = new Users({ user: request.user });
 const result = await users.getMany({}, 'posts', 10, 0);
 ```
 
@@ -161,22 +186,21 @@ const result = await users.getMany({}, 'posts', 10, 0);
 | Method | Description |
 |--------|-------------|
 | `getMany(filter, include, limit, offset, sortBy, sortOrder)` | Fetch multiple records |
-| `get(id, include, options)` | Fetch single record by ID |
-| `create(data, options)` | Create new record |
-| `update(id, data, options)` | Update existing record |
-| `upsert(data, uniqueKey, options)` | Create or update record |
-| `upsertMany(data, uniqueKey, options)` | Batch create or update records |
-| `delete(id, options)` | Delete record |
+| `get(id, include)` | Fetch single record by ID |
+| `create(data)` | Create new record |
+| `update(id, data)` | Update existing record |
+| `upsert(data, uniqueKey)` | Create or update record |
+| `upsertMany(data, uniqueKey)` | Batch create or update records |
+| `delete(id)` | Delete record |
 | `count(filter)` | Count matching records |
 
 #### Batch Operations
 
 The `upsertMany` method allows efficient batch create/update operations within a single transaction:
 
-```javascript
-const contacts = new Contacts({ user: req.user });
+```typescript
+const contacts = new Contacts({ user: request.user });
 
-// Batch upsert by unique key
 const result = await contacts.upsertMany([
     { contact_id: '1', first_name: 'John', email: 'john@example.com' },
     { contact_id: '2', first_name: 'Jane', email: 'jane@example.com' },
@@ -186,18 +210,12 @@ const result = await contacts.upsertMany([
 // Returns: { created: 2, updated: 1, total: 3 }
 ```
 
-The method automatically:
-- Checks which records exist by the unique key
-- Separates data into creates and updates
-- Executes all operations in a single transaction
-- Triggers middleware for `upsertMany` operations
-
 ### QueryBuilder
 
 The `QueryBuilder` class handles query parsing and Prisma query generation.
 
-```javascript
-const { QueryBuilder } = require('./src/QueryBuilder');
+```typescript
+import { QueryBuilder } from './src/orm/QueryBuilder';
 
 const qb = new QueryBuilder('users');
 
@@ -213,49 +231,64 @@ const orderBy = qb.sort('createdAt', 'desc');
 
 ### Access Control (ACL)
 
-ACL provides model-level permission control.
+ACL provides model-level permission control. Rules are defined in `src/config/acl.ts` and enforced automatically on all CRUD operations and relation includes.
 
-```javascript
-// rapidd/acl.js or generated by @rapidd/build
-const { acl } = require('./rapidd/rapidd');
+```typescript
+// src/config/acl.ts
+import type { AclConfig, RapiddUser } from '../types';
 
-// Register ACL rules for a model
-acl.register('posts', {
-    // Who can create?
-    canCreate: (user) => ['ADMIN', 'AUTHOR'].includes(user.role),
+const acl: AclConfig = {
+    model: {
+        posts: {
+            // Who can create?
+            canCreate(user: RapiddUser): boolean {
+                return ['ADMIN', 'AUTHOR'].includes(user.role);
+            },
 
-    // Filter for read access
-    getAccessFilter: (user) => {
-        if (user.role === 'ADMIN') return true; // Full access
-        return {
-            OR: [
-                { authorId: user.id },
-                { published: true }
-            ]
-        };
-    },
+            // Filter for read access
+            getAccessFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};  // Full access
+                return {
+                    OR: [
+                        { authorId: user.id },
+                        { published: true }
+                    ]
+                };
+            },
 
-    // Filter for update access
-    getUpdateFilter: (user) => {
-        if (user.role === 'ADMIN') return true;
-        return { authorId: user.id }; // Only own posts
-    },
+            // Filter for update access
+            getUpdateFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};
+                return { authorId: user.id }; // Only own posts
+            },
 
-    // Filter for delete access
-    getDeleteFilter: (user) => {
-        if (user.role === 'ADMIN') return true;
-        return false; // Others can't delete
-    },
+            // Filter for delete access
+            getDeleteFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};
+                return false; // Others can't delete
+            },
 
-    // Fields to hide based on role
-    getOmitFields: (user) => {
-        if (user.role !== 'ADMIN') {
-            return ['internalNotes', 'adminComments'];
+            // Fields to hide based on role
+            getOmitFields(user: RapiddUser): string[] {
+                if (user.role !== 'ADMIN') {
+                    return ['internalNotes', 'adminComments'];
+                }
+                return [];
+            }
         }
-        return [];
     }
-});
+};
+
+export default acl;
 ```
+
+#### ACL Filter Return Values
+
+| Return Value | Meaning |
+|-------------|---------|
+| `{}` | Allow all (no filter applied) |
+| `{ field: value }` | Scope access to matching records |
+| `false` | Deny all access (returns 403) |
 
 ### Row-Level Security (RLS)
 
@@ -291,8 +324,8 @@ The framework automatically sets these variables on each request based on the au
 
 Register hooks to intercept Model operations.
 
-```javascript
-const { Model } = require('./src/Model');
+```typescript
+import { Model } from './src/orm/Model';
 
 // Auto-add timestamps on create (all models)
 Model.middleware.use('before', 'create', async (ctx) => {
@@ -325,15 +358,6 @@ Model.middleware.use('after', 'get', async (ctx) => {
     }
     return ctx;
 }, 'users');
-
-// Abort operation
-Model.middleware.use('before', 'delete', async (ctx) => {
-    if (ctx.user?.role !== 'ADMIN') {
-        ctx.abort = true;
-        throw new Error('Only admins can delete');
-    }
-    return ctx;
-}, 'critical_data');
 ```
 
 #### Middleware Context
@@ -458,6 +482,8 @@ GET /api/posts?include=author,comments.user
 GET /api/users?include=ALL
 ```
 
+ACL rules are automatically enforced on included relations. If a user doesn't have access to a related model, that relation is excluded from the response.
+
 ### Sorting
 
 ```
@@ -502,6 +528,7 @@ GET /api/users?limit=10&offset=20  # Page 3
 | `/api/v1/register` | POST | Register new user |
 | `/api/v1/login` | POST | Login with email/password |
 | `/api/v1/logout` | POST | Logout (invalidate session) |
+| `/api/v1/refresh` | POST | Refresh access token |
 | `/api/v1/me` | GET | Get current user |
 
 ### Registration
@@ -549,9 +576,12 @@ Authorization: Bearer eyJhbG...
 
 ### Token Configuration
 
-- **Access Token**: Expires in 1 day
-- **Refresh Token**: Expires in 7 days
-- Sessions stored in database for revocation
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTH_ACCESS_TOKEN_EXPIRY` | 1d | Access token lifetime |
+| `AUTH_REFRESH_TOKEN_EXPIRY` | 7d | Refresh token lifetime |
+| `AUTH_SESSION_TTL` | 86400 | Session TTL in seconds |
+| `AUTH_SESSION_STORAGE` | redis | `redis` or `memory` |
 
 ---
 
@@ -559,8 +589,8 @@ Authorization: Bearer eyJhbG...
 
 ### ErrorResponse
 
-```javascript
-const { ErrorResponse } = require('./src/Api');
+```typescript
+import { ErrorResponse } from './src/core/errors';
 
 // Throw standardized errors
 throw new ErrorResponse(400, 'validation_error', { field: 'email' });
@@ -571,8 +601,8 @@ throw new ErrorResponse(404, 'not_found');
 
 ### Prisma Clients
 
-```javascript
-const { prisma, authPrisma } = require('./rapidd/rapidd');
+```typescript
+import { prisma, authPrisma } from './src/core/prisma';
 
 // prisma - User context with RLS
 const posts = await prisma.posts.findMany();
@@ -583,8 +613,8 @@ const allPosts = await authPrisma.posts.findMany();
 
 ### Transactions
 
-```javascript
-const { prismaTransaction } = require('./rapidd/rapidd');
+```typescript
+import { prismaTransaction } from './src/core/prisma';
 
 const [users, posts] = await prismaTransaction([
     (tx) => tx.users.findMany(),
@@ -594,8 +624,8 @@ const [users, posts] = await prismaTransaction([
 
 ### DMMF Utilities
 
-```javascript
-const dmmf = require('./rapidd/dmmf');
+```typescript
+import dmmf from './src/core/dmmf';
 
 // Get model definition
 const model = dmmf.getModel('users');
@@ -615,110 +645,129 @@ const isList = dmmf.isListRelation('users', 'posts');
 
 ---
 
+## Docker
+
+### Build
+
+```bash
+docker build -t rapidd .
+```
+
+### Run
+
+```bash
+docker run -p 3000:3000 --env-file .env rapidd
+```
+
+The Dockerfile uses a multi-stage build:
+1. **Builder** - Installs all dependencies and compiles TypeScript
+2. **Deps** - Installs production dependencies and generates Prisma client
+3. **Runtime** - Minimal Alpine image with only compiled output and production deps
+
+---
+
 ## Examples
 
 ### Custom Route with Model
 
-```javascript
-// routes/api/v1/posts.js
-const express = require('express');
-const { Model } = require('../../../src/Model');
-const { requireAuth } = require('../../../rapidd/auth');
+```typescript
+// routes/api/v1/posts.ts
+import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
+import { Posts, QueryBuilder } from '../../../src/models/Posts';
 
-const router = express.Router();
-
-class Posts extends Model {
-    constructor(options) {
-        super('posts', options);
-    }
-}
-
-// GET /api/v1/posts
-router.get('/', async (req, res) => {
-    const posts = new Posts({ user: req.user });
-    const { filter, include, limit, offset, sortBy, sortOrder } = req.query;
-
-    const result = await posts.getMany(
-        filter,
-        include || 'author',
-        limit || 25,
-        offset || 0,
-        sortBy || 'createdAt',
-        sortOrder || 'desc'
-    );
-
-    res.json(result);
-});
-
-// POST /api/v1/posts
-router.post('/', requireAuth, async (req, res) => {
-    const posts = new Posts({ user: req.user });
-    const result = await posts.create({
-        ...req.body,
-        authorId: req.user.id
+const postsRoutes: FastifyPluginAsync = async (fastify) => {
+    fastify.addHook('preHandler', async (request, reply) => {
+        if (!request.user) {
+            return reply.sendError(401, 'no_valid_session');
+        }
+        (request as any).Posts = new Posts({ user: request.user });
     });
 
-    res.status(201).json(result);
-});
+    // GET /api/v1/posts
+    fastify.get('/', async (request: FastifyRequest, reply: FastifyReply) => {
+        try {
+            const { q = {}, include = '', limit = '25', offset = '0', sortBy = 'createdAt', sortOrder = 'desc' } = request.query as Record<string, string>;
+            const model = (request as any).Posts as Posts;
+            const results = await model.getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder as 'asc' | 'desc');
+            return reply.sendList(results.data, results.meta);
+        } catch (error: any) {
+            const response = QueryBuilder.errorHandler(error);
+            return reply.code(response.status_code).send(response);
+        }
+    });
 
-module.exports = router;
+    // POST /api/v1/posts
+    fastify.post('/', async (request: FastifyRequest, reply: FastifyReply) => {
+        const payload = request.body as Record<string, unknown>;
+        try {
+            const model = (request as any).Posts as Posts;
+            const response = await model.create({
+                ...payload,
+                authorId: request.user!.id
+            });
+            return reply.code(201).send(response);
+        } catch (error: any) {
+            const response = QueryBuilder.errorHandler(error, payload);
+            return reply.code(response.status_code).send(response);
+        }
+    });
+};
+
+export default postsRoutes;
 ```
 
 ### Custom ACL Rules
 
-```javascript
-// config/acl/posts.js
-module.exports = {
-    canCreate: (user) => {
-        return user && user.role !== 'GUEST';
-    },
+```typescript
+// src/config/acl.ts
+const acl: AclConfig = {
+    model: {
+        posts: {
+            canCreate(user: RapiddUser): boolean {
+                return user.role !== 'GUEST';
+            },
 
-    getAccessFilter: (user) => {
-        if (!user) {
-            // Anonymous: only published posts
-            return { published: true };
+            getAccessFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};
+                // Users see published posts + their own drafts
+                return {
+                    OR: [
+                        { published: true },
+                        { authorId: user.id }
+                    ]
+                };
+            },
+
+            getUpdateFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};
+                return { authorId: user.id };
+            },
+
+            getDeleteFilter(user: RapiddUser) {
+                if (user.role === 'ADMIN') return {};
+                return false;
+            },
+
+            getOmitFields(user: RapiddUser): string[] {
+                if (user.role !== 'ADMIN') {
+                    return ['adminNotes', 'internalMetrics'];
+                }
+                return [];
+            }
         }
-        if (user.role === 'ADMIN') {
-            return true; // Full access
-        }
-        // Users see published + their own drafts
-        return {
-            OR: [
-                { published: true },
-                { authorId: user.id }
-            ]
-        };
-    },
-
-    getUpdateFilter: (user) => {
-        if (user.role === 'ADMIN') return true;
-        return { authorId: user.id };
-    },
-
-    getDeleteFilter: (user) => {
-        if (user.role === 'ADMIN') return true;
-        return false;
-    },
-
-    getOmitFields: (user) => {
-        const hidden = [];
-        if (user?.role !== 'ADMIN') {
-            hidden.push('adminNotes', 'internalMetrics');
-        }
-        return hidden;
     }
 };
 ```
 
 ### Model Middleware for Audit Log
 
-```javascript
-// middleware/model.js
-const { Model } = require('../src/Model');
-const { prisma } = require('../rapidd/rapidd');
+```typescript
+// middleware/model.ts
+import { Model } from '../src/orm/Model';
+import { prisma } from '../src/core/prisma';
 
 // Log all mutations to audit_logs table
-['create', 'update', 'delete'].forEach(operation => {
+(['create', 'update', 'delete'] as const).forEach(operation => {
     Model.middleware.use('after', operation, async (ctx) => {
         await prisma.audit_logs.create({
             data: {
@@ -741,40 +790,64 @@ const { prisma } = require('../rapidd/rapidd');
 
 ```
 rapidd/
-├── config/
-│   ├── app.js              # Application config
-│   └── rate-limit.json     # Rate limiting config
-├── lib/
-│   ├── ejsRender.js        # EJS template rendering
-│   ├── pushLog.js          # Logging utility
-│   └── SendMail.js         # Email sending
-├── middleware/
-│   └── model.js            # Model middleware hooks
-├── prisma/
-│   ├── schema.prisma       # Database schema
-│   └── client/             # Generated Prisma client
-├── public/
-│   ├── static/             # Static files
-│   └── template/           # EJS templates
-├── rapidd/
-│   ├── rapidd.js           # Core module
-│   ├── dmmf.js             # Schema introspection
-│   ├── acl.js              # Access control
-│   ├── auth.js             # Authentication
-│   ├── rls.js              # Row-level security
-│   └── modelMiddleware.js  # Middleware system
-├── routes/
-│   ├── api/
-│   │   └── v1/             # API v1 routes
-│   └── root.js             # Root routes
 ├── src/
-│   ├── Model.js            # ORM layer
-│   ├── QueryBuilder.js     # Query building
-│   └── Api.js              # API utilities
-├── strings/                # i18n translations
-├── main.js                 # Application entry
+│   ├── app.ts                 # Fastify app factory + route loader
+│   ├── types.ts               # Shared TypeScript types
+│   ├── auth/                  # Authentication system
+│   │   ├── Auth.ts            # Auth class (login, register, etc.)
+│   │   └── stores/            # Session stores (Redis, memory)
+│   ├── config/
+│   │   └── acl.ts             # Access control rules
+│   ├── core/
+│   │   ├── prisma.ts          # Prisma clients, RLS, transactions
+│   │   ├── dmmf.ts            # Schema introspection (DMMF)
+│   │   ├── errors.ts          # ErrorResponse, Response classes
+│   │   └── language.ts        # Language dictionary
+│   ├── models/                # Generated model subclasses
+│   │   ├── Users.ts
+│   │   ├── Messages.ts
+│   │   └── ...
+│   ├── orm/
+│   │   ├── Model.ts           # Base ORM model class
+│   │   └── QueryBuilder.ts    # REST→Prisma query translation
+│   └── plugins/               # Fastify plugins
+│       ├── api.ts             # Response decorators
+│       ├── auth.ts            # Auth middleware
+│       ├── language.ts        # i18n plugin
+│       ├── rateLimiter.ts     # Rate limiting
+│       └── security.ts        # Security headers
+├── routes/
+│   └── api/
+│       └── v1/                # API v1 routes (auto-loaded)
+│           ├── root.ts        # Auth routes (register, login, etc.)
+│           ├── users.ts
+│           ├── messages.ts
+│           └── ...
+├── config/
+│   ├── app.json               # App config (languages, etc.)
+│   └── rate-limit.json        # Rate limit config
+├── prisma/
+│   ├── schema.prisma          # Database schema
+│   └── client/                # Generated Prisma client
+├── strings/                   # i18n translation files
+├── public/                    # Static files
+├── main.ts                    # Application entry point
+├── tsconfig.json              # TypeScript config
+├── dockerfile                 # Multi-stage Docker build
 └── package.json
 ```
+
+---
+
+## Scripts
+
+| Script | Command | Description |
+|--------|---------|-------------|
+| `dev` | `npm run dev` | Development server with hot reload (tsx) |
+| `build` | `npm run build` | Compile TypeScript to `dist/` |
+| `start` | `npm start` | Run compiled production server |
+| `test` | `npm test` | Run test suite (Jest) |
+| `typecheck` | `npm run typecheck` | Type-check without emitting |
 
 ---
 
@@ -799,7 +872,7 @@ Uses `@prisma/adapter-mariadb`.
 ### Provider Detection
 
 The framework auto-detects the provider from the connection string:
-- URLs starting with `postgresql://` → PostgreSQL
+- URLs starting with `postgresql://` or `postgres://` → PostgreSQL
 - URLs starting with `mysql://` or `mariadb://` → MySQL
 
 Override with `DATABASE_PROVIDER` environment variable if needed.
@@ -810,37 +883,29 @@ Override with `DATABASE_PROVIDER` environment variable if needed.
 
 ### Built-in Security Features
 
-- **CSRF Protection** - Cookie-based CSRF tokens
-- **Rate Limiting** - Configurable per-endpoint limits
+- **Rate Limiting** - Configurable per-endpoint limits (Redis or in-memory)
 - **Security Headers** - CSP, X-Frame-Options, X-XSS-Protection, HSTS
 - **Password Hashing** - bcrypt with configurable rounds
-- **JWT Authentication** - Signed tokens with expiration
+- **JWT Authentication** - Signed tokens with expiration and refresh rotation
 - **RLS** - Database-level row security
-- **ACL** - Application-level access control
-- **Input Sanitization** - SQL injection prevention
+- **ACL** - Application-level access control with relation filtering
+- **Input Sanitization** - SQL injection prevention via Prisma
 
 ### Production Checklist
 
 - [ ] Set `NODE_ENV=production`
 - [ ] Configure strong `JWT_SECRET` and `JWT_REFRESH_SECRET`
-- [ ] Set up Redis for rate limiting
+- [ ] Set up Redis for rate limiting and sessions
 - [ ] Configure `ALLOWED_ORIGINS` for CORS
-- [ ] Enable HTTPS
+- [ ] Enable HTTPS (reverse proxy or load balancer)
 - [ ] Set up RLS policies in database
-- [ ] Review and customize ACL rules
-- [ ] Configure proper logging
-
----
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+- [ ] Review and customize ACL rules in `src/config/acl.ts`
 
 ---
 
 ## License
 
-MIT
+ISC
 
 ---
 

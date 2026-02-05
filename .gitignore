@@ -6,3 +6,4 @@ compose.yml
 /logs
 /data/api_credentials.json
 /prisma/client
+/dist

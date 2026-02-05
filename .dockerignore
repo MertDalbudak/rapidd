@@ -6,16 +6,17 @@ yarn-error.log*
 
 # Testing and development
 __test__
+*.test.ts
 *.test.js
-jest.setup.js
+*.spec.ts
 *.spec.js
+jest.setup.*
 coverage
 
-# Development files
-.env*
-.env.local
-.env.development
-.env.test
+# Environment files
+.env
+.env.*
+!.env.example
 
 # Version control and CI/CD
 .git
@@ -31,6 +32,7 @@ LICENSE*
 
 # Docker files
 Dockerfile*
+dockerfile*
 docker-compose*
 compose.yml
 .dockerignore
@@ -38,6 +40,7 @@ compose.yml
 # IDE and editor files
 .vscode
 .idea
+.claude
 *.swp
 *.swo
 *~
@@ -53,19 +56,16 @@ tmp
 temp
 *.tmp
 
-# Sensitive config files that shouldn't be in production
-config/default.json
-data/custom-sevdesk-creditNote.htm
-data/custom-sevdesk-invoice.htm
-
-# Build artifacts and caches
+# Build artifacts (rebuilt in Docker)
 dist
-build
-.cache
 
-# Prisma generated client (will be regenerated in build)
+# Prisma client (regenerated in Docker)
 prisma/client
 
-# Other unnecessary files
+# TypeScript config for tests
+tsconfig.test.json
+
+# Other
 *.orig
 *.backup
+data/

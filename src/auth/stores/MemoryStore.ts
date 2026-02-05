@@ -1,27 +1,33 @@
-const ISessionStore = require('../ISessionStore');
+import { ISessionStore } from './ISessionStore';
+
+interface SessionEntry {
+    data: Record<string, unknown>;
+    expiresAt: number;
+}
 
 /**
- * In-memory session store
- * Suitable for development or single-instance deployments
+ * In-memory session store.
+ * Suitable for development or single-instance deployments.
  */
-class MemoryStore extends ISessionStore {
-    constructor(options = {}) {
+export class MemoryStore extends ISessionStore {
+    private ttl: number;
+    private sessions = new Map<string, SessionEntry>();
+    private _cleanupInterval: ReturnType<typeof setInterval>;
+
+    constructor(options: { ttl?: number } = {}) {
         super();
         this.ttl = (options.ttl || 86400) * 1000; // Convert to ms
-        this.sessions = new Map();
-
-        // Cleanup expired sessions every minute
         this._cleanupInterval = setInterval(() => this._cleanup(), 60000);
     }
 
-    async create(sessionId, data) {
+    async create(sessionId: string, data: Record<string, unknown>): Promise<void> {
         this.sessions.set(sessionId, {
             data,
-            expiresAt: Date.now() + this.ttl
+            expiresAt: Date.now() + this.ttl,
         });
     }
 
-    async get(sessionId) {
+    async get(sessionId: string): Promise<Record<string, unknown> | null> {
         const session = this.sessions.get(sessionId);
         if (!session) return null;
 
@@ -33,22 +39,22 @@ class MemoryStore extends ISessionStore {
         return session.data;
     }
 
-    async delete(sessionId) {
+    async delete(sessionId: string): Promise<void> {
         this.sessions.delete(sessionId);
     }
 
-    async refresh(sessionId) {
+    async refresh(sessionId: string): Promise<void> {
         const session = this.sessions.get(sessionId);
         if (session) {
             session.expiresAt = Date.now() + this.ttl;
         }
     }
 
-    async isHealthy() {
+    async isHealthy(): Promise<boolean> {
         return true;
     }
 
-    _cleanup() {
+    private _cleanup(): void {
         const now = Date.now();
         for (const [id, session] of this.sessions) {
             if (session.expiresAt < now) {
@@ -57,10 +63,8 @@ class MemoryStore extends ISessionStore {
         }
     }
 
-    destroy() {
+    destroy(): void {
         clearInterval(this._cleanupInterval);
         this.sessions.clear();
     }
 }
-
-module.exports = MemoryStore;

@@ -29,8 +29,8 @@ const { Model } = require('../src/Model');
  * Auto-add createdAt/createdBy on create
  */
 Model.middleware.use('before', 'create', async (ctx) => {
-    ctx.data.createdAt = ctx.data.createdAt || new Date();
-    ctx.data.createdBy = ctx.data.createdBy || ctx.user?.id;
+    //ctx.data.createdAt = ctx.data.createdAt || new Date();
+    //ctx.data.createdBy = ctx.data.createdBy || ctx.user?.id;
     return ctx;
 });
 
@@ -38,8 +38,8 @@ Model.middleware.use('before', 'create', async (ctx) => {
  * Auto-add updatedAt/updatedBy on update
  */
 Model.middleware.use('before', 'update', async (ctx) => {
-    ctx.data.updatedAt = new Date();
-    ctx.data.updatedBy = ctx.user?.id;
+    //ctx.data.updatedAt = new Date();
+    //ctx.data.updatedBy = ctx.user?.id;
     return ctx;
 });
 

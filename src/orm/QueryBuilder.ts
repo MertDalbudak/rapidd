@@ -1,9 +1,21 @@
-const {prisma, prismaTransaction, acl} = require('../rapidd/rapidd');
-const { ErrorResponse } = require('./Api');
-const dmmf = require('../rapidd/dmmf');
+import { prisma, prismaTransaction, getAcl } from '../core/prisma';
+import { ErrorResponse } from '../core/errors';
+import * as dmmf from '../core/dmmf';
+import type {
+    RelationConfig,
+    DMMFField,
+    DMMFModel,
+    PrismaWhereClause,
+    PrismaIncludeClause,
+    PrismaOrderBy,
+    QueryErrorResponse,
+    AclConfig,
+    RapiddUser,
+    PrismaErrorInfo,
+} from '../types';
 
-const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
-const MAX_NESTING_DEPTH = 10;
+const API_RESULT_LIMIT: number = parseInt(process.env.API_RESULT_LIMIT as string, 10) || 500;
+const MAX_NESTING_DEPTH: number = 10;
 
 // Pre-compiled regex patterns for better performance
 const FILTER_PATTERNS = {
@@ -14,15 +26,57 @@ const FILTER_PATTERNS = {
     // Pure number (integer or decimal, optionally negative)
     PURE_NUMBER: /^-?\d+(\.\d+)?$/,
     // Numeric operators
-    NUMERIC_OPS: ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'],
+    NUMERIC_OPS: ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'] as const,
     // Date operators
-    DATE_OPS: ['before:', 'after:', 'from:', 'to:', 'on:', 'between:']
+    DATE_OPS: ['before:', 'after:', 'from:', 'to:', 'on:', 'between:'] as const,
+};
+
+/**
+ * Prisma error code mappings
+ * Maps Prisma error codes to HTTP status codes and user-friendly messages
+ */
+const PRISMA_ERROR_MAP: Record<string, PrismaErrorInfo> = {
+    // Connection errors
+    P1001: { status: 500, message: 'Connection to the database could not be established' },
+
+    // Query errors (4xx - client errors)
+    P2000: { status: 400, message: 'The provided value for the column is too long' },
+    P2001: { status: 404, message: 'The record searched for in the where condition does not exist' },
+    P2002: { status: 409, message: null }, // Dynamic message for duplicates
+    P2003: { status: 400, message: 'Foreign key constraint failed' },
+    P2004: { status: 400, message: 'A constraint failed on the database' },
+    P2005: { status: 400, message: 'The value stored in the database is invalid for the field type' },
+    P2006: { status: 400, message: 'The provided value is not valid' },
+    P2007: { status: 400, message: 'Data validation error' },
+    P2008: { status: 400, message: 'Failed to parse the query' },
+    P2009: { status: 400, message: 'Failed to validate the query' },
+    P2010: { status: 500, message: 'Raw query failed' },
+    P2011: { status: 400, message: 'Null constraint violation' },
+    P2012: { status: 400, message: 'Missing a required value' },
+    P2013: { status: 400, message: 'Missing the required argument' },
+    P2014: { status: 400, message: 'The change would violate the required relation' },
+    P2015: { status: 404, message: 'A related record could not be found' },
+    P2016: { status: 400, message: 'Query interpretation error' },
+    P2017: { status: 400, message: 'The records for relation are not connected' },
+    P2018: { status: 404, message: 'The required connected records were not found' },
+    P2019: { status: 400, message: 'Input error' },
+    P2020: { status: 400, message: 'Value out of range for the type' },
+    P2021: { status: 404, message: 'The table does not exist in the current database' },
+    P2022: { status: 404, message: 'The column does not exist in the current database' },
+    P2023: { status: 400, message: 'Inconsistent column data' },
+    P2024: { status: 408, message: 'Timed out fetching a new connection from the connection pool' },
+    P2025: { status: 404, message: 'Operation failed: required records not found' },
+    P2026: { status: 400, message: 'Database provider does not support this feature' },
+    P2027: { status: 500, message: 'Multiple errors occurred during query execution' },
+    P2028: { status: 500, message: 'Transaction API error' },
+    P2030: { status: 404, message: 'Cannot find a fulltext index for the search' },
+    P2033: { status: 400, message: 'A number in the query exceeds 64 bit signed integer' },
+    P2034: { status: 409, message: 'Transaction failed due to write conflict or deadlock' },
 };
 
 /**
  * QueryBuilder - Builds Prisma queries with relation handling, filtering, and ACL support
  *
- * @description
  * A comprehensive query builder that translates simplified API requests into valid Prisma queries.
  * Handles nested relations, field validation, filtering with operators, and access control.
  *
@@ -32,41 +86,39 @@ const FILTER_PATTERNS = {
  * const include = qb.include('posts.comments', user);
  */
 class QueryBuilder {
+    name: string;
+    _relationshipsCache: RelationConfig[] | null;
+    _relatedFieldsCache: Record<string, Record<string, DMMFField>>;
+
     /**
      * Initialize QueryBuilder with model name and configuration
-     * @param {string} name - The Prisma model name (e.g., 'users', 'company_profiles')
+     * @param name - The Prisma model name (e.g., 'users', 'company_profiles')
      */
-    constructor(name) {
-        /** @type {string} The model name */
+    constructor(name: string) {
         this.name = name;
-        /** @private @type {Object[]|null} Cached relationships configuration */
         this._relationshipsCache = null;
-        /** @private @type {Object|null} Cached fields for related models */
         this._relatedFieldsCache = {};
     }
 
     /**
      * Get all fields for this model from DMMF (including relation fields)
-     * @returns {Object<string, Object>} Object with field names as keys and DMMF field objects as values
      */
-    get fields() {
+    get fields(): Record<string, DMMFField> {
         return dmmf.getFields(this.name);
     }
 
     /**
      * Get only scalar fields (non-relation) for this model from DMMF
-     * @returns {Object<string, Object>} Object with scalar field names as keys
      */
-    get scalarFields() {
+    get scalarFields(): Record<string, DMMFField> {
         return dmmf.getScalarFields(this.name);
     }
 
     /**
      * Get relationships configuration for this model from DMMF
      * Builds relationships dynamically from Prisma schema
-     * @returns {Object[]} Array of relationship configurations with nested relation info
      */
-    get relatedObjects() {
+    get relatedObjects(): RelationConfig[] {
         if (this._relationshipsCache) {
             return this._relationshipsCache;
         }
@@ -77,29 +129,22 @@ class QueryBuilder {
 
     /**
      * Get DMMF model object by name
-     * @param {string} [name=this.name] - The model name
-     * @returns {Object|undefined} DMMF model object or undefined if not found
      */
-    getDmmfModel(name = this.name) {
+    getDmmfModel(name: string = this.name): DMMFModel | undefined {
         return dmmf.getModel(name);
     }
 
     /**
      * Get primary key field(s) for a given model
-     * @param {string} [modelName=this.name] - The model name
-     * @returns {string|string[]} Primary key field name or array of field names for composite keys
      */
-    getPrimaryKey(modelName = this.name) {
+    getPrimaryKey(modelName: string = this.name): string | string[] {
         return dmmf.getPrimaryKey(modelName);
     }
 
     /**
      * Get fields for a related model (cached for performance)
-     * @param {string} modelName - The related model name
-     * @returns {Object<string, Object>} Object with field names as keys
-     * @private
      */
-    #getRelatedModelFields(modelName) {
+    #getRelatedModelFields(modelName: string): Record<string, DMMFField> {
         if (!this._relatedFieldsCache[modelName]) {
             this._relatedFieldsCache[modelName] = dmmf.getFields(modelName);
         }
@@ -108,12 +153,8 @@ class QueryBuilder {
 
     /**
      * Check if a field exists on a model
-     * @param {string} modelName - The model name
-     * @param {string} fieldName - The field name to check
-     * @returns {boolean} True if field exists
-     * @private
      */
-    #fieldExistsOnModel(modelName, fieldName) {
+    #fieldExistsOnModel(modelName: string, fieldName: string): boolean {
         const fields = this.#getRelatedModelFields(modelName);
         return fields[fieldName] != null;
     }
@@ -122,24 +163,21 @@ class QueryBuilder {
      * Ensure a relation object has its nested relations populated.
      * If relatedObject.relation is undefined, dynamically builds it from DMMF.
      * This enables deep relationship processing beyond 2 levels.
-     * @param {Object} relatedObject - Relation configuration object
-     * @returns {Object} The same relatedObject with relation property populated
-     * @private
      */
-    #ensureRelations(relatedObject) {
+    #ensureRelations(relatedObject: RelationConfig): RelationConfig {
         if (!relatedObject.relation && relatedObject.object) {
             const targetRelations = dmmf.getRelations(relatedObject.object);
             if (targetRelations.length > 0) {
-                relatedObject.relation = targetRelations.map(nested => ({
+                relatedObject.relation = targetRelations.map((nested: DMMFField) => ({
                     name: nested.name,
                     object: nested.type,
                     isList: nested.isList,
                     field: nested.relationFromFields?.[0],
                     foreignKey: nested.relationToFields?.[0] || 'id',
-                    ...(nested.relationFromFields?.length > 1 ? {
+                    ...(nested.relationFromFields && nested.relationFromFields.length > 1 ? {
                         fields: nested.relationFromFields,
-                        foreignKeys: nested.relationToFields
-                    } : {})
+                        foreignKeys: nested.relationToFields,
+                    } : {}),
                 }));
             }
         }
@@ -148,36 +186,32 @@ class QueryBuilder {
 
     /**
      * Build select object for specified fields
-     * @param {Array|null} fields - Fields to select, null for all
-     * @returns {Object} Prisma select object
      */
-    select(fields = null) {
+    select(fields: string[] | null = null): Record<string, boolean> {
         if (fields == null) {
-            fields = {};
-            for (let key in this.fields) {
-                fields[key] = true;
+            const result: Record<string, boolean> = {};
+            for (const key in this.fields) {
+                result[key] = true;
             }
+            return result;
         } else {
-            fields = fields.reduce((acc, curr) => {
+            return fields.reduce((acc: Record<string, boolean>, curr: string) => {
                 acc[curr] = true;
                 return acc;
             }, {});
         }
-        return fields;
     }
 
     /**
      * Parse filter string into Prisma where conditions
      * Supports: numeric/date/string operators, not:, #NULL, not:#NULL
-     * @param {string} q - Filter query string
-     * @returns {Object} Prisma where object
      */
-    filter(q) {
+    filter(q: string): Record<string, unknown> {
         if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
 
-        const result = {};
+        const result: Record<string, unknown> = {};
         const filterParts = q.split(FILTER_PATTERNS.FILTER_SPLIT);
 
         for (const part of filterParts) {
@@ -186,13 +220,13 @@ class QueryBuilder {
             if (eqIndex === -1) continue; // Skip invalid filter parts without '='
             const key = part.substring(0, eqIndex);
             const value = part.substring(eqIndex + 1);
-            const relationPath = key.split('.').map(e => e.trim());
-            const fieldName = relationPath.pop();
+            const relationPath = key.split('.').map((e: string) => e.trim());
+            const fieldName = relationPath.pop()!;
             const trimmedValue = value?.trim() ?? null;
 
             // Validate field exists on model (for non-relation filters)
             if (relationPath.length === 0 && !this.fields[fieldName]) {
-                throw new ErrorResponse(400, "invalid_filter_field", {field: fieldName});
+                throw new ErrorResponse(400, "invalid_filter_field", { field: fieldName });
             }
 
             // Navigate to the correct filter context for nested relations
@@ -207,31 +241,27 @@ class QueryBuilder {
 
     /**
      * Navigate through relation path and return the filter context object
-     * @param {Object} rootFilter - Root filter object
-     * @param {string[]} relationPath - Array of relation names
-     * @returns {Object} The nested filter context to apply conditions to
-     * @private
      */
-    #navigateToFilterContext(rootFilter, relationPath) {
-        let filter = rootFilter;
-        let currentRelations = this.relatedObjects;
+    #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[]): Record<string, any> {
+        let filter: Record<string, any> = rootFilter;
+        let currentRelations: RelationConfig[] | RelationConfig = this.relatedObjects;
 
         for (const relationName of relationPath) {
             // Find the relation in current context
-            const rel = Array.isArray(currentRelations)
-                ? currentRelations.find(r => r.name === relationName)
-                : currentRelations?.relation?.find(r => r.name === relationName);
+            const rel: RelationConfig | undefined = Array.isArray(currentRelations)
+                ? currentRelations.find((r: RelationConfig) => r.name === relationName)
+                : (currentRelations as RelationConfig)?.relation?.find((r: RelationConfig) => r.name === relationName);
 
             if (!rel) {
                 throw new ErrorResponse(400, "relation_not_exist", {
                     relation: relationName,
-                    modelName: this.name
+                    modelName: this.name,
                 });
             }
 
             // Create or navigate to the relation filter
             if (!filter[rel.name]) {
-                const parentModelName = Array.isArray(currentRelations) ? this.name : currentRelations.object;
+                const parentModelName = Array.isArray(currentRelations) ? this.name : (currentRelations as RelationConfig).object;
                 const isListRel = rel.isList || dmmf.isListRelation(parentModelName, rel.name);
 
                 if (isListRel && rel.field) {
@@ -253,12 +283,8 @@ class QueryBuilder {
 
     /**
      * Apply a filter value to a field in the filter context
-     * @param {Object} filter - Filter context object
-     * @param {string} fieldName - Field name to filter
-     * @param {string|null} value - Filter value
-     * @private
      */
-    #applyFilterValue(filter, fieldName, value) {
+    #applyFilterValue(filter: Record<string, any>, fieldName: string, value: string | null): void {
         // Handle null values
         if (value === '#NULL') {
             filter[fieldName] = null;
@@ -287,12 +313,8 @@ class QueryBuilder {
 
     /**
      * Apply a negated filter (not:value)
-     * @param {Object} filter - Filter context
-     * @param {string} fieldName - Field name
-     * @param {string} value - Value after not: prefix
-     * @private
      */
-    #applyNegatedFilter(filter, fieldName, value) {
+    #applyNegatedFilter(filter: Record<string, any>, fieldName: string, value: string): void {
         // not:#NULL
         if (value === '#NULL') {
             filter[fieldName] = { not: null };
@@ -302,8 +324,8 @@ class QueryBuilder {
         // not:[array]
         if (value.startsWith('[') && value.endsWith(']')) {
             const arr = this.#parseArrayValue(value);
-            if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
-                filter.NOT = arr.map(v => ({ [fieldName]: this.#filterString(v) }));
+            if (arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
+                filter.NOT = arr.map((v: unknown) => ({ [fieldName]: this.#filterString(v as string) }));
             } else {
                 filter[fieldName] = { notIn: arr };
             }
@@ -336,13 +358,9 @@ class QueryBuilder {
 
     /**
      * Apply not:between: filter
-     * @param {Object} filter - Filter context
-     * @param {string} fieldName - Field name
-     * @param {string} rangeValue - Range value (start;end)
-     * @private
      */
-    #applyNotBetween(filter, fieldName, rangeValue) {
-        const [start, end] = rangeValue.split(';').map(v => v.trim());
+    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string): void {
+        const [start, end] = rangeValue.split(';').map((v: string) => v.trim());
 
         if (!start || !end) {
             throw new ErrorResponse(400, "between_requires_two_values");
@@ -354,34 +372,30 @@ class QueryBuilder {
             filter.NOT = (filter.NOT || []).concat([{
                 AND: [
                     { [fieldName]: { gte: parseFloat(start) } },
-                    { [fieldName]: { lte: parseFloat(end) } }
-                ]
+                    { [fieldName]: { lte: parseFloat(end) } },
+                ],
             }]);
         } else {
             const startDate = new Date(start);
             const endDate = new Date(end);
             if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-                throw new ErrorResponse(400, "invalid_date_range", {start, end});
+                throw new ErrorResponse(400, "invalid_date_range", { start, end });
             }
             filter.NOT = (filter.NOT || []).concat([{
                 AND: [
                     { [fieldName]: { gte: startDate } },
-                    { [fieldName]: { lte: endDate } }
-                ]
+                    { [fieldName]: { lte: endDate } },
+                ],
             }]);
         }
     }
 
     /**
      * Apply typed filter (auto-detect type: date, number, array, string)
-     * @param {Object} filter - Filter context
-     * @param {string} fieldName - Field name
-     * @param {string} value - Filter value
-     * @private
      */
-    #applyTypedFilter(filter, fieldName, value) {
+    #applyTypedFilter(filter: Record<string, any>, fieldName: string, value: string): void {
         // Check for date patterns first
-        const hasDateOperator = FILTER_PATTERNS.DATE_OPS.some(op => value.startsWith(op));
+        const hasDateOperator = FILTER_PATTERNS.DATE_OPS.some((op: string) => value.startsWith(op));
         const isIsoDate = FILTER_PATTERNS.ISO_DATE.test(value);
         const isBetweenWithDates = value.startsWith('between:') && this.#looksLikeDateRange(value);
 
@@ -401,7 +415,7 @@ class QueryBuilder {
                 return;
             }
             // Plain number
-            if (!isNaN(value)) {
+            if (!isNaN(value as unknown as number)) {
                 filter[fieldName] = { equals: Number(value) };
                 return;
             }
@@ -410,9 +424,9 @@ class QueryBuilder {
         // Array filter
         if (value.startsWith('[') && value.endsWith(']')) {
             const arr = this.#parseArrayValue(value);
-            if (arr.some(v => typeof v === 'string' && v.includes('%'))) {
+            if (arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
                 if (!filter.OR) filter.OR = [];
-                arr.forEach(v => filter.OR.push({ [fieldName]: this.#filterString(v) }));
+                arr.forEach((v: unknown) => filter.OR.push({ [fieldName]: this.#filterString(v as string) }));
             } else {
                 filter[fieldName] = { in: arr };
             }
@@ -425,49 +439,38 @@ class QueryBuilder {
 
     /**
      * Check if value looks like a number or numeric operator
-     * @param {string} value - Value to check
-     * @returns {boolean}
-     * @private
      */
-    #looksLikeNumber(value) {
-        return !isNaN(value) || FILTER_PATTERNS.NUMERIC_OPS.some(op => value.startsWith(op));
+    #looksLikeNumber(value: string): boolean {
+        return !isNaN(value as unknown as number) || FILTER_PATTERNS.NUMERIC_OPS.some((op: string) => value.startsWith(op));
     }
 
     /**
      * Check if between: value contains dates
-     * @param {string} value - Full between: value
-     * @returns {boolean}
-     * @private
      */
-    #looksLikeDateRange(value) {
+    #looksLikeDateRange(value: string): boolean {
         const rangeValue = value.substring(8); // Remove 'between:'
         return (value.includes('-') && value.includes('T')) ||
-            rangeValue.split(';').some(part => FILTER_PATTERNS.ISO_DATE.test(part.trim()));
+            rangeValue.split(';').some((part: string) => FILTER_PATTERNS.ISO_DATE.test(part.trim()));
     }
 
     /**
      * Parse array value from string
-     * @param {string} value - Array string like "[1,2,3]"
-     * @returns {Array}
-     * @private
      */
-    #parseArrayValue(value) {
+    #parseArrayValue(value: string): any[] {
         try {
             return JSON.parse(value);
         } catch {
-            return value.slice(1, -1).split(',').map(v => v.trim());
+            return value.slice(1, -1).split(',').map((v: string) => v.trim());
         }
     }
 
     /**
      * Parse numeric filter operators
-     * @param {string} value - Filter value with operator
-     * @returns {Object|null} Prisma numeric filter or null
      */
-    #filterNumber(value) {
+    #filterNumber(value: string): Record<string, number> | null {
         const numOperators = ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'];
-        const foundOperator = numOperators.find(op => value.startsWith(op));
-        let numValue = value;
+        const foundOperator = numOperators.find((op: string) => value.startsWith(op));
+        let numValue: string | number = value;
         let prismaOp = 'equals';
 
         if (foundOperator) {
@@ -481,7 +484,7 @@ class QueryBuilder {
                 case 'ne:': prismaOp = 'not'; break;
                 case 'between:': {
                     // Support between for decimals: between:1.5;3.7
-                    const [start, end] = numValue.split(';').map(v => parseFloat(v.trim()));
+                    const [start, end] = (numValue as string).split(';').map((v: string) => parseFloat(v.trim()));
                     if (isNaN(start) || isNaN(end)) return null;
                     return { gte: start, lte: end };
                 }
@@ -489,7 +492,7 @@ class QueryBuilder {
         }
 
         // Support decimal numbers
-        numValue = parseFloat(numValue);
+        numValue = parseFloat(numValue as string);
         if (isNaN(numValue)) return null;
 
         return { [prismaOp]: numValue };
@@ -497,11 +500,9 @@ class QueryBuilder {
 
     /**
      * Parse date/datetime filter operators
-     * @param {string} value - Filter value with date operator
-     * @returns {Object|null} Prisma date filter or null
      */
-    #filterDateTime(value) {
-        const foundOperator = FILTER_PATTERNS.DATE_OPS.find(op => value.startsWith(op));
+    #filterDateTime(value: string): Record<string, Date | Record<string, Date>> | null {
+        const foundOperator = FILTER_PATTERNS.DATE_OPS.find((op: string) => value.startsWith(op));
         if (!foundOperator) {
             return null;
         }
@@ -510,11 +511,11 @@ class QueryBuilder {
 
         try {
             // Map operators to Prisma comparison operators
-            const simpleOperatorMap = {
+            const simpleOperatorMap: Record<string, string> = {
                 'before:': 'lt',
                 'after:': 'gt',
                 'from:': 'gte',
-                'to:': 'lte'
+                'to:': 'lte',
             };
 
             // Handle simple date operators
@@ -528,13 +529,13 @@ class QueryBuilder {
                 const date = this.#parseDate(operatorValue);
                 return {
                     gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-                    lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1)
+                    lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1),
                 };
             }
 
             // Handle 'between:'
             if (foundOperator === 'between:') {
-                const [start, end] = operatorValue.split(';').map(d => d.trim());
+                const [start, end] = operatorValue.split(';').map((d: string) => d.trim());
                 if (!start || !end) {
                     throw new ErrorResponse(400, "between_requires_two_values");
                 }
@@ -550,20 +551,16 @@ class QueryBuilder {
             }
 
             return null;
-        } catch (error) {
+        } catch (error: any) {
             if (error instanceof ErrorResponse) throw error;
-            throw new ErrorResponse(400, "invalid_date_format", {value, error: error.message});
+            throw new ErrorResponse(400, "invalid_date_format", { value, error: error.message });
         }
     }
 
     /**
      * Parse a date string and validate it
-     * @param {string} dateStr - Date string to parse
-     * @returns {Date} Parsed date
-     * @throws {Error} If date is invalid
-     * @private
      */
-    #parseDate(dateStr) {
+    #parseDate(dateStr: string): Date {
         const date = new Date(dateStr);
         if (isNaN(date.getTime())) {
             throw new Error(`Invalid date: ${dateStr}`);
@@ -573,10 +570,8 @@ class QueryBuilder {
 
     /**
      * Parse string filters with wildcard support and URL decoding
-     * @param {string} value - String filter value
-     * @returns {Object|boolean} Prisma string filter or boolean value
      */
-    #filterString(value) {
+    #filterString(value: string): Record<string, string> | boolean {
         // Handle boolean literals
         if (value === 'true') return true;
         if (value === 'false') return false;
@@ -601,16 +596,38 @@ class QueryBuilder {
     }
 
     /**
-     * Build base include content with omit fields and ACL filter
-     * @param {Object} relation - Relation configuration
-     * @param {Object} user - User object with role
-     * @param {string} parentModel - Parent model name
-     * @returns {{content: Object|true, hasContent: boolean}} Include content and whether it has properties
-     * @private
+     * Build base include content with omit fields and ACL filter.
+     * Returns denied=true when ACL explicitly denies access (returns false).
      */
-    #buildBaseIncludeContent(relation, user, parentModel) {
-        const content = {};
+    #buildBaseIncludeContent(
+        relation: RelationConfig,
+        user: any,
+        parentModel: string
+    ): { content: Record<string, any>; hasContent: boolean; denied: boolean } {
+        const acl = getAcl();
+        const content: Record<string, any> = {};
         let hasContent = false;
+
+        // Check ACL access for the related model
+        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+            const accessFilter = acl.model[relation.object].getAccessFilter!(user);
+
+            // ACL explicitly denies access — skip this relation entirely
+            if (accessFilter === false) {
+                return { content, hasContent: false, denied: true };
+            }
+
+            // Apply ACL filter as where clause for list relations (Prisma only supports where on list includes)
+            const isListRelation = this.#isListRelation(parentModel, relation.name);
+            if (isListRelation && accessFilter && typeof accessFilter === 'object') {
+                const cleanedFilter = this.cleanFilter(accessFilter);
+                const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, parentModel);
+                if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
+                    content.where = simplifiedFilter;
+                    hasContent = true;
+                }
+            }
+        }
 
         // Add omit fields for this relation if available
         const omitFields = this.getRelatedOmit(relation.object, user);
@@ -619,65 +636,51 @@ class QueryBuilder {
             hasContent = true;
         }
 
-        // Apply ACL access filter (only for list relations - Prisma restriction)
-        const isListRelation = this.#isListRelation(parentModel, relation.name);
-        if (isListRelation && relation.object && acl.model[relation.object]?.getAccessFilter) {
-            const accessFilter = acl.model[relation.object].getAccessFilter(user);
-            const cleanedFilter = this.cleanFilter(accessFilter);
-            const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, parentModel);
-            if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
-                content.where = simplifiedFilter;
-                hasContent = true;
-            }
-        }
-
-        return { content, hasContent };
+        return { content, hasContent, denied: false };
     }
 
     /**
      * Check if include content has meaningful properties
-     * @param {Object} content - Include content object
-     * @returns {boolean}
-     * @private
      */
-    #hasIncludeContent(content) {
+    #hasIncludeContent(content: Record<string, any>): boolean {
         return content.omit || content.where ||
             (content.include && Object.keys(content.include).length > 0);
     }
 
     /**
      * Get relationships configuration for a specific model
-     * @param {string} modelName - The model name
-     * @returns {Array} Array of relationship configurations for the model
      */
-    #getRelationshipsForModel(modelName) {
+    #getRelationshipsForModel(modelName: string): RelationConfig[] {
         return modelName ? dmmf.buildRelationships(modelName) : [];
     }
 
     /**
-     * Build top-level only relationship include (no deep relations)
-     * @param {Object} relation - Relation configuration
-     * @param {Object} user - User object with role
-     * @param {string} [parentModel] - Parent model name that owns this relation
-     * @returns {Object|true} Prisma include/select object for top-level only
+     * Build top-level only relationship include (no deep relations).
+     * Returns null when ACL denies access to the relation.
      */
-    #includeTopLevelOnly(relation, user, parentModel = null) {
+    #includeTopLevelOnly(
+        relation: RelationConfig,
+        user: any,
+        parentModel: string | null = null
+    ): Record<string, any> | true | null {
         const currentParent = parentModel || this.name;
-        const { content, hasContent } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        const { content, hasContent, denied } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        if (denied) return null;
         return hasContent ? content : true;
     }
 
     /**
      * Build selective deep relationship include based on dot notation paths
-     * @param {Object} relation - Relation configuration
-     * @param {Object} user - User object with role
-     * @param {string[]} deepPaths - Array of deep paths (e.g., ['agency', 'courses.subject'])
-     * @param {string} [parentModel] - Parent model name that owns this relation
-     * @returns {Object|true} Prisma include/select object with selective deep relations
      */
-    #includeSelectiveDeepRelationships(relation, user, deepPaths, parentModel = null) {
+    #includeSelectiveDeepRelationships(
+        relation: RelationConfig,
+        user: any,
+        deepPaths: string[],
+        parentModel: string | null = null
+    ): Record<string, any> | true | null {
         const currentParent = parentModel || this.name;
-        const { content } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        const { content, denied } = this.#buildBaseIncludeContent(relation, user, currentParent);
+        if (denied) return null;
         content.include = {};
 
         // Process deep paths if any
@@ -687,13 +690,18 @@ class QueryBuilder {
             const childRelationships = this.#getRelationshipsForModel(relation.object);
 
             for (const [relationName, paths] of Object.entries(pathsByRelation)) {
-                const childRelation = childRelationships.find(r => r.name === relationName);
+                const childRelation = childRelationships.find((r: RelationConfig) => r.name === relationName);
                 if (!childRelation) continue;
 
-                const childPaths = paths.filter(p => p !== '');
-                content.include[relationName] = childPaths.length > 0
+                const childPaths = (paths as string[]).filter((p: string) => p !== '');
+                const childInclude = childPaths.length > 0
                     ? this.#includeSelectiveDeepRelationships(childRelation, user, childPaths, relation.object)
                     : this.#includeTopLevelOnly(childRelation, user, relation.object);
+
+                // Skip denied child relations
+                if (childInclude !== null) {
+                    content.include[relationName] = childInclude;
+                }
             }
         }
 
@@ -702,12 +710,9 @@ class QueryBuilder {
 
     /**
      * Group dot-notation paths by their first level
-     * @param {string[]} paths - Array of paths like ['agency', 'courses.subject']
-     * @returns {Object<string, string[]>} Paths grouped by first level
-     * @private
      */
-    #groupPathsByFirstLevel(paths) {
-        const grouped = {};
+    #groupPathsByFirstLevel(paths: string[]): Record<string, string[]> {
+        const grouped: Record<string, string[]> = {};
         for (const path of paths) {
             const parts = path.split('.');
             const firstLevel = parts[0];
@@ -721,20 +726,22 @@ class QueryBuilder {
 
     /**
      * Build include object for related data with access controls
-     * @param {string|Object} include - Include specification
-     * @param {Object} user - User object with role
-     * @returns {Object} Prisma include object
      */
-    include(include = "ALL", user) {
-        let include_query = typeof include === 'string' ? include : typeof include === 'object' ? include.query : null;
-        let exclude_rule = typeof include === 'object' ? include.rule : null;
+    include(
+        include: string | { query?: string; rule?: Record<string, unknown> } = "ALL",
+        user: any
+    ): Record<string, unknown> {
+        const include_query = typeof include === 'string' ? include : typeof include === 'object' ? include.query : null;
+        const exclude_rule = typeof include === 'object' ? include.rule : null;
         if (include_query) {
-            let includeRelated = {};
+            let includeRelated: Record<string, any> = {};
 
             if (include_query === "ALL") {
                 // Load all first-level relationships only (no deep nesting to avoid endless relation loading)
-                includeRelated = this.relatedObjects.reduce((acc, curr) => {
-                    let rel = this.#includeTopLevelOnly(curr, user);
+                includeRelated = this.relatedObjects.reduce((acc: Record<string, any>, curr: RelationConfig) => {
+                    let rel: any = this.#includeTopLevelOnly(curr, user);
+                    // Skip relations where ACL denies access
+                    if (rel === null) return acc;
                     if (exclude_rule && exclude_rule[curr.name]) {
                         if (typeof rel === 'object' && rel !== null) {
                             rel.where = exclude_rule[curr.name];
@@ -747,12 +754,12 @@ class QueryBuilder {
                 }, {});
             } else {
                 // Parse dot notation includes (e.g., "student.agency,course")
-                const includeList = include_query.split(',').map(item => item.trim());
-                const topLevelIncludes = new Set();
-                const deepIncludes = {};
+                const includeList = include_query.split(',').map((item: string) => item.trim());
+                const topLevelIncludes = new Set<string>();
+                const deepIncludes: Record<string, string[]> = {};
 
                 // Separate top-level and deep includes
-                includeList.forEach(item => {
+                includeList.forEach((item: string) => {
                     const parts = item.split('.');
                     const topLevel = parts[0];
                     topLevelIncludes.add(topLevel);
@@ -766,9 +773,9 @@ class QueryBuilder {
                 });
 
                 // Build include object for each top-level relation
-                this.relatedObjects.forEach(curr => {
+                this.relatedObjects.forEach((curr: RelationConfig) => {
                     if (topLevelIncludes.has(curr.name)) {
-                        let rel;
+                        let rel: any;
 
                         if (deepIncludes[curr.name]) {
                             // Build selective deep relationships
@@ -777,6 +784,9 @@ class QueryBuilder {
                             // Only include top-level (no deep relationships)
                             rel = this.#includeTopLevelOnly(curr, user);
                         }
+
+                        // Skip relations where ACL denies access
+                        if (rel === null) return;
 
                         if (exclude_rule && exclude_rule[curr.name]) {
                             if (typeof rel === 'object' && rel !== null) {
@@ -797,20 +807,18 @@ class QueryBuilder {
 
     /**
      * Build omit object for hiding fields based on user role
-     * @param {Object} user - User object with role
-     * @param {Array|null} inaccessible_fields - Override fields to omit
-     * @returns {Object} Prisma omit object
      */
-    omit(user, inaccessible_fields = null) {
+    omit(user: any, inaccessible_fields: string[] | null = null): Record<string, boolean> {
+        const acl = getAcl();
         // Get omit fields from ACL if available
         let omit_fields = inaccessible_fields;
 
         if (!omit_fields && acl.model[this.name]?.getOmitFields) {
-            omit_fields = acl.model[this.name].getOmitFields(user);
+            omit_fields = acl.model[this.name].getOmitFields!(user);
         }
 
         if (omit_fields && Array.isArray(omit_fields)) {
-            return omit_fields.reduce((acc, curr) => {
+            return omit_fields.reduce((acc: Record<string, boolean>, curr: string) => {
                 acc[curr] = true;
                 return acc;
             }, {});
@@ -820,15 +828,13 @@ class QueryBuilder {
 
     /**
      * Get omit fields for a related object based on user role
-     * @param {string} relatedModelName - The related model name
-     * @param {Object} user - User object with role
-     * @returns {Object} Prisma omit object for the related model
      */
-    getRelatedOmit(relatedModelName, user) {
+    getRelatedOmit(relatedModelName: string, user: any): Record<string, boolean> {
+        const acl = getAcl();
         if (acl.model[relatedModelName]?.getOmitFields) {
-            const omit_fields = acl.model[relatedModelName].getOmitFields(user);
+            const omit_fields = acl.model[relatedModelName].getOmitFields!(user);
             if (omit_fields && Array.isArray(omit_fields)) {
-                return omit_fields.reduce((acc, curr) => {
+                return omit_fields.reduce((acc: Record<string, boolean>, curr: string) => {
                     acc[curr] = true;
                     return acc;
                 }, {});
@@ -839,10 +845,8 @@ class QueryBuilder {
 
     /**
      * Validate and limit result count
-     * @param {number} limit - Requested limit
-     * @returns {number} Validated limit within API constraints
      */
-    take(limit) {
+    take(limit: number): number {
         if (!Number.isInteger(limit) || limit <= 0) {
             throw new ErrorResponse(400, "invalid_limit");
         }
@@ -851,22 +855,19 @@ class QueryBuilder {
 
     /**
      * Build sort object for ordering results
-     * @param {string} sortBy - Field to sort by (supports dot notation)
-     * @param {string} sortOrder - 'asc' or 'desc'
-     * @returns {Object} Prisma orderBy object
      */
-    sort(sortBy, sortOrder) {
+    sort(sortBy: string, sortOrder: string): Record<string, unknown> {
         if (typeof sortBy !== 'string') {
-            throw new ErrorResponse(400, "sortby_must_be_string", {type: typeof sortBy});
+            throw new ErrorResponse(400, "sortby_must_be_string", { type: typeof sortBy });
         }
         if (typeof sortOrder !== 'string' || (sortOrder != 'desc' && sortOrder != 'asc')) {
-            throw new ErrorResponse(400, "sortorder_invalid", {value: sortOrder});
+            throw new ErrorResponse(400, "sortorder_invalid", { value: sortOrder });
         }
-        const relation_chain = sortBy.split('.').map(e => e.trim());
-        const field_name = relation_chain.pop();
+        const relation_chain = sortBy.split('.').map((e: string) => e.trim());
+        const field_name = relation_chain.pop()!;
 
-        const sort = {};
-        let curr = sort;
+        const sort: Record<string, any> = {};
+        let curr: Record<string, any> = sort;
         for (let i = 0; i < relation_chain.length; i++) {
             curr[relation_chain[i]] = {};
             curr = curr[relation_chain[i]];
@@ -880,12 +881,10 @@ class QueryBuilder {
      * Process data for create operation with relation handling
      * Transforms nested relation data into Prisma create/connect syntax
      * Does NOT mutate the input data - returns a new transformed object
-     * @param {Object} data - Data to create (not mutated)
-     * @param {Object} [user=null] - User object for audit fields
-     * @returns {Object} Transformed data ready for Prisma create
      */
-    create(data, user = null) {
-        let result = { ...data };
+    create(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        const acl = getAcl();
+        let result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to set
         const modelAcl = acl.model[this.name];
@@ -915,27 +914,26 @@ class QueryBuilder {
 
     /**
      * Process a relation field for create operation
-     * @param {Object} data - Parent data object (shallow copy, nested values may be shared)
-     * @param {string} key - Relation field name
-     * @param {Object} [user=null] - User object for ACL
-     * @returns {Object} New data object with the relation field transformed
-     * @private
      */
-    #processCreateRelation(data, key, user = null) {
-        const relatedObject = this.relatedObjects.find(e => e.name === key);
+    #processCreateRelation(
+        data: Record<string, any>,
+        key: string,
+        user: any = null
+    ): Record<string, any> {
+        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.name === key);
         if (!relatedObject) {
-            throw new ErrorResponse(400, "unexpected_key", {key});
+            throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
         if (!data[key]) return data;
 
         this.#ensureRelations(relatedObject);
 
-        const result = { ...data };
+        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
             result[key] = this.#processCreateArrayRelation(
-                data[key].map(item => ({ ...item })), relatedObject, key, user
+                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, key, user
             );
         } else {
             // Clone the nested object to avoid mutating original
@@ -948,15 +946,16 @@ class QueryBuilder {
 
     /**
      * Process array relation for create operation
-     * @param {Array} items - Array of relation items (copies, safe to mutate)
-     * @param {Object} relatedObject - Relation configuration
-     * @param {string} relationName - Name of the relation
-     * @param {Object} [user=null] - User object for ACL
-     * @param {number} [depth=0] - Current nesting depth for safety guard
-     * @returns {Object} Prisma create/connect/upsert structure
-     * @private
      */
-    #processCreateArrayRelation(items, relatedObject, relationName, user = null, depth = 0) {
+    #processCreateArrayRelation(
+        items: Record<string, any>[],
+        relatedObject: RelationConfig,
+        relationName: string,
+        user: any = null,
+        depth: number = 0
+    ): Record<string, any> {
+        const acl = getAcl();
+
         if (depth > MAX_NESTING_DEPTH) {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
@@ -972,17 +971,17 @@ class QueryBuilder {
         const foreignKey = relatedObject.foreignKey || pkFields[0];
 
         // For composite keys, check if ALL PK fields are present
-        const hasCompletePK = (item) => pkFields.every(field => item[field] != null);
+        const hasCompletePK = (item: Record<string, any>): boolean => pkFields.every((field: string) => item[field] != null);
 
         // Check if an item has ONLY primary key fields (no additional data)
-        const hasOnlyPKFields = (item) => {
+        const hasOnlyPKFields = (item: Record<string, any>): boolean => {
             const itemKeys = Object.keys(item);
-            return itemKeys.every(key => pkFields.includes(key));
+            return itemKeys.every((key: string) => pkFields.includes(key));
         };
 
-        const createItems = items.filter(e => !hasCompletePK(e));
-        const connectOnlyItems = items.filter(e => hasCompletePK(e) && hasOnlyPKFields(e));
-        const upsertItems = items.filter(e => hasCompletePK(e) && !hasOnlyPKFields(e));
+        const createItems = items.filter((e: Record<string, any>) => !hasCompletePK(e));
+        const connectOnlyItems = items.filter((e: Record<string, any>) => hasCompletePK(e) && hasOnlyPKFields(e));
+        const upsertItems = items.filter((e: Record<string, any>) => hasCompletePK(e) && !hasOnlyPKFields(e));
 
         // Get ACL for the related model
         const relatedAcl = acl.model[relatedObject.object];
@@ -995,7 +994,7 @@ class QueryBuilder {
             ? relatedAcl.getOmitFields(user)
             : [];
 
-        const result = {};
+        const result: Record<string, any> = {};
 
         if (createItems.length > 0) {
             // Check canCreate permission for nested creates
@@ -1004,8 +1003,8 @@ class QueryBuilder {
             }
 
             // Remove omitted fields from create items
-            result.create = createItems.map(item => {
-                const cleanedItem = { ...item };
+            result.create = createItems.map((item: Record<string, any>) => {
+                const cleanedItem: Record<string, any> = { ...item };
                 for (const field of omitFields) {
                     delete cleanedItem[field];
                 }
@@ -1016,9 +1015,9 @@ class QueryBuilder {
         if (connectOnlyItems.length > 0) {
             if (pkFields.length > 1) {
                 // Composite key - build composite where clause with ACL
-                result.connect = connectOnlyItems.map(e => {
-                    const where = {};
-                    pkFields.forEach(field => { where[field] = e[field]; });
+                result.connect = connectOnlyItems.map((e: Record<string, any>) => {
+                    const where: Record<string, any> = {};
+                    pkFields.forEach((field: string) => { where[field] = e[field]; });
                     // Apply ACL access filter
                     if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
                         Object.assign(where, accessFilter);
@@ -1027,8 +1026,8 @@ class QueryBuilder {
                 });
             } else {
                 // Simple key with ACL
-                result.connect = connectOnlyItems.map(e => {
-                    const where = { [foreignKey]: e[foreignKey] || e[pkFields[0]] };
+                result.connect = connectOnlyItems.map((e: Record<string, any>) => {
+                    const where: Record<string, any> = { [foreignKey]: e[foreignKey] || e[pkFields[0]] };
                     // Apply ACL access filter
                     if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
                         Object.assign(where, accessFilter);
@@ -1045,16 +1044,16 @@ class QueryBuilder {
             }
 
             // Remove omitted fields from connectOrCreate items
-            result.connectOrCreate = upsertItems.map(item => {
-                const cleanedItem = { ...item };
+            result.connectOrCreate = upsertItems.map((item: Record<string, any>) => {
+                const cleanedItem: Record<string, any> = { ...item };
                 for (const field of omitFields) {
                     delete cleanedItem[field];
                 }
 
                 // Build where clause from PK fields
-                const where = {};
+                const where: Record<string, any> = {};
                 if (pkFields.length > 1) {
-                    pkFields.forEach(field => { where[field] = cleanedItem[field]; });
+                    pkFields.forEach((field: string) => { where[field] = cleanedItem[field]; });
                 } else {
                     where[foreignKey] = cleanedItem[foreignKey] || cleanedItem[pkFields[0]];
                 }
@@ -1066,7 +1065,7 @@ class QueryBuilder {
 
                 return {
                     where,
-                    create: cleanedItem
+                    create: cleanedItem,
                 };
             });
         }
@@ -1076,15 +1075,16 @@ class QueryBuilder {
 
     /**
      * Process single relation for create operation
-     * @param {Object} item - Relation data (copy, safe to mutate)
-     * @param {Object} relatedObject - Relation configuration
-     * @param {string} relationName - Name of the relation
-     * @param {Object} [user=null] - User object for ACL
-     * @param {number} [depth=0] - Current nesting depth for safety guard
-     * @returns {Object} Prisma create structure
-     * @private
      */
-    #processCreateSingleRelation(item, relatedObject, relationName, user = null, depth = 0) {
+    #processCreateSingleRelation(
+        item: Record<string, any>,
+        relatedObject: RelationConfig,
+        relationName: string,
+        user: any = null,
+        depth: number = 0
+    ): Record<string, any> {
+        const acl = getAcl();
+
         if (depth > MAX_NESTING_DEPTH) {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
@@ -1099,7 +1099,7 @@ class QueryBuilder {
 
         // If item is already a Prisma operation (connect, create, etc.), skip field validation
         const prismaOps = ['connect', 'create', 'disconnect', 'set', 'update', 'upsert', 'deleteMany', 'updateMany', 'createMany'];
-        if (prismaOps.some(op => op in item)) {
+        if (prismaOps.some((op: string) => op in item)) {
             return { ...item };
         }
 
@@ -1116,19 +1116,19 @@ class QueryBuilder {
 
         for (const fieldKey of Object.keys(item)) {
             if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
-                throw new ErrorResponse(400, "unexpected_key", {key: `${relationName}.${fieldKey}`});
+                throw new ErrorResponse(400, "unexpected_key", { key: `${relationName}.${fieldKey}` });
             }
 
             // Check if this field is a FK that should become a nested connect
-            const childRelation = relatedObject?.relation?.find(e => e.field === fieldKey);
+            const childRelation = relatedObject?.relation?.find((e: RelationConfig) => e.field === fieldKey);
             if (childRelation && item[fieldKey]) {
                 const targetPrimaryKey = childRelation.foreignKey || this.getPrimaryKey(childRelation.object);
-                const connectWhere = {};
+                const connectWhere: Record<string, any> = {};
 
                 // Handle composite primary keys
                 if (Array.isArray(targetPrimaryKey)) {
                     if (typeof item[fieldKey] === 'object' && item[fieldKey] !== null) {
-                        targetPrimaryKey.forEach(pk => {
+                        targetPrimaryKey.forEach((pk: string) => {
                             if (item[fieldKey][pk] != null) {
                                 connectWhere[pk] = item[fieldKey][pk];
                             }
@@ -1155,12 +1155,12 @@ class QueryBuilder {
             }
 
             // Check if this field is a nested relation object that needs recursive processing
-            const nestedRelation = relatedObject?.relation?.find(e => e.name === fieldKey);
+            const nestedRelation = relatedObject?.relation?.find((e: RelationConfig) => e.name === fieldKey);
             if (nestedRelation && item[fieldKey] && typeof item[fieldKey] === 'object') {
                 this.#ensureRelations(nestedRelation);
                 if (Array.isArray(item[fieldKey])) {
                     item[fieldKey] = this.#processCreateArrayRelation(
-                        item[fieldKey].map(i => ({ ...i })), nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
+                        item[fieldKey].map((i: Record<string, any>) => ({ ...i })), nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
                     );
                 } else {
                     item[fieldKey] = this.#processCreateSingleRelation(
@@ -1175,31 +1175,31 @@ class QueryBuilder {
 
     /**
      * Validate relation item fields and transform nested FK references
-     * @param {Object} item - Relation item to validate/transform (copy, safe to mutate)
-     * @param {Object} relatedObject - Relation configuration
-     * @param {string} relationName - Parent relation name for error messages
-     * @private
      */
-    #validateAndTransformRelationItem(item, relatedObject, relationName) {
+    #validateAndTransformRelationItem(
+        item: Record<string, any>,
+        relatedObject: RelationConfig,
+        relationName: string
+    ): void {
         this.#ensureRelations(relatedObject);
 
         for (const fieldKey of Object.keys(item)) {
             if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
-                throw new ErrorResponse(400, "unexpected_key", {key: `${relationName}.${fieldKey}`});
+                throw new ErrorResponse(400, "unexpected_key", { key: `${relationName}.${fieldKey}` });
             }
 
             // Handle composite FK fields
             if (relatedObject.fields?.includes(fieldKey)) {
-                const index = relatedObject.fields.findIndex(f => f === fieldKey);
+                const index = relatedObject.fields.findIndex((f: string) => f === fieldKey);
                 if (index > 0 && relatedObject.relation?.[index - 1]) {
                     const rel = relatedObject.relation[index - 1];
                     const relPrimaryKey = rel.foreignKey || this.getPrimaryKey(rel.object);
-                    const restData = { ...item };
+                    const restData: Record<string, any> = { ...item };
                     delete restData[fieldKey];
 
                     Object.assign(item, {
-                        [rel.name]: { connect: { [relPrimaryKey]: item[fieldKey] } },
-                        ...restData
+                        [rel.name]: { connect: { [relPrimaryKey as string]: item[fieldKey] } },
+                        ...restData,
                     });
                     delete item[fieldKey];
                 } else {
@@ -1211,22 +1211,22 @@ class QueryBuilder {
 
     /**
      * Process a scalar field that might be a FK needing connect transformation
-     * @param {Object} data - Parent data object
-     * @param {string} key - Field name
-     * @param {Object} [user=null] - User object for ACL
-     * @returns {Object} New data object with FK transformed to connect
-     * @private
      */
-    #processCreateForeignKey(data, key, user = null) {
-        const relatedObject = this.relatedObjects.find(e => e.field === key);
+    #processCreateForeignKey(
+        data: Record<string, any>,
+        key: string,
+        user: any = null
+    ): Record<string, any> {
+        const acl = getAcl();
+        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.field === key);
         if (!relatedObject) return data;
 
-        const result = { ...data };
+        const result: Record<string, any> = { ...data };
         if (result[key]) {
             const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
             const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
             // Build connect where clause
-            const connectWhere = { [foreignKey]: result[key] };
+            const connectWhere: Record<string, any> = { [foreignKey]: result[key] };
 
             // Apply ACL access filter for connect
             const relatedAcl = acl.model[relatedObject.object];
@@ -1247,13 +1247,10 @@ class QueryBuilder {
      * Process data for update operation with nested relation support
      * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
      * Does NOT mutate the input data - returns a new transformed object
-     * @param {string|number} id - ID of record to update
-     * @param {Object} data - Data to update (not mutated)
-     * @param {Object} [user=null] - User object for ACL checks
-     * @returns {Object} Transformed data ready for Prisma update
      */
-    update(id, data, user = null) {
-        let result = { ...data };
+    update(id: string | number, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        const acl = getAcl();
+        let result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to modify
         const modelAcl = acl.model[this.name];
@@ -1283,28 +1280,27 @@ class QueryBuilder {
 
     /**
      * Process a relation field for update operation
-     * @param {Object} data - Parent data object
-     * @param {string} key - Relation field name
-     * @param {string|number} parentId - Parent record ID
-     * @param {Object} user - User for ACL
-     * @returns {Object} New data object with the relation field transformed
-     * @private
      */
-    #processUpdateRelation(data, key, parentId, user) {
-        const relatedObject = this.relatedObjects.find(e => e.name === key);
+    #processUpdateRelation(
+        data: Record<string, any>,
+        key: string,
+        parentId: string | number,
+        user: any
+    ): Record<string, any> {
+        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.name === key);
         if (!relatedObject) {
-            throw new ErrorResponse(400, "unexpected_key", {key});
+            throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
         if (!data[key]) return data;
 
         this.#ensureRelations(relatedObject);
 
-        const result = { ...data };
+        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
             result[key] = this.#processArrayRelation(
-                data[key].map(item => ({ ...item })), relatedObject, parentId, user
+                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, parentId, user
             );
         } else {
             // Clone the nested object to avoid mutating original
@@ -1317,23 +1313,23 @@ class QueryBuilder {
 
     /**
      * Process a scalar field that might be a FK needing connect/disconnect transformation
-     * @param {Object} data - Parent data object
-     * @param {string} key - Field name
-     * @param {Object} [user=null] - User object for ACL
-     * @returns {Object} New data object with FK transformed to connect/disconnect
-     * @private
      */
-    #processUpdateForeignKey(data, key, user = null) {
-        const relatedObject = this.relatedObjects.find(e => e.field === key);
+    #processUpdateForeignKey(
+        data: Record<string, any>,
+        key: string,
+        user: any = null
+    ): Record<string, any> {
+        const acl = getAcl();
+        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.field === key);
         if (!relatedObject) return data;
 
-        const result = { ...data };
+        const result: Record<string, any> = { ...data };
         const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
         const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
 
         if (result[key] != null) {
             // Build connect where clause
-            const connectWhere = { [foreignKey]: result[key] };
+            const connectWhere: Record<string, any> = { [foreignKey]: result[key] };
 
             // Apply ACL access filter for connect
             const relatedAcl = acl.model[relatedObject.object];
@@ -1351,23 +1347,24 @@ class QueryBuilder {
         delete result[key];
         return result;
     }
-    
+
     /**
      * Process array relations for update operations
-     * @param {Array} dataArray - Array of relation data
-     * @param {Object} relatedObject - Relation configuration
-     * @param {number} parentId - Parent record ID
-     * @param {Object} user - User object for ACL checks
-     * @returns {Object} Prisma array relation operations
      */
-    #processArrayRelation(dataArray, relatedObject, parentId, user = null) {
+    #processArrayRelation(
+        dataArray: Record<string, any>[],
+        relatedObject: RelationConfig,
+        parentId: string | number | null,
+        user: any = null
+    ): Record<string, any> {
+        const acl = getAcl();
         this.#ensureRelations(relatedObject);
 
         for (let i = 0; i < dataArray.length; i++) {
             // Validate all fields exist on the related model
-            for (let _key in dataArray[i]) {
+            for (const _key in dataArray[i]) {
                 if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
-                    throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
+                    throw new ErrorResponse(400, "unexpected_key", { key: `${relatedObject.name}.${_key}` });
                 }
             }
 
@@ -1398,8 +1395,8 @@ class QueryBuilder {
             : [];
 
         // Helper to remove omitted fields from an object
-        const removeOmitFields = (obj) => {
-            const cleaned = { ...obj };
+        const removeOmitFields = (obj: Record<string, any>): Record<string, any> => {
+            const cleaned: Record<string, any> = { ...obj };
             for (const field of omitFields) {
                 delete cleaned[field];
             }
@@ -1407,30 +1404,30 @@ class QueryBuilder {
         };
 
         // Helper to check if item has ALL PK fields
-        const hasCompletePK = (item) => pkFields.every(field => item[field] != null);
+        const hasCompletePK = (item: Record<string, any>): boolean => pkFields.every((field: string) => item[field] != null);
 
         // Helper to check if item has ONLY the PK/FK fields (for connect)
         // For n:m relations (composite FK), checks if only the join table FK fields are present
-        const hasOnlyPkFields = (item) => {
+        const hasOnlyPkFields = (item: Record<string, any>): boolean => {
             const keys = Object.keys(item);
 
             // For n:m relations with composite FK (e.g., StudentCourse with studentId, courseId)
             if (Array.isArray(relatedObject.fields)) {
                 // Check if all keys are part of the composite FK fields
                 // e.g., { courseId: 5 } should be connect, { courseId: 5, grade: 'A' } should be upsert
-                return keys.every(k => relatedObject.fields.includes(k));
+                return keys.every((k: string) => relatedObject.fields!.includes(k));
             }
 
             if (isCompositePK) {
                 // For composite PK: all keys must be PK fields, and all PK fields must be present
-                return keys.length === pkFields.length && keys.every(k => pkFields.includes(k));
+                return keys.length === pkFields.length && keys.every((k: string) => pkFields.includes(k));
             }
             // For simple: only 1 key which is FK or PK
             return keys.length === 1 && (keys[0] === foreignKey || keys[0] === pkFields[0]);
         };
 
         // Helper to merge ACL filter into where clause
-        const mergeAclFilter = (where, aclFilter) => {
+        const mergeAclFilter = (where: Record<string, any>, aclFilter: any): Record<string, any> => {
             if (aclFilter && typeof aclFilter === 'object' && Object.keys(aclFilter).length > 0) {
                 Object.assign(where, aclFilter);
             }
@@ -1442,9 +1439,9 @@ class QueryBuilder {
         // - upsert: item has PK AND additional data fields (update if exists, create if not)
         // - create: item has NO PK (always create new record)
         // For n:m relations: { courseId: 5 } -> connect, { courseId: 5, grade: 'A' } -> upsert
-        const connectItems = [];
-        const upsertItems = [];
-        const createItems = [];
+        const connectItems: Record<string, any>[] = [];
+        const upsertItems: Record<string, any>[] = [];
+        const createItems: Record<string, any>[] = [];
 
         for (const item of dataArray) {
             if (hasOnlyPkFields(item)) {
@@ -1467,25 +1464,25 @@ class QueryBuilder {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
         }
 
-        const result = {};
+        const result: Record<string, any> = {};
 
         // Build connect array with ACL access filter
         if (connectItems.length > 0) {
-            result.connect = connectItems.map(e => {
-                const where = {};
+            result.connect = connectItems.map((e: Record<string, any>) => {
+                const where: Record<string, any> = {};
                 if (Array.isArray(relatedObject.fields)) {
                     // n:m relation - build composite key where clause
                     // e.g., { studentId_courseId: { studentId: parentId, courseId: e.courseId } }
-                    const pair_id = {};
+                    const pair_id: Record<string, any> = {};
                     pair_id[relatedObject.fields[0]] = parentId;
-                    for (let field in e) {
+                    for (const field in e) {
                         if (relatedObject.fields.includes(field)) {
                             pair_id[field] = e[field];
                         }
                     }
-                    where[relatedObject.field] = pair_id;
+                    where[relatedObject.field!] = pair_id;
                 } else if (isCompositePK) {
-                    pkFields.forEach(field => { where[field] = e[field]; });
+                    pkFields.forEach((field: string) => { where[field] = e[field]; });
                 } else {
                     where[foreignKey] = e[foreignKey] || e[pkFields[0]];
                 }
@@ -1496,21 +1493,21 @@ class QueryBuilder {
 
         // Build upsert or update array based on canCreate permission
         if (upsertItems.length > 0) {
-            const buildWhereClause = (e) => {
-                const where = {};
+            const buildWhereClause = (e: Record<string, any>): Record<string, any> => {
+                const where: Record<string, any> = {};
                 if (Array.isArray(relatedObject.fields)) {
                     // Composite key relation (n:m via join table)
-                    const pair_id = {};
+                    const pair_id: Record<string, any> = {};
                     pair_id[relatedObject.fields[0]] = parentId;
-                    for (let field in e) {
+                    for (const field in e) {
                         if (relatedObject.fields.includes(field)) {
                             pair_id[field] = e[field];
                         }
                     }
-                    where[relatedObject.field] = pair_id;
+                    where[relatedObject.field!] = pair_id;
                 } else if (isCompositePK) {
                     // Composite PK - all fields must be present
-                    pkFields.forEach(field => { where[field] = e[field]; });
+                    pkFields.forEach((field: string) => { where[field] = e[field]; });
                 } else {
                     // Simple PK present
                     where[pkFields[0]] = e[pkFields[0]];
@@ -1522,21 +1519,21 @@ class QueryBuilder {
 
             if (canCreate) {
                 // User can create - use upsert (update if exists, create if not)
-                result.upsert = upsertItems.map(e => {
+                result.upsert = upsertItems.map((e: Record<string, any>) => {
                     const cleanedData = removeOmitFields(e);
                     return {
                         'where': buildWhereClause(e),
                         'create': cleanedData,
-                        'update': cleanedData
+                        'update': cleanedData,
                     };
                 });
             } else {
                 // User cannot create - use update only (fails if record doesn't exist)
-                result.update = upsertItems.map(e => {
+                result.update = upsertItems.map((e: Record<string, any>) => {
                     const cleanedData = removeOmitFields(e);
                     return {
                         'where': buildWhereClause(e),
-                        'data': cleanedData
+                        'data': cleanedData,
                     };
                 });
             }
@@ -1544,7 +1541,7 @@ class QueryBuilder {
 
         // Build create array for items without PK (only if canCreate is true)
         if (createItems.length > 0 && canCreate) {
-            result.create = createItems.map(e => removeOmitFields(e));
+            result.create = createItems.map((e: Record<string, any>) => removeOmitFields(e));
         }
 
         return result;
@@ -1552,12 +1549,14 @@ class QueryBuilder {
 
     /**
      * Process single relation for update operations with create/update separation
-     * @param {Object} dataObj - Relation data object
-     * @param {Object} relatedObject - Relation configuration
-     * @param {Object} user - User object for ACL checks
-     * @returns {Object|null} Prisma upsert operation or null
      */
-    #processSingleRelation(dataObj, relatedObject, user = null) {
+    #processSingleRelation(
+        dataObj: Record<string, any>,
+        relatedObject: RelationConfig,
+        user: any = null
+    ): Record<string, any> | null {
+        const acl = getAcl();
+
         // Get ACL for the related model
         const relatedAcl = acl.model[relatedObject.object];
 
@@ -1568,7 +1567,7 @@ class QueryBuilder {
 
         // If dataObj is already a Prisma operation (connect, create, disconnect, etc.), skip field validation
         const prismaOps = ['connect', 'create', 'disconnect', 'set', 'update', 'upsert', 'deleteMany', 'updateMany', 'createMany'];
-        if (prismaOps.some(op => op in dataObj)) {
+        if (prismaOps.some((op: string) => op in dataObj)) {
             return dataObj;
         }
 
@@ -1583,9 +1582,9 @@ class QueryBuilder {
         }
 
         // Validate all fields exist on the related model
-        for (let _key in dataObj) {
+        for (const _key in dataObj) {
             if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
-                throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
+                throw new ErrorResponse(400, "unexpected_key", { key: `${relatedObject.name}.${_key}` });
             }
         }
 
@@ -1593,36 +1592,36 @@ class QueryBuilder {
         this.#ensureRelations(relatedObject);
 
         // Process nested relations recursively if they exist
-        let processedData = dataObj;
+        let processedData: Record<string, any> = dataObj;
         if (relatedObject.relation) {
             processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user);
         }
 
         // Prepare separate data objects for create and update
-        let createData = {...processedData};
-        let updateData = {...processedData};
+        const createData: Record<string, any> = { ...processedData };
+        const updateData: Record<string, any> = { ...processedData };
         let hasDisconnects = false;
 
         // Process direct relations
         if (relatedObject.relation) {
-            for (let relation_key in processedData) {
-                const rel = relatedObject.relation.find(e => e.field === relation_key);
+            for (const relation_key in processedData) {
+                const rel = relatedObject.relation.find((e: RelationConfig) => e.field === relation_key);
                 if (rel) {
                     if (processedData[relation_key] != null) {
                         // Build connect where clause
                         const targetPK = this.getPrimaryKey(rel.object);
                         const connectKey = rel.foreignKey || (Array.isArray(targetPK) ? targetPK[0] : targetPK);
-                        const connectWhere = {
-                            [connectKey]: processedData[relation_key]
+                        const connectWhere: Record<string, any> = {
+                            [connectKey]: processedData[relation_key],
                         };
 
                         // Apply ACL access filter for connect
                         const childAcl = acl.model[rel.object];
-                        const accessFilter = user && childAcl?.getAccessFilter
+                        const childAccessFilter = user && childAcl?.getAccessFilter
                             ? this.cleanFilter(childAcl.getAccessFilter(user))
                             : null;
-                        if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
-                            Object.assign(connectWhere, accessFilter);
+                        if (childAccessFilter && typeof childAccessFilter === 'object' && Object.keys(childAccessFilter).length > 0) {
+                            Object.assign(connectWhere, childAccessFilter);
                         }
 
                         const connectObj = { 'connect': connectWhere };
@@ -1631,7 +1630,7 @@ class QueryBuilder {
                     } else {
                         // For update, use disconnect when value is null
                         updateData[rel.name] = {
-                            'disconnect': true
+                            'disconnect': true,
                         };
                         hasDisconnects = true;
                         // For create, remove the relation entirely
@@ -1649,36 +1648,36 @@ class QueryBuilder {
         const hasUpdateContent = this.#hasMeaningfulContent(updateData) || hasDisconnects;
 
         // Build upsert object conditionally
-        const upsertObj = {};
+        const upsertObj: Record<string, any> = {};
 
         if (hasCreateContent) {
             upsertObj.create = {
-                ...createData
+                ...createData,
             };
         }
 
         if (hasUpdateContent) {
             upsertObj.update = {
-                ...updateData
+                ...updateData,
             };
         }
 
         // Only return upsert if we have at least one operation
         return Object.keys(upsertObj).length > 0 ? { 'upsert': upsertObj } : null;
     }
-    
+
     /**
      * Recursively process nested relations in data objects
-     * @param {Object} dataObj - Data object to process
-     * @param {Array} relatedObjects - Array of relation configurations
-     * @param {Object} user - User object for ACL checks
-     * @returns {Object} Processed data object
      */
-    #processNestedRelations(dataObj, relatedObjects, user = null) {
-        const processedData = {...dataObj};
+    #processNestedRelations(
+        dataObj: Record<string, any>,
+        relatedObjects: RelationConfig[],
+        user: any = null
+    ): Record<string, any> {
+        const processedData: Record<string, any> = { ...dataObj };
 
-        for (let key in processedData) {
-            const nestedRelation = relatedObjects.find(rel => rel.name === key);
+        for (const key in processedData) {
+            const nestedRelation = relatedObjects.find((rel: RelationConfig) => rel.name === key);
 
             if (nestedRelation && processedData[key] && typeof processedData[key] === 'object') {
                 // Ensure deep relations are available for recursive processing
@@ -1687,7 +1686,7 @@ class QueryBuilder {
                 if (Array.isArray(processedData[key])) {
                     // Clone each item to avoid mutating originals
                     processedData[key] = this.#processArrayRelation(
-                        processedData[key].map(item => ({ ...item })), nestedRelation, null, user
+                        processedData[key].map((item: Record<string, any>) => ({ ...item })), nestedRelation, null, user
                     );
                 } else {
                     // Clone the nested object to avoid mutating original
@@ -1708,12 +1707,10 @@ class QueryBuilder {
 
     /**
      * Check if data object contains meaningful content for database operations
-     * @param {Object} dataObj - Data object to check
-     * @returns {boolean} True if object has meaningful content
      */
-    #hasMeaningfulContent(dataObj) {
-        return Object.keys(dataObj).length > 0 && 
-            Object.keys(dataObj).some(key => {
+    #hasMeaningfulContent(dataObj: Record<string, any>): boolean {
+        return Object.keys(dataObj).length > 0 &&
+            Object.keys(dataObj).some((key: string) => {
                 const value = dataObj[key];
                 if (value === null || value === undefined) return false;
                 if (typeof value === 'object') {
@@ -1726,20 +1723,18 @@ class QueryBuilder {
 
     /**
      * Recursively clean filter object by removing undefined values and empty AND/OR arrays
-     * @param {Object|any} filter - Filter object to clean
-     * @returns {Object|null} Cleaned filter or null if empty
      */
-    cleanFilter(filter) {
+    cleanFilter(filter: any): any {
         if (!filter || typeof filter !== 'object') {
             return filter === undefined ? null : filter;
         }
 
         if (Array.isArray(filter)) {
-            const cleaned = filter.map(item => this.cleanFilter(item)).filter(item => item !== null && item !== undefined);
+            const cleaned = filter.map((item: any) => this.cleanFilter(item)).filter((item: any) => item !== null && item !== undefined);
             return cleaned.length > 0 ? cleaned : null;
         }
 
-        const cleaned = {};
+        const cleaned: Record<string, any> = {};
         for (const key in filter) {
             const value = filter[key];
 
@@ -1779,32 +1774,26 @@ class QueryBuilder {
 
     /**
      * Check if a relation is a list (array) relation using Prisma DMMF
-     * @param {string} parentModel - The parent model name
-     * @param {string} relationName - The relation field name
-     * @returns {boolean} True if the relation is a list (array) relation
      */
-    #isListRelation(parentModel, relationName) {
+    #isListRelation(parentModel: string, relationName: string): boolean {
         return dmmf.isListRelation(parentModel, relationName);
     }
 
     /**
      * Simplify nested filter by removing parent relation filters
      * When including appointments from student_tariff, remove {student_tariff: {...}} filters
-     * @param {Object|any} filter - Filter object to simplify
-     * @param {string} parentModel - Parent model name
-     * @returns {Object|null} Simplified filter
      */
-    #simplifyNestedFilter(filter, parentModel) {
+    #simplifyNestedFilter(filter: any, parentModel: string): any {
         if (!filter || typeof filter !== 'object') {
             return filter;
         }
 
         if (Array.isArray(filter)) {
-            const simplified = filter.map(item => this.#simplifyNestedFilter(item, parentModel)).filter(item => item !== null);
+            const simplified = filter.map((item: any) => this.#simplifyNestedFilter(item, parentModel)).filter((item: any) => item !== null);
             return simplified.length > 0 ? simplified : null;
         }
 
-        const simplified = {};
+        const simplified: Record<string, any> = {};
         for (const key in filter) {
             const value = filter[key];
 
@@ -1837,87 +1826,40 @@ class QueryBuilder {
 
     /**
      * Get API result limit constant
-     * @returns {number} Maximum API result limit
      */
-    static get API_RESULT_LIMIT() {
+    static get API_RESULT_LIMIT(): number {
         return API_RESULT_LIMIT;
+    }
+
+    /**
+     * Handle Prisma errors and convert to standardized error responses
+     */
+    static errorHandler(error: any, data: Record<string, unknown> = {}): QueryErrorResponse {
+        console.error(error);
+
+        // Default values
+        let statusCode: number = error.status_code || 500;
+        let message: string = error instanceof ErrorResponse
+            ? error.message
+            : (process.env.NODE_ENV === 'production' ? 'Something went wrong' : (error.message || String(error)));
+
+        // Handle Prisma error codes
+        if (error?.code && PRISMA_ERROR_MAP[error.code]) {
+            const errorInfo = PRISMA_ERROR_MAP[error.code];
+            statusCode = errorInfo.status;
+
+            // Handle dynamic messages (e.g., P2002 duplicate)
+            if (error.code === 'P2002') {
+                const target = error.meta?.target;
+                const modelName = error.meta?.modelName;
+                message = `Duplicate entry for ${modelName}. Record with ${target}: '${data[target as string]}' already exists`;
+            } else {
+                message = errorInfo.message!;
+            }
+        }
+
+        return { status_code: statusCode, message };
     }
 }
 
-/**
- * Prisma error code mappings
- * Maps Prisma error codes to HTTP status codes and user-friendly messages
- */
-const PRISMA_ERROR_MAP = {
-    // Connection errors
-    P1001: { status: 500, message: 'Connection to the database could not be established' },
-
-    // Query errors (4xx - client errors)
-    P2000: { status: 400, message: 'The provided value for the column is too long' },
-    P2001: { status: 404, message: 'The record searched for in the where condition does not exist' },
-    P2002: { status: 409, message: null }, // Dynamic message for duplicates
-    P2003: { status: 400, message: 'Foreign key constraint failed' },
-    P2004: { status: 400, message: 'A constraint failed on the database' },
-    P2005: { status: 400, message: 'The value stored in the database is invalid for the field type' },
-    P2006: { status: 400, message: 'The provided value is not valid' },
-    P2007: { status: 400, message: 'Data validation error' },
-    P2008: { status: 400, message: 'Failed to parse the query' },
-    P2009: { status: 400, message: 'Failed to validate the query' },
-    P2010: { status: 500, message: 'Raw query failed' },
-    P2011: { status: 400, message: 'Null constraint violation' },
-    P2012: { status: 400, message: 'Missing a required value' },
-    P2013: { status: 400, message: 'Missing the required argument' },
-    P2014: { status: 400, message: 'The change would violate the required relation' },
-    P2015: { status: 404, message: 'A related record could not be found' },
-    P2016: { status: 400, message: 'Query interpretation error' },
-    P2017: { status: 400, message: 'The records for relation are not connected' },
-    P2018: { status: 404, message: 'The required connected records were not found' },
-    P2019: { status: 400, message: 'Input error' },
-    P2020: { status: 400, message: 'Value out of range for the type' },
-    P2021: { status: 404, message: 'The table does not exist in the current database' },
-    P2022: { status: 404, message: 'The column does not exist in the current database' },
-    P2023: { status: 400, message: 'Inconsistent column data' },
-    P2024: { status: 408, message: 'Timed out fetching a new connection from the connection pool' },
-    P2025: { status: 404, message: 'Operation failed: required records not found' },
-    P2026: { status: 400, message: 'Database provider does not support this feature' },
-    P2027: { status: 500, message: 'Multiple errors occurred during query execution' },
-    P2028: { status: 500, message: 'Transaction API error' },
-    P2030: { status: 404, message: 'Cannot find a fulltext index for the search' },
-    P2033: { status: 400, message: 'A number in the query exceeds 64 bit signed integer' },
-    P2034: { status: 409, message: 'Transaction failed due to write conflict or deadlock' }
-};
-
-/**
- * Handle Prisma errors and convert to standardized error responses
- * @param {Error|string} error - Error object or message
- * @param {Object} [data={}] - Additional data context for error messages
- * @returns {{status_code: number, message: string}} Standardized error response
- */
-QueryBuilder.errorHandler = (error, data = {}) => {
-    console.error(error);
-
-    // Default values
-    let statusCode = error.status_code || 500;
-    let message = error instanceof ErrorResponse
-        ? error.message
-        : (process.env.NODE_ENV === 'production' ? 'Something went wrong' : (error.message || String(error)));
-
-    // Handle Prisma error codes
-    if (error?.code && PRISMA_ERROR_MAP[error.code]) {
-        const errorInfo = PRISMA_ERROR_MAP[error.code];
-        statusCode = errorInfo.status;
-
-        // Handle dynamic messages (e.g., P2002 duplicate)
-        if (error.code === 'P2002') {
-            const target = error.meta?.target;
-            const modelName = error.meta?.modelName;
-            message = `Duplicate entry for ${modelName}. Record with ${target}: '${data[target]}' already exists`;
-        } else {
-            message = errorInfo.message;
-        }
-    }
-
-    return { status_code: statusCode, message };
-};
-
-module.exports = {QueryBuilder, prisma, prismaTransaction};
+export { QueryBuilder, prisma, prismaTransaction, PRISMA_ERROR_MAP };
