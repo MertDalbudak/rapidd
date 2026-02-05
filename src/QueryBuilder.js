@@ -3,6 +3,7 @@ const { ErrorResponse } = require('./Api');
 const dmmf = require('../rapidd/dmmf');
 
 const API_RESULT_LIMIT = parseInt(process.env.API_RESULT_LIMIT, 10) || 500;
+const MAX_NESTING_DEPTH = 10;
 
 // Pre-compiled regex patterns for better performance
 const FILTER_PATTERNS = {
@@ -115,6 +116,34 @@ class QueryBuilder {
     #fieldExistsOnModel(modelName, fieldName) {
         const fields = this.#getRelatedModelFields(modelName);
         return fields[fieldName] != null;
+    }
+
+    /**
+     * Ensure a relation object has its nested relations populated.
+     * If relatedObject.relation is undefined, dynamically builds it from DMMF.
+     * This enables deep relationship processing beyond 2 levels.
+     * @param {Object} relatedObject - Relation configuration object
+     * @returns {Object} The same relatedObject with relation property populated
+     * @private
+     */
+    #ensureRelations(relatedObject) {
+        if (!relatedObject.relation && relatedObject.object) {
+            const targetRelations = dmmf.getRelations(relatedObject.object);
+            if (targetRelations.length > 0) {
+                relatedObject.relation = targetRelations.map(nested => ({
+                    name: nested.name,
+                    object: nested.type,
+                    isList: nested.isList,
+                    field: nested.relationFromFields?.[0],
+                    foreignKey: nested.relationToFields?.[0] || 'id',
+                    ...(nested.relationFromFields?.length > 1 ? {
+                        fields: nested.relationFromFields,
+                        foreignKeys: nested.relationToFields
+                    } : {})
+                }));
+            }
+        }
+        return relatedObject;
     }
 
     /**
@@ -850,38 +879,46 @@ class QueryBuilder {
     /**
      * Process data for create operation with relation handling
      * Transforms nested relation data into Prisma create/connect syntax
-     * @param {Object} data - Data to create (mutated in place)
+     * Does NOT mutate the input data - returns a new transformed object
+     * @param {Object} data - Data to create (not mutated)
      * @param {Object} [user=null] - User object for audit fields
+     * @returns {Object} Transformed data ready for Prisma create
      */
     create(data, user = null) {
+        let result = { ...data };
+
         // Remove fields user shouldn't be able to set
         const modelAcl = acl.model[this.name];
         const omitFields = user && modelAcl?.getOmitFields
             ? modelAcl.getOmitFields(user)
             : [];
         for (const field of omitFields) {
-            delete data[field];
+            delete result[field];
         }
 
-        for (const key of Object.keys(data)) {
+        const keys = Object.keys(result);
+        for (const key of keys) {
             const field = this.fields[key];
             const isRelationField = field?.kind === 'object';
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                this.#processCreateRelation(data, key, user);
+                result = this.#processCreateRelation(result, key, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect
-                this.#processCreateForeignKey(data, key, user);
+                result = this.#processCreateForeignKey(result, key, user);
             }
         }
+
+        return result;
     }
 
     /**
      * Process a relation field for create operation
-     * @param {Object} data - Parent data object
+     * @param {Object} data - Parent data object (shallow copy, nested values may be shared)
      * @param {string} key - Relation field name
      * @param {Object} [user=null] - User object for ACL
+     * @returns {Object} New data object with the relation field transformed
      * @private
      */
     #processCreateRelation(data, key, user = null) {
@@ -890,25 +927,42 @@ class QueryBuilder {
             throw new ErrorResponse(400, "unexpected_key", {key});
         }
 
-        if (!data[key]) return;
+        if (!data[key]) return data;
 
+        this.#ensureRelations(relatedObject);
+
+        const result = { ...data };
         if (Array.isArray(data[key])) {
-            data[key] = this.#processCreateArrayRelation(data[key], relatedObject, key, user);
+            // Clone each item to avoid mutating original nested objects
+            result[key] = this.#processCreateArrayRelation(
+                data[key].map(item => ({ ...item })), relatedObject, key, user
+            );
         } else {
-            data[key] = this.#processCreateSingleRelation(data[key], relatedObject, key, user);
+            // Clone the nested object to avoid mutating original
+            result[key] = this.#processCreateSingleRelation(
+                { ...data[key] }, relatedObject, key, user
+            );
         }
+        return result;
     }
 
     /**
      * Process array relation for create operation
-     * @param {Array} items - Array of relation items
+     * @param {Array} items - Array of relation items (copies, safe to mutate)
      * @param {Object} relatedObject - Relation configuration
      * @param {string} relationName - Name of the relation
      * @param {Object} [user=null] - User object for ACL
-     * @returns {Object} Prisma create/connect structure
+     * @param {number} [depth=0] - Current nesting depth for safety guard
+     * @returns {Object} Prisma create/connect/upsert structure
      * @private
      */
-    #processCreateArrayRelation(items, relatedObject, relationName, user = null) {
+    #processCreateArrayRelation(items, relatedObject, relationName, user = null, depth = 0) {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
+        }
+
+        this.#ensureRelations(relatedObject);
+
         for (let i = 0; i < items.length; i++) {
             this.#validateAndTransformRelationItem(items[i], relatedObject, relationName);
         }
@@ -920,8 +974,15 @@ class QueryBuilder {
         // For composite keys, check if ALL PK fields are present
         const hasCompletePK = (item) => pkFields.every(field => item[field] != null);
 
+        // Check if an item has ONLY primary key fields (no additional data)
+        const hasOnlyPKFields = (item) => {
+            const itemKeys = Object.keys(item);
+            return itemKeys.every(key => pkFields.includes(key));
+        };
+
         const createItems = items.filter(e => !hasCompletePK(e));
-        const connectItems = items.filter(e => hasCompletePK(e));
+        const connectOnlyItems = items.filter(e => hasCompletePK(e) && hasOnlyPKFields(e));
+        const upsertItems = items.filter(e => hasCompletePK(e) && !hasOnlyPKFields(e));
 
         // Get ACL for the related model
         const relatedAcl = acl.model[relatedObject.object];
@@ -952,10 +1013,10 @@ class QueryBuilder {
             });
         }
 
-        if (connectItems.length > 0) {
+        if (connectOnlyItems.length > 0) {
             if (pkFields.length > 1) {
                 // Composite key - build composite where clause with ACL
-                result.connect = connectItems.map(e => {
+                result.connect = connectOnlyItems.map(e => {
                     const where = {};
                     pkFields.forEach(field => { where[field] = e[field]; });
                     // Apply ACL access filter
@@ -966,7 +1027,7 @@ class QueryBuilder {
                 });
             } else {
                 // Simple key with ACL
-                result.connect = connectItems.map(e => {
+                result.connect = connectOnlyItems.map(e => {
                     const where = { [foreignKey]: e[foreignKey] || e[pkFields[0]] };
                     // Apply ACL access filter
                     if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
@@ -977,25 +1038,69 @@ class QueryBuilder {
             }
         }
 
+        if (upsertItems.length > 0) {
+            // Check canCreate permission for nested connectOrCreate
+            if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+                throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+            }
+
+            // Remove omitted fields from connectOrCreate items
+            result.connectOrCreate = upsertItems.map(item => {
+                const cleanedItem = { ...item };
+                for (const field of omitFields) {
+                    delete cleanedItem[field];
+                }
+
+                // Build where clause from PK fields
+                const where = {};
+                if (pkFields.length > 1) {
+                    pkFields.forEach(field => { where[field] = cleanedItem[field]; });
+                } else {
+                    where[foreignKey] = cleanedItem[foreignKey] || cleanedItem[pkFields[0]];
+                }
+
+                // Apply ACL access filter
+                if (accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0) {
+                    Object.assign(where, accessFilter);
+                }
+
+                return {
+                    where,
+                    create: cleanedItem
+                };
+            });
+        }
+
         return result;
     }
 
     /**
      * Process single relation for create operation
-     * @param {Object} item - Relation data
+     * @param {Object} item - Relation data (copy, safe to mutate)
      * @param {Object} relatedObject - Relation configuration
      * @param {string} relationName - Name of the relation
      * @param {Object} [user=null] - User object for ACL
+     * @param {number} [depth=0] - Current nesting depth for safety guard
      * @returns {Object} Prisma create structure
      * @private
      */
-    #processCreateSingleRelation(item, relatedObject, relationName, user = null) {
+    #processCreateSingleRelation(item, relatedObject, relationName, user = null, depth = 0) {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
+        }
+
         // Get ACL for the related model
         const relatedAcl = acl.model[relatedObject.object];
 
         // Check canCreate permission
         if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        }
+
+        // If item is already a Prisma operation (connect, create, etc.), skip field validation
+        const prismaOps = ['connect', 'create', 'disconnect', 'set', 'update', 'upsert', 'deleteMany', 'updateMany', 'createMany'];
+        if (prismaOps.some(op => op in item)) {
+            return { ...item };
         }
 
         // Get and apply omit fields
@@ -1005,6 +1110,9 @@ class QueryBuilder {
         for (const field of omitFields) {
             delete item[field];
         }
+
+        // Ensure nested relations are resolved for deep processing
+        this.#ensureRelations(relatedObject);
 
         for (const fieldKey of Object.keys(item)) {
             if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
@@ -1019,7 +1127,6 @@ class QueryBuilder {
 
                 // Handle composite primary keys
                 if (Array.isArray(targetPrimaryKey)) {
-                    // For composite PKs, the value should be an object with all key fields
                     if (typeof item[fieldKey] === 'object' && item[fieldKey] !== null) {
                         targetPrimaryKey.forEach(pk => {
                             if (item[fieldKey][pk] != null) {
@@ -1027,7 +1134,6 @@ class QueryBuilder {
                             }
                         });
                     } else {
-                        // Single value for composite PK - use first field
                         connectWhere[targetPrimaryKey[0]] = item[fieldKey];
                     }
                 } else {
@@ -1045,6 +1151,22 @@ class QueryBuilder {
 
                 item[childRelation.name] = { connect: connectWhere };
                 delete item[fieldKey];
+                continue;
+            }
+
+            // Check if this field is a nested relation object that needs recursive processing
+            const nestedRelation = relatedObject?.relation?.find(e => e.name === fieldKey);
+            if (nestedRelation && item[fieldKey] && typeof item[fieldKey] === 'object') {
+                this.#ensureRelations(nestedRelation);
+                if (Array.isArray(item[fieldKey])) {
+                    item[fieldKey] = this.#processCreateArrayRelation(
+                        item[fieldKey].map(i => ({ ...i })), nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
+                    );
+                } else {
+                    item[fieldKey] = this.#processCreateSingleRelation(
+                        { ...item[fieldKey] }, nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
+                    );
+                }
             }
         }
 
@@ -1053,12 +1175,14 @@ class QueryBuilder {
 
     /**
      * Validate relation item fields and transform nested FK references
-     * @param {Object} item - Relation item to validate/transform
+     * @param {Object} item - Relation item to validate/transform (copy, safe to mutate)
      * @param {Object} relatedObject - Relation configuration
      * @param {string} relationName - Parent relation name for error messages
      * @private
      */
     #validateAndTransformRelationItem(item, relatedObject, relationName) {
+        this.#ensureRelations(relatedObject);
+
         for (const fieldKey of Object.keys(item)) {
             if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
                 throw new ErrorResponse(400, "unexpected_key", {key: `${relationName}.${fieldKey}`});
@@ -1090,17 +1214,19 @@ class QueryBuilder {
      * @param {Object} data - Parent data object
      * @param {string} key - Field name
      * @param {Object} [user=null] - User object for ACL
+     * @returns {Object} New data object with FK transformed to connect
      * @private
      */
     #processCreateForeignKey(data, key, user = null) {
         const relatedObject = this.relatedObjects.find(e => e.field === key);
-        if (!relatedObject) return;
+        if (!relatedObject) return data;
 
-        if (data[key]) {
+        const result = { ...data };
+        if (result[key]) {
             const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
             const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
             // Build connect where clause
-            const connectWhere = { [foreignKey]: data[key] };
+            const connectWhere = { [foreignKey]: result[key] };
 
             // Apply ACL access filter for connect
             const relatedAcl = acl.model[relatedObject.object];
@@ -1111,40 +1237,48 @@ class QueryBuilder {
                 Object.assign(connectWhere, accessFilter);
             }
 
-            data[relatedObject.name] = { connect: connectWhere };
+            result[relatedObject.name] = { connect: connectWhere };
         }
-        delete data[key];
+        delete result[key];
+        return result;
     }
 
     /**
      * Process data for update operation with nested relation support
      * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
+     * Does NOT mutate the input data - returns a new transformed object
      * @param {string|number} id - ID of record to update
-     * @param {Object} data - Data to update (mutated in place)
+     * @param {Object} data - Data to update (not mutated)
      * @param {Object} [user=null] - User object for ACL checks
+     * @returns {Object} Transformed data ready for Prisma update
      */
     update(id, data, user = null) {
+        let result = { ...data };
+
         // Remove fields user shouldn't be able to modify
         const modelAcl = acl.model[this.name];
         const omitFields = user && modelAcl?.getOmitFields
             ? modelAcl.getOmitFields(user)
             : [];
         for (const field of omitFields) {
-            delete data[field];
+            delete result[field];
         }
 
-        for (const key of Object.keys(data)) {
+        const keys = Object.keys(result);
+        for (const key of keys) {
             const field = this.fields[key];
             const isRelationField = field?.kind === 'object';
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                this.#processUpdateRelation(data, key, id, user);
+                result = this.#processUpdateRelation(result, key, id, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect/disconnect
-                this.#processUpdateForeignKey(data, key, user);
+                result = this.#processUpdateForeignKey(result, key, user);
             }
         }
+
+        return result;
     }
 
     /**
@@ -1153,6 +1287,7 @@ class QueryBuilder {
      * @param {string} key - Relation field name
      * @param {string|number} parentId - Parent record ID
      * @param {Object} user - User for ACL
+     * @returns {Object} New data object with the relation field transformed
      * @private
      */
     #processUpdateRelation(data, key, parentId, user) {
@@ -1161,13 +1296,23 @@ class QueryBuilder {
             throw new ErrorResponse(400, "unexpected_key", {key});
         }
 
-        if (!data[key]) return;
+        if (!data[key]) return data;
 
+        this.#ensureRelations(relatedObject);
+
+        const result = { ...data };
         if (Array.isArray(data[key])) {
-            data[key] = this.#processArrayRelation(data[key], relatedObject, parentId, user);
+            // Clone each item to avoid mutating original nested objects
+            result[key] = this.#processArrayRelation(
+                data[key].map(item => ({ ...item })), relatedObject, parentId, user
+            );
         } else {
-            data[key] = this.#processSingleRelation(data[key], relatedObject, user);
+            // Clone the nested object to avoid mutating original
+            result[key] = this.#processSingleRelation(
+                { ...data[key] }, relatedObject, user
+            );
         }
+        return result;
     }
 
     /**
@@ -1175,18 +1320,20 @@ class QueryBuilder {
      * @param {Object} data - Parent data object
      * @param {string} key - Field name
      * @param {Object} [user=null] - User object for ACL
+     * @returns {Object} New data object with FK transformed to connect/disconnect
      * @private
      */
     #processUpdateForeignKey(data, key, user = null) {
         const relatedObject = this.relatedObjects.find(e => e.field === key);
-        if (!relatedObject) return;
+        if (!relatedObject) return data;
 
+        const result = { ...data };
         const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
         const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
 
-        if (data[key] != null) {
+        if (result[key] != null) {
             // Build connect where clause
-            const connectWhere = { [foreignKey]: data[key] };
+            const connectWhere = { [foreignKey]: result[key] };
 
             // Apply ACL access filter for connect
             const relatedAcl = acl.model[relatedObject.object];
@@ -1197,11 +1344,12 @@ class QueryBuilder {
                 Object.assign(connectWhere, accessFilter);
             }
 
-            data[relatedObject.name] = { connect: connectWhere };
+            result[relatedObject.name] = { connect: connectWhere };
         } else {
-            data[relatedObject.name] = { disconnect: true };
+            result[relatedObject.name] = { disconnect: true };
         }
-        delete data[key];
+        delete result[key];
+        return result;
     }
     
     /**
@@ -1213,6 +1361,8 @@ class QueryBuilder {
      * @returns {Object} Prisma array relation operations
      */
     #processArrayRelation(dataArray, relatedObject, parentId, user = null) {
+        this.#ensureRelations(relatedObject);
+
         for (let i = 0; i < dataArray.length; i++) {
             // Validate all fields exist on the related model
             for (let _key in dataArray[i]) {
@@ -1416,6 +1566,12 @@ class QueryBuilder {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
         }
 
+        // If dataObj is already a Prisma operation (connect, create, disconnect, etc.), skip field validation
+        const prismaOps = ['connect', 'create', 'disconnect', 'set', 'update', 'upsert', 'deleteMany', 'updateMany', 'createMany'];
+        if (prismaOps.some(op => op in dataObj)) {
+            return dataObj;
+        }
+
         // Get omit fields
         const omitFields = user && relatedAcl?.getOmitFields
             ? relatedAcl.getOmitFields(user)
@@ -1432,6 +1588,9 @@ class QueryBuilder {
                 throw new ErrorResponse(400, "unexpected_key", {key: `${relatedObject.name}.${_key}`});
             }
         }
+
+        // Ensure nested relations are resolved for deep processing
+        this.#ensureRelations(relatedObject);
 
         // Process nested relations recursively if they exist
         let processedData = dataObj;
@@ -1522,12 +1681,19 @@ class QueryBuilder {
             const nestedRelation = relatedObjects.find(rel => rel.name === key);
 
             if (nestedRelation && processedData[key] && typeof processedData[key] === 'object') {
+                // Ensure deep relations are available for recursive processing
+                this.#ensureRelations(nestedRelation);
+
                 if (Array.isArray(processedData[key])) {
-                    // Process nested array relation recursively
-                    processedData[key] = this.#processArrayRelation(processedData[key], nestedRelation, null, user);
+                    // Clone each item to avoid mutating originals
+                    processedData[key] = this.#processArrayRelation(
+                        processedData[key].map(item => ({ ...item })), nestedRelation, null, user
+                    );
                 } else {
-                    // Process nested single relation recursively
-                    const nestedResult = this.#processSingleRelation(processedData[key], nestedRelation, user);
+                    // Clone the nested object to avoid mutating original
+                    const nestedResult = this.#processSingleRelation(
+                        { ...processedData[key] }, nestedRelation, user
+                    );
                     if (nestedResult) {
                         processedData[key] = nestedResult;
                     } else {

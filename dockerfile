@@ -35,7 +35,8 @@ COPY --chown=rapidd:nodejs routes ./routes
 COPY --chown=rapidd:nodejs public ./public
 COPY --chown=rapidd:nodejs strings ./strings
 COPY --chown=rapidd:nodejs config ./config
-COPY --chown=rapidd:nodejs data ./data
+COPY --chown=rapidd:nodejs rapidd ./rapidd
+COPY --chown=rapidd:nodejs middleware ./middleware
 
 # Create logs directory with proper permissions
 RUN mkdir -p logs && chown -R rapidd:nodejs logs

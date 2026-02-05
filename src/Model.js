@@ -39,18 +39,152 @@ class Model {
         this.queryBuilder = this.constructor.QueryBuilder ?? new QueryBuilder(name);
         this.acl = acl.model[name] || {};
         this.options = options || {};
-        this.user = this.options.user || { 'id': 1, 'role': 'application' };
+        this.user = this.options.user || { 'id': 'system', 'role': 'application' };
         this.user_id = this.user ? this.user.id : null;
     }
 
     /**
      * Get the primary key field name for this model
-     * For composite keys, returns fields joined with underscore
+     * For composite keys, returns fields joined with underscore (Prisma composite key format)
      * @returns {string}
      */
     get primaryKey() {
         const pkey = this.queryBuilder.getPrimaryKey();
         return Array.isArray(pkey) ? pkey.join('_') : pkey;
+    }
+
+    /**
+     * Get raw primary key field(s) from DMMF
+     * Returns string for simple PKs, string[] for composite PKs
+     * @returns {string|string[]}
+     */
+    get primaryKeyFields() {
+        return this.queryBuilder.getPrimaryKey();
+    }
+
+    /**
+     * Get the default sort field for this model
+     * For composite keys, returns the first field
+     * @returns {string}
+     */
+    get defaultSortField() {
+        const pk = this.primaryKeyFields;
+        return Array.isArray(pk) ? pk[0] : pk;
+    }
+
+    /**
+     * Whether this model has a composite primary key
+     * @returns {boolean}
+     */
+    get isCompositePK() {
+        return Array.isArray(this.primaryKeyFields);
+    }
+
+    /**
+     * Build a Prisma where clause for the given ID value(s)
+     * For simple PKs: { id: value }
+     * For composite PKs with object: { email_companyId: { email: '...', companyId: '...' } }
+     * For composite PKs with tilde-delimited string: parses "val1~val2" into fields
+     * @param {string|number|Object} id - The primary key value(s)
+     * @returns {Object} Prisma where clause
+     */
+    buildWhereId(id) {
+        const pkFields = this.primaryKeyFields;
+
+        if (!Array.isArray(pkFields)) {
+            // Simple PK
+            return { [pkFields]: id };
+        }
+
+        // Composite PK
+        const compositeKeyName = pkFields.join('_');
+
+        if (typeof id === 'object' && id !== null) {
+            // Already an object with field values
+            return { [compositeKeyName]: id };
+        }
+
+        if (typeof id === 'string' && id.includes('~')) {
+            // Tilde-delimited string from URL
+            const parts = id.split('~');
+            if (parts.length !== pkFields.length) {
+                throw new ErrorResponse(400, "invalid_composite_key", {
+                    expected: pkFields,
+                    received: parts.length
+                });
+            }
+            const values = {};
+            pkFields.forEach((field, i) => {
+                values[field] = this.#coercePrimaryKeyValue(field, parts[i]);
+            });
+            return { [compositeKeyName]: values };
+        }
+
+        throw new ErrorResponse(400, "invalid_composite_key_format", {
+            message: "Composite key requires either an object or tilde-separated string",
+            fields: pkFields
+        });
+    }
+
+    /**
+     * Build a Prisma where clause for a unique key (used in upsert)
+     * @param {string|string[]} uniqueKey - The unique field(s)
+     * @param {Object} data - Record data containing the key values
+     * @returns {Object} Prisma where clause
+     */
+    buildWhereUniqueKey(uniqueKey, data) {
+        if (Array.isArray(uniqueKey)) {
+            const compositeKeyName = uniqueKey.join('_');
+            const compositeKeyValues = {};
+            uniqueKey.forEach(key => {
+                compositeKeyValues[key] = data[key];
+            });
+            return { [compositeKeyName]: compositeKeyValues };
+        }
+        return { [uniqueKey]: data[uniqueKey] };
+    }
+
+    /**
+     * Build a Prisma select clause for primary key fields
+     * @returns {Object} Prisma select object
+     * @private
+     */
+    #buildPrimaryKeySelect() {
+        const pkFields = this.primaryKeyFields;
+        if (!Array.isArray(pkFields)) {
+            return { [pkFields]: true };
+        }
+        return pkFields.reduce((acc, f) => { acc[f] = true; return acc; }, {});
+    }
+
+    /**
+     * Compare two records by their primary key fields
+     * @param {Object} a - First record
+     * @param {Object} b - Second record
+     * @returns {boolean} True if PKs match
+     * @private
+     */
+    #primaryKeysMatch(a, b) {
+        if (!a || !b) return false;
+        const pkFields = this.primaryKeyFields;
+        const fields = Array.isArray(pkFields) ? pkFields : [pkFields];
+        return fields.every(f => a[f] != null && String(a[f]) === String(b[f]));
+    }
+
+    /**
+     * Coerce a string PK value to the correct type based on DMMF field type
+     * @param {string} fieldName - The field name
+     * @param {string} value - The string value to coerce
+     * @returns {*} Coerced value
+     * @private
+     */
+    #coercePrimaryKeyValue(fieldName, value) {
+        const field = this.fields[fieldName];
+        if (!field) return value;
+        if (field.type === 'Int') return parseInt(value, 10);
+        if (field.type === 'Float' || field.type === 'Decimal') return parseFloat(value);
+        if (field.type === 'Boolean') return value === 'true';
+        return value;
     }
 
     /**
@@ -93,7 +227,7 @@ class Model {
      * @private
      */
     async _executeMiddleware(hook, operation, params) {
-        const context = modelMiddleware.createContext(this, operation, params, this.user);
+        const context = modelMiddleware.createContext(this.name, operation, params, this.user);
         return await modelMiddleware.execute(hook, operation, context);
     }
 
@@ -110,15 +244,21 @@ class Model {
      * @throws {ErrorResponse} 400 if sortBy field is invalid
      * @protected
      */
-    _getMany = async (q = {}, include = "", limit = 25, offset = 0, sortBy = this.primaryKey, sortOrder = "asc", options = {}) => {
+    _getMany = async (q = {}, include = "", limit = 25, offset = 0, sortBy = this.defaultSortField, sortOrder = "asc", options = {}) => {
         const take = this.take(Number(limit));
         const skip = this.skip(Number(offset));
 
         sortBy = sortBy?.trim();
         sortOrder = sortOrder?.trim();
 
+        // Validate sort field - fall back to default for composite PK names
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
-            throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
+            // If the sortBy is a composite key name (e.g., "email_companyId"), use first PK field
+            if (sortBy === this.primaryKey && this.isCompositePK) {
+                sortBy = this.defaultSortField;
+            } else {
+                throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
+            }
         }
 
         // Execute before middleware
@@ -173,12 +313,11 @@ class Model {
 
         const { omit, ..._options } = beforeCtx.options || options;
         const targetId = beforeCtx.id || id;
+        const whereId = this.buildWhereId(targetId);
 
         // Parallel queries: one for data, one for permission check
         const _response = this.prisma.findUnique({
-            'where': {
-                [this.primaryKey]: targetId,
-            },
+            'where': whereId,
             'include': this.include(beforeCtx.include || include),
             'omit': { ...this._omit(), ...omit },
             ..._options
@@ -186,18 +325,16 @@ class Model {
 
         const _checkPermission = this.prisma.findUnique({
             'where': {
-                [this.primaryKey]: targetId,
+                ...whereId,
                 ...this.getAccessFilter()
             },
-            'select': {
-                [this.primaryKey]: true
-            }
+            'select': this.#buildPrimaryKeySelect()
         });
 
         const [response, checkPermission] = await Promise.all([_response, _checkPermission]);
         if (response) {
             if (checkPermission) {
-                if (response.id != checkPermission?.id) {
+                if (!this.#primaryKeysMatch(response, checkPermission)) {
                     throw new ErrorResponse(403, "no_permission");
                 }
             } else {
@@ -235,17 +372,18 @@ class Model {
 
         const createData = beforeCtx.data || data;
 
-        // VALIDATE PASSED FIELDS AND RELATIONSHIPS
-        this._queryCreate(createData);
+        // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object)
+        const transformedData = this._queryCreate(createData);
 
         // CREATE
         const result = await this.prisma.create({
-            'data': createData,
+            'data': transformedData,
+            'include': this.include('ALL'),
             ...(beforeCtx.options || options)
         });
 
         // Execute after middleware
-        const afterCtx = await this._executeMiddleware('after', 'create', { data: createData, result });
+        const afterCtx = await this._executeMiddleware('after', 'create', { data: transformedData, result });
         return afterCtx.result || result;
     }
 
@@ -260,8 +398,10 @@ class Model {
      * @protected
      */
     _update = async (id, data, options = {}) => {
-        delete data.createdAt;
-        delete data.createdBy;
+        // Create a copy to avoid mutating the caller's data
+        const inputData = { ...data };
+        delete inputData.createdAt;
+        delete inputData.createdBy;
 
         // CHECK UPDATE PERMISSION
         const updateFilter = this.getUpdateFilter();
@@ -270,24 +410,24 @@ class Model {
         }
 
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'update', { id, data: { ...data }, options });
+        const beforeCtx = await this._executeMiddleware('before', 'update', { id, data: { ...inputData }, options });
 
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
 
         const targetId = beforeCtx.id || id;
-        const updateData = beforeCtx.data || data;
+        const updateData = beforeCtx.data || inputData;
 
-        // VALIDATE PASSED FIELDS AND RELATIONSHIPS
-        this._queryUpdate(targetId, updateData);
+        // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object)
+        const transformedData = this._queryUpdate(targetId, updateData);
 
         const result = await this.prisma.update({
             'where': {
-                [this.primaryKey]: targetId,
+                ...this.buildWhereId(targetId),
                 ...updateFilter
             },
-            'data': updateData,
+            'data': transformedData,
             'include': this.include('ALL'),
             ...(beforeCtx.options || options)
         });
@@ -297,14 +437,15 @@ class Model {
         }
 
         // Execute after middleware
-        const afterCtx = await this._executeMiddleware('after', 'update', { id: targetId, data: updateData, result });
+        const afterCtx = await this._executeMiddleware('after', 'update', { id: targetId, data: transformedData, result });
         return afterCtx.result || result;
     }
 
     /**
      * Internal method to create or update a record based on unique key
+     * Supports both single and composite primary keys
      * @param {Object} data - The record data
-     * @param {string} [unique_key=this.primaryKey] - The unique field to match on
+     * @param {string|string[]} [unique_key=this.primaryKey] - The unique field(s) to match on
      * @param {Object} [options={}] - Additional Prisma options
      * @returns {Promise<Object>} The created or updated record with all relations
      * @protected
@@ -312,7 +453,7 @@ class Model {
     async _upsert(data, unique_key = this.primaryKey, options = {}) {
         // Execute before middleware
         const beforeCtx = await this._executeMiddleware('before', 'upsert', { data: { ...data }, unique_key, options });
-        
+
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
@@ -320,19 +461,20 @@ class Model {
         const upsertData = beforeCtx.data || data;
         const targetKey = beforeCtx.unique_key || unique_key;
 
-        // Deep clone to avoid mutation of original data
-        const createData = JSON.parse(JSON.stringify(upsertData));
-        const updateData = JSON.parse(JSON.stringify(upsertData));
-        this.queryBuilder.create(createData, this.user);
-        const updatePrimaryKey = updateData[this.primaryKey];
-        this.queryBuilder.update(updatePrimaryKey, updateData, this.user);       
+        // create() and update() are now pure - they return new objects without mutating input
+        const createData = this.queryBuilder.create(upsertData, this.user);
+
+        const updatePrimaryKey = Array.isArray(targetKey) ? targetKey[0] : this.primaryKey;
+        const updateData = this.queryBuilder.update(updatePrimaryKey, upsertData, this.user);
+
+        // Build where clause that supports composite keys
+        const whereClause = this.buildWhereUniqueKey(targetKey, upsertData);
 
         const result = await this.prisma.upsert({
-            'where': {
-                [targetKey]: upsertData[targetKey]
-            },
+            'where': whereClause,
             'create': createData,
             'update': updateData,
+            'include': this.include('ALL'),
             ...(beforeCtx.options || options)
         });
 
@@ -343,24 +485,29 @@ class Model {
 
     /**
      * Internal method to create or update multiple records based on unique key
-     * Uses a transaction to atomically handle creates and updates
+     * Supports both transactional and non-transactional operations with optional relation validation
      * @param {Object[]} data - Array of record data
      * @param {string} [unique_key=this.primaryKey] - The unique field to match on
-     * @param {Object} [options={}] - Additional Prisma options
-     * @param {boolean} [validateRelation=false] - Whether to validate relations
+     * @param {Object} [prismaOptions={}] - Prisma database options
+     * @param {Object} [options={}] - Operation options
+     * @param {boolean} [options.validateRelation=false] - Whether to validate relations
+     * @param {boolean} [options.transaction=true] - Whether to use a transaction (default true)
+     * @param {number} [options.timeout=30000] - Transaction timeout in milliseconds
      * @returns {Promise<Object>} Result object with created and updated counts
      * @protected
      */
-    async _upsertMany(data, unique_key = this.primaryKey, options = {}, validateRelation = false) {
+    async _upsertMany(data, unique_key = this.primaryKey, prismaOptions = {}, options = {}) {
         if (!Array.isArray(data) || data.length === 0) {
             return { created: 0, updated: 0, total: 0 };
         }
-        const accessFilter = this.getAccessFilter();
-        const canCreate = this.canCreate();
-        const updateFilter = this.getUpdateFilter();
+
+        // Extract operation-specific options
+        const validateRelation = options.validateRelation ?? false;
+        const useTransaction = options.transaction ?? true;
+        const timeout = options.timeout ?? 30000;
 
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data, unique_key, options });
+        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data, unique_key, prismaOptions });
         
         if (beforeCtx.abort) {
             return beforeCtx.result;
@@ -368,96 +515,134 @@ class Model {
 
         const upsertData = beforeCtx.data || data;
         const targetKey = beforeCtx.unique_key || unique_key;
+        const _prismaOptions = beforeCtx.prismaOptions || prismaOptions;
 
-        // Extract unique key values to check which records exist
-        const uniqueValues = upsertData.map(record => record[targetKey]).filter(v => v != null);
+        // Define the upsert operation logic
+        const executeUpsertMany = async (tx) => {
+            // Find existing records - handle both simple and composite keys
+            let existingRecords;
+            if (Array.isArray(targetKey)) {
+                // Composite key: use OR clause for lookup
+                const whereConditions = upsertData
+                    .map(record => {
+                        const compositeKeyName = targetKey.join('_');
+                        const values = {};
+                        targetKey.forEach(k => { values[k] = record[k]; });
+                        if (Object.values(values).some(v => v == null)) return null;
+                        return { [compositeKeyName]: values };
+                    })
+                    .filter(Boolean);
 
-        const result = await prismaTransaction(async (tx) => {
-            // Find existing records
-            const existingRecords = await tx[this.name].findMany({
-                'where': {
-                    [targetKey]: {
-                        'in': uniqueValues
-                    },
-                    ...accessFilter
-                },
-                'select': {
-                    [targetKey]: true
+                existingRecords = whereConditions.length > 0
+                    ? await tx[this.name].findMany({
+                        'where': { OR: whereConditions },
+                        'select': targetKey.reduce((acc, k) => { acc[k] = true; return acc; }, {})
+                    })
+                    : [];
+            } else {
+                const uniqueValues = upsertData.map(record => record[targetKey]).filter(v => v != null);
+                existingRecords = uniqueValues.length > 0
+                    ? await tx[this.name].findMany({
+                        'where': { [targetKey]: { 'in': uniqueValues } },
+                        'select': { [targetKey]: true }
+                    })
+                    : [];
+            }
+
+            // Build existence check helper
+            const existsInDb = (record) => {
+                if (Array.isArray(targetKey)) {
+                    return existingRecords.some(existing =>
+                        targetKey.every(k => String(existing[k]) === String(record[k]))
+                    );
                 }
-            });
+                return existingRecords.some(e => String(e[targetKey]) === String(record[targetKey]));
+            };
 
-            const existingKeys = existingRecords.map(r => r[targetKey]);
-
-            // Separate data into creates and updates
+            // Separate data into creates and updates, using pure create/update
             const createRecords = [];
             const updateRecords = [];
 
             for (const record of upsertData) {
-                if (existingKeys.find(e => e == record[targetKey])) {
-                    // Record exists, prepare for update
-                    const updatePrimaryKey = record[this.primaryKey];
-                    this.queryBuilder.update(updatePrimaryKey, record, this.user);
-                    updateRecords.push(record);
+                if (existsInDb(record)) {
+                    // Record exists, prepare for update (pure - returns new object)
+                    const updatePrimaryKey = Array.isArray(targetKey) ? targetKey[0] : this.primaryKey;
+                    const transformedRecord = this.queryBuilder.update(record[updatePrimaryKey] || record[targetKey], record, this.user);
+                    updateRecords.push({ original: record, transformed: transformedRecord });
                 } else {
                     // Record doesn't exist, prepare for create
-                    if(validateRelation) {
-                        this.queryBuilder.create(record, this.user);
+                    if (validateRelation) {
+                        const transformedRecord = this.queryBuilder.create(record, this.user);
+                        createRecords.push({ original: record, transformed: transformedRecord });
+                    } else {
+                        createRecords.push({ original: record, transformed: { ...record } });
                     }
-                    createRecords.push(record);
                 }
             }
 
             let createdCount = 0;
             let updatedCount = 0;
+            const failed = [];
 
             // Batch create
             if (createRecords.length > 0) {
-                if(canCreate === false) {
-                    throw new ErrorResponse(403, "no_permission_to_create");
-                }
-                if(validateRelation === false) {
-                    const createResult = await tx[this.name].createMany({
-                        'data': createRecords,
-                        'skipDuplicates': true,
-                        ...(beforeCtx.options || options)
-                    });
-                    createdCount = createResult.count;
-                }
-                else {
-                    for (const createRecord of createRecords) {
-                        await tx[this.name].create({
-                            'data': createRecord,
-                            ...(beforeCtx.options || options)
+                if (validateRelation) {
+                    for (const { transformed } of createRecords) {
+                        try {
+                            await tx[this.name].create({
+                                'data': transformed,
+                                ..._prismaOptions
+                            });
+                            createdCount++;
+                        } catch (error) {
+                            failed.push({ record: transformed, error });
+                        }
+                    }
+                } else {
+                    try {
+                        const createResult = await tx[this.name].createMany({
+                            'data': createRecords.map(r => r.transformed),
+                            'skipDuplicates': true,
+                            ..._prismaOptions
                         });
-                        createdCount++;
+                        createdCount = createResult.count;
+                    } catch (error) {
+                        failed.push({ records: createRecords.map(r => r.transformed), error });
                     }
                 }
             }
-
             // Batch update
             if (updateRecords.length > 0) {
-                if (updateFilter === false) {
-                    throw new ErrorResponse(403, "no_permission_to_update");
-                }
-                for (const updateRecord of updateRecords) {
-                    await tx[this.name].update({
-                        'where': {
-                            [targetKey]: updateRecord[targetKey],
-                            ...updateFilter,
-                        },
-                        'data': updateRecord,
-                        ...(beforeCtx.options || options)
-                    });
-                    updatedCount++;
+                for (const { original, transformed } of updateRecords) {
+                    try {
+                        const whereClause = Array.isArray(targetKey)
+                            ? this.buildWhereUniqueKey(targetKey, original)
+                            : { [targetKey]: original[targetKey] };
+                        await tx[this.name].update({
+                            'where': whereClause,
+                            'data': transformed,
+                            ..._prismaOptions
+                        });
+                        updatedCount++;
+                    } catch (error) {
+                        failed.push({ record: transformed, error });
+                    }
                 }
             }
 
             return {
                 created: createdCount,
                 updated: updatedCount,
-                total: createdCount + updatedCount
+                failed,
+                totalSuccess: createdCount + updatedCount,
+                totalFailed: failed.length
             };
-        });
+        };
+
+        // Execute with or without transaction based on option
+        const result = useTransaction 
+            ? await prismaTransaction(executeUpsertMany, { timeout })
+            : await executeUpsertMany(prisma);
 
         // Execute after middleware
         const afterCtx = await this._executeMiddleware('after', 'upsertMany', { data: upsertData, result });
@@ -510,37 +695,30 @@ class Model {
         }
 
         const targetId = beforeCtx.id || id;
+        const whereId = this.buildWhereId(targetId);
 
         // Support soft delete via middleware
         if (beforeCtx.softDelete && beforeCtx.data) {
-            try {
-                const result = await this.prisma.update({
-                    'where': {
-                        [this.primaryKey]: targetId,
-                        ...deleteFilter
-                    },
-                    'data': beforeCtx.data,
-                    'select': {
-                        [this.primaryKey]: true
-                    },
-                    ...(beforeCtx.options || options)
-                });
+            const result = await this.prisma.update({
+                'where': {
+                    ...whereId,
+                    ...deleteFilter
+                },
+                'data': beforeCtx.data,
+                'select': this.select(),
+                ...(beforeCtx.options || options)
+            });
 
-                const afterCtx = await this._executeMiddleware('after', 'delete', { id: targetId, result, softDelete: true });
-                return afterCtx.result || result;
-            } catch (error) {
-                throw new ErrorResponse(403, "no_permission", { error });
-            }
+            const afterCtx = await this._executeMiddleware('after', 'delete', { id: targetId, result, softDelete: true });
+            return afterCtx.result || result;
         }
 
         const result = await this.prisma.delete({
             'where': {
-                [this.primaryKey]: targetId,
+                ...whereId,
                 ...deleteFilter
             },
-            'select': {
-                [this.primaryKey]: true
-            },
+            'select': this.select(),
             ...(beforeCtx.options || options)
         });
 
@@ -563,7 +741,7 @@ class Model {
      * @param {'asc'|'desc'} [sortOrder="asc"] - Sort direction
      * @returns {Promise<{data: Object[], meta: {take: number, skip: number, total: number}}>}
      */
-    async getMany(q = {}, include = "", limit = 25, offset = 0, sortBy = this.primaryKey, sortOrder = "asc") {
+    async getMany(q = {}, include = "", limit = 25, offset = 0, sortBy = this.defaultSortField, sortOrder = "asc") {
         return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder);
     }
 
@@ -615,10 +793,14 @@ class Model {
 
     /**
      * Create or update multiple records based on unique key
-     * Performs atomic batch operations with transaction support
+     * Performs atomic batch operations with optional transaction support
      * @param {Object[]} data - Array of record data
      * @param {string} [unique_key=this.primaryKey] - The unique field to match on
-     * @param {Object} [options={}] - Additional Prisma options
+     * @param {Object} [prismaOptions={}] - Prisma database options
+     * @param {Object} [options={}] - Operation options
+     * @param {boolean} [options.validateRelation=false] - Whether to validate relations
+     * @param {boolean} [options.transaction=true] - Whether to use a transaction (default true)
+     * @param {number} [options.timeout=30000] - Transaction timeout in milliseconds
      * @returns {Promise<Object>} Result with created, updated, and total counts
      * @example
      * const result = await contact.upsertMany([
@@ -626,9 +808,16 @@ class Model {
      *     { contact_id: '2', first_name: 'Jane' }
      * ], 'contact_id');
      * // { created: 1, updated: 1, total: 2 }
+     *
+     * @example
+     * // Without transaction and with relation validation
+     * const result = await contact.upsertMany(data, 'contact_id', {}, {
+     *     validateRelation: true,
+     *     transaction: false
+     * });
      */
-    async upsertMany(data, unique_key = this.primaryKey, options = {}) {
-        return await this._upsertMany(data, unique_key, options);
+    async upsertMany(data, unique_key = this.primaryKey, prismaOptions = {}, options = {}) {
+        return await this._upsertMany(data, unique_key, prismaOptions, options);
     }
 
     /**
@@ -759,17 +948,6 @@ class Model {
     }
 
     /**
-     * Removes relation data from a data object
-     * @param {*} data 
-     */
-    removeRelationData(data){
-        for(let i = 0; i < this.queryBuilder.relatedObjects.length; i++){
-            delete data[this.queryBuilder.relatedObjects[i].name];
-        }
-        return data;
-    }
-
-    /**
      * Set the model name and initialize the Prisma client delegate
      * @param {string} name - The Prisma model name
      */
@@ -777,6 +955,9 @@ class Model {
         this.name = name;
         this.prisma = prisma[name];
     }
+
+    /** @type {Object[]} Related objects configuration (deprecated, use DMMF) */
+    static relatedObjects = [];
 
     /** @type {typeof ErrorResponse} Error class for throwing API errors */
     static Error = ErrorResponse;
