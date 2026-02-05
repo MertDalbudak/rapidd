@@ -10,6 +10,7 @@ import fastifyStatic from '@fastify/static';
 import { ErrorResponse } from './core/errors';
 import { LanguageDict } from './core/language';
 import { disconnectAll } from './core/prisma';
+import { validateEnv } from './core/env';
 
 // Plugins
 import securityPlugin from './plugins/security';
@@ -39,6 +40,9 @@ LanguageDict.initialize(process.env.STRINGS_PATH, 'en-US');
 // ─── App Factory ────────────────────────────────────
 
 export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInstance> {
+    // Validate required environment variables
+    validateEnv();
+
     const app = Fastify({
         logger: NODE_ENV !== 'test',
         trustProxy: NODE_ENV === 'production',
@@ -135,8 +139,8 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
 
     const entries = fs.readdirSync(routePath, { withFileTypes: true })
         .sort((a, b) =>
-            (a.name === 'root.js' || a.name === 'root.ts' ? -2 : a.isDirectory() ? 0 : -1) -
-            (b.name === 'root.js' || b.name === 'root.ts' ? -2 : b.isDirectory() ? 0 : -1)
+            (a.name === 'index.js' || a.name === 'root.ts' ? -2 : a.isDirectory() ? 0 : -1) -
+            (b.name === 'index.js' || b.name === 'root.ts' ? -2 : b.isDirectory() ? 0 : -1)
         );
 
     for (const entry of entries) {
@@ -145,7 +149,7 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
         } else {
             const ext = path.extname(entry.name);
             if ((ext === '.js' || ext === '.ts') && entry.name[0] !== '_' && !entry.name.endsWith('.d.ts')) {
-                const isRoot = entry.name === 'root.js' || entry.name === 'root.ts';
+                const isRoot = entry.name === 'index.js' || entry.name === 'root.ts';
                 const route = isRoot
                     ? relativePath
                     : `${relativePath.length > 1 ? relativePath : ''}/${path.parse(entry.name).name}`;
@@ -166,5 +170,16 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
         }
     }
 }
+
+
+// Handle uncaught errors
+process.on('uncaughtException', (err) => {
+    console.error('[Uncaught Exception]', err);
+    process.exit(1);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error('[Unhandled Rejection] at:', promise, 'reason:', reason);
+});
 
 export default buildApp;

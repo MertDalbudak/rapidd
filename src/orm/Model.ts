@@ -47,7 +47,7 @@ class Model {
      * @param options - Configuration options
      */
     constructor(name: string, options?: ModelOptions) {
-        this.modelName = name;
+        this.name = name;
         this.queryBuilder = (this.constructor as typeof Model).QueryBuilder ?? new QueryBuilder(name);
         const aclConfig = getAcl();
         this.acl = aclConfig.model[name] || {};

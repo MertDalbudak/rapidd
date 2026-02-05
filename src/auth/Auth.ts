@@ -6,6 +6,32 @@ import { ErrorResponse } from '../core/errors';
 import { createStore, SessionStoreManager } from './stores';
 import type { RapiddUser, AuthOptions, ISessionStore } from '../types';
 
+/**
+ * Authentication class for user login, logout, and session management
+ *
+ * Provides JWT-based authentication with access/refresh token rotation,
+ * password hashing with bcrypt, and pluggable session storage (Redis/memory).
+ *
+ * @example
+ * // Create auth instance
+ * const auth = new Auth({
+ *     userModel: 'users',
+ *     identifierFields: ['email', 'username'],
+ *     session: { ttl: 86400 }
+ * });
+ *
+ * @example
+ * // Use in Fastify route
+ * fastify.post('/login', async (request, reply) => {
+ *     const result = await auth.login(request.body);
+ *     return result;
+ * });
+ *
+ * @example
+ * // Hash password before creating user
+ * const hashedPassword = await auth.hashPassword('mypassword');
+ * await prisma.users.create({ data: { email, password: hashedPassword } });
+ */
 export class Auth {
     options: Required<Pick<AuthOptions, 'passwordField' | 'saltRounds'>> & AuthOptions & {
         identifierFields: string[];
