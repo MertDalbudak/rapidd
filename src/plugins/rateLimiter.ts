@@ -198,6 +198,7 @@ const rateLimiterPlugin: FastifyPluginAsync<RateLimiterOptions> = async (fastify
     const limiter = getRateLimiter();
 
     fastify.addHook('onRequest', async (request, reply) => {
+        if (process.env.NODE_ENV !== 'production') return;
         await limiter.checkLimit(request, reply);
     });
 

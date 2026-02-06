@@ -244,10 +244,10 @@ export class Auth {
         }
 
         const User = this.getUserModel();
-        const search = this.options.identifierFields.reduce((acc: Record<string, string>, curr: string) => {
-            acc[curr] = identifier;
+        const search = this.options.identifierFields.reduce((acc: any, curr: string) => {
+            acc.OR.push({[curr]: identifier});
             return acc;
-        }, {});
+        }, {'OR': []});
 
         const user = await User.findFirst({
             where: search,
