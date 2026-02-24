@@ -2,7 +2,7 @@
 
 # Rapidd
 
-**Rapidd** is a TypeScript/Fastify framework that automatically generates production-ready REST APIs from your Prisma schema. It eliminates the need to manually write CRUD endpoints, route handlers, and data validation logic by intelligently building them from your database schema.
+**Rapidd** is a TypeScript/Fastify framework for rapid development of RESTful APIs with built-in ORM, authentication, authorization, and more. It generates models, routes, and access control rules from your Prisma schema so you can focus on business logic instead of boilerplate.
 
 ## Features
 
@@ -49,31 +49,7 @@
 npm install
 ```
 
-### 2. Set Up Your Database
-
-Pull your existing database schema or create a new one:
-
-```bash
-npx prisma db pull
-# or
-npx prisma migrate dev
-```
-
-### 3. Generate Prisma Client
-
-```bash
-npx prisma generate
-```
-
-### 4. Build Your API
-
-Run the Rapidd build command to generate models, routes, and ACL rules:
-
-```bash
-npx @rapidd/build
-```
-
-### 5. Configure Environment
+### 2. Configure Environment
 
 Create `.env` file (see `.env.example`):
 
@@ -95,7 +71,23 @@ ALLOWED_ORIGINS="localhost,example.com"
 COOKIE_SECRET="cookie-secret"
 ```
 
-### 6. Build & Start
+### 3. Set Up Your Database
+
+Pull your existing database schema or create a new one:
+
+```bash
+npx prisma db pull
+# or
+npx prisma migrate dev
+```
+
+### 4. Generate Models, Routes & ACL
+
+```bash
+npx rapidd build
+```
+
+### 5. Build & Start
 
 ```bash
 # Development (with hot reload)
