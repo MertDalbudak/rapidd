@@ -17,7 +17,7 @@
 - **JWT Authentication** - Built-in auth with access/refresh token rotation
 - **Rate Limiting** - Redis-backed with memory fallback
 - **Internationalization** - Multi-language support (10 languages included)
-- **Security Headers** - CSP, HSTS, X-Frame-Options out of the box
+- **Security Headers** - Strict CSP, HSTS, Permissions-Policy out of the box
 
 ## Table of Contents
 
@@ -586,9 +586,15 @@ import { ErrorResponse } from './src/core/errors';
 
 // Throw standardized errors
 throw new ErrorResponse(400, 'validation_error', { field: 'email' });
-throw new ErrorResponse(401, 'unauthorized');
-throw new ErrorResponse(403, 'forbidden');
 throw new ErrorResponse(404, 'not_found');
+
+// Or use factory methods
+throw ErrorResponse.badRequest('validation_error', { field: 'email' });
+throw ErrorResponse.unauthorized('invalid_credentials');
+throw ErrorResponse.forbidden('no_permission');
+throw ErrorResponse.notFound('record_not_found');
+throw ErrorResponse.conflict('duplicate_entry', { modelName: 'users' });
+throw ErrorResponse.tooManyRequests('rate_limit_exceeded');
 ```
 
 ### Prisma Clients
@@ -784,45 +790,46 @@ import { prisma } from '../src/core/prisma';
 rapidd/
 ├── src/
 │   ├── app.ts                 # Fastify app factory + route loader
+│   ├── index.ts               # Framework barrel exports
 │   ├── types.ts               # Shared TypeScript types
 │   ├── auth/                  # Authentication system
 │   │   ├── Auth.ts            # Auth class (login, register, etc.)
 │   │   └── stores/            # Session stores (Redis, memory)
 │   ├── config/
-│   │   └── acl.ts             # Access control rules
+│   │   └── acl.ts             # Access control rules (generated)
 │   ├── core/
 │   │   ├── prisma.ts          # Prisma clients, RLS, transactions
 │   │   ├── dmmf.ts            # Schema introspection (DMMF)
+│   │   ├── env.ts             # Environment validation & typed access
 │   │   ├── errors.ts          # ErrorResponse, Response classes
-│   │   └── language.ts        # Language dictionary
+│   │   ├── i18n.ts            # Language dictionary (LanguageDict)
+│   │   └── middleware.ts      # Model middleware registry
 │   ├── models/                # Generated model subclasses
-│   │   ├── Users.ts
-│   │   ├── Messages.ts
-│   │   └── ...
 │   ├── orm/
 │   │   ├── Model.ts           # Base ORM model class
 │   │   └── QueryBuilder.ts    # REST→Prisma query translation
-│   └── plugins/               # Fastify plugins
-│       ├── api.ts             # Response decorators
-│       ├── auth.ts            # Auth middleware
-│       ├── language.ts        # i18n plugin
-│       ├── rateLimiter.ts     # Rate limiting
-│       └── security.ts        # Security headers
+│   ├── plugins/               # Fastify plugins
+│   │   ├── auth.ts            # Auth middleware + routes
+│   │   ├── language.ts        # Accept-Language resolution
+│   │   ├── rateLimit.ts       # Rate limiting (Redis + memory)
+│   │   ├── response.ts        # Reply decorators + error handler
+│   │   ├── rls.ts             # Row-Level Security context
+│   │   ├── security.ts        # Security headers (CSP, HSTS)
+│   │   └── upload.ts          # Multipart file upload
+│   └── utils/
+│       ├── ApiClient.ts       # Config-driven HTTP client
+│       └── Mailer.ts          # SMTP email client
 ├── routes/
 │   └── api/
 │       └── v1/                # API v1 routes (auto-loaded)
-│           ├── root.ts        # Auth routes (register, login, etc.)
-│           ├── users.ts
-│           ├── messages.ts
-│           └── ...
 ├── config/
-│   ├── app.json               # App config (languages, etc.)
-│   └── rate-limit.json        # Rate limit config
+│   ├── app.json               # App config (languages, services, etc.)
+│   └── rate-limit.json        # Per-path rate limit rules
+├── locale/                    # i18n translation files (10 languages)
 ├── prisma/
 │   ├── schema.prisma          # Database schema
 │   └── client/                # Generated Prisma client
-├── strings/                   # i18n translation files
-├── public/                    # Static files
+├── public/static/             # Static assets (favicon, logo)
 ├── main.ts                    # Application entry point
 ├── tsconfig.json              # TypeScript config
 ├── dockerfile                 # Multi-stage Docker build
@@ -876,7 +883,7 @@ Override with `DATABASE_PROVIDER` environment variable if needed.
 ### Built-in Security Features
 
 - **Rate Limiting** - Configurable per-endpoint limits (Redis or in-memory)
-- **Security Headers** - CSP, X-Frame-Options, X-XSS-Protection, HSTS
+- **Security Headers** - Strict CSP, HSTS, Permissions-Policy
 - **Password Hashing** - bcrypt with configurable rounds
 - **JWT Authentication** - Signed tokens with expiration and refresh rotation
 - **RLS** - Database-level row security

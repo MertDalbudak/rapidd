@@ -1,4 +1,4 @@
-import { LanguageDict } from './language';
+import { LanguageDict } from './i18n';
 
 /**
  * Basic error response with HTTP status code
@@ -36,6 +36,30 @@ export class ErrorResponse extends ErrorBasicResponse {
             status_code: this.status_code,
             message: LanguageDict.get(this.message, this.data, language),
         };
+    }
+
+    static badRequest(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(400, key, data);
+    }
+
+    static unauthorized(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(401, key, data);
+    }
+
+    static forbidden(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(403, key, data);
+    }
+
+    static notFound(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(404, key, data);
+    }
+
+    static conflict(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(409, key, data);
+    }
+
+    static tooManyRequests(key: string, data: Record<string, unknown> | null = null): ErrorResponse {
+        return new ErrorResponse(429, key, data);
     }
 }
 

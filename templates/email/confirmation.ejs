@@ -1,0 +1,14 @@
+<p>Hi<%= locals.name ? ` ${name}` : '' %>,</p>
+
+<p>Please confirm your email address by clicking the button below:</p>
+
+<p style="text-align: center; margin: 32px 0;">
+    <a href="<%= confirmationUrl %>" class="btn">Confirm Email</a>
+</p>
+
+<p>Or copy and paste this link into your browser:</p>
+<p style="word-break: break-all; color: #666; font-size: 14px;"><%= confirmationUrl %></p>
+
+<% if (locals.expiresIn) { %>
+<p style="color: #999; font-size: 14px;">This link expires in <%= expiresIn %>.</p>
+<% } %>

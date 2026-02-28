@@ -14,7 +14,7 @@ const SUPPORTED_LANGUAGES: string[] = (() => {
     try {
         const fs = require('fs');
         const path = require('path');
-        const stringsPath = process.env.STRINGS_PATH || './strings';
+        const stringsPath = process.env.STRINGS_PATH || './locale';
         return fs.readdirSync(stringsPath).map((e: string) => path.parse(e).name);
     } catch {
         return ['en-US'];

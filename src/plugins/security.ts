@@ -4,23 +4,15 @@ import fp from 'fastify-plugin';
 const NODE_ENV = process.env.NODE_ENV;
 
 /**
- * Security headers plugin.
- * Sets standard security headers on every response.
+ * Security headers plugin for API-only servers.
+ * Sets strict security headers optimized for JSON API responses.
  */
 const securityPlugin: FastifyPluginAsync = async (fastify) => {
     fastify.addHook('onSend', async (_request, reply) => {
         reply.header('X-Content-Type-Options', 'nosniff');
-        reply.header('X-Frame-Options', 'DENY');
-        reply.header('X-XSS-Protection', '1; mode=block');
         reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-        reply.header(
-            'Content-Security-Policy',
-            "default-src 'self'; " +
-            "script-src 'self' 'unsafe-inline'; " +
-            "style-src 'self' 'unsafe-inline'; " +
-            "img-src 'self' data:; " +
-            "font-src 'self'"
-        );
+        reply.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
         if (NODE_ENV === 'production') {
             reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');

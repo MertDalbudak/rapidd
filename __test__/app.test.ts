@@ -29,7 +29,7 @@ jest.mock('../src/core/dmmf', () => ({
 }));
 
 // Must mock LanguageDict before app imports it
-jest.mock('../src/core/language', () => ({
+jest.mock('../src/core/i18n', () => ({
     LanguageDict: {
         initialize: jest.fn(),
         get: jest.fn((key: string) => key),
@@ -249,8 +249,8 @@ describe('Security headers', () => {
         });
 
         expect(response.headers['x-content-type-options']).toBe('nosniff');
-        expect(response.headers['x-frame-options']).toBe('DENY');
-        expect(response.headers['x-xss-protection']).toBe('1; mode=block');
+        expect(response.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'");
+        expect(response.headers['permissions-policy']).toBe('camera=(), microphone=(), geolocation=()');
         await app.close();
     });
 });

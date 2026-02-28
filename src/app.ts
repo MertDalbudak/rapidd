@@ -8,14 +8,14 @@ import fastifyFormbody from '@fastify/formbody';
 import fastifyStatic from '@fastify/static';
 
 import { ErrorResponse } from './core/errors';
-import { LanguageDict } from './core/language';
+import { LanguageDict } from './core/i18n';
 import { disconnectAll } from './core/prisma';
 import { validateEnv } from './core/env';
 
 // Plugins
 import securityPlugin from './plugins/security';
 import languagePlugin from './plugins/language';
-import apiPlugin from './plugins/api';
+import responsePlugin from './plugins/response';
 import authPlugin from './plugins/auth';
 import rlsPlugin from './plugins/rls';
 
@@ -27,7 +27,7 @@ import type { RapiddOptions } from './types';
 const ROOT = process.env.ROOT || process.cwd();
 process.env.ROOT = ROOT;
 process.env.ROUTES_PATH = process.env.ROUTES_PATH || path.join(ROOT, 'dist', 'routes');
-process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'strings');
+process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'locale');
 process.env.PUBLIC_PATH = process.env.PUBLIC_PATH || path.join(ROOT, 'public');
 process.env.PUBLIC_STATIC = process.env.PUBLIC_STATIC || path.join(process.env.PUBLIC_PATH!, 'static');
 
@@ -98,7 +98,7 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     await app.register(languagePlugin);
 
     // ── API Decorators & Error Handler ───────────────
-    await app.register(apiPlugin);
+    await app.register(responsePlugin);
 
     // ── Authentication ──────────────────────────────
     await app.register(authPlugin);
@@ -108,8 +108,8 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
 
     // ── Rate Limiting (optional) ────────────────────
     if (options.rateLimit !== false && process.env.RATE_LIMIT_ENABLED !== 'false') {
-        const rateLimiterPlugin = (await import('./plugins/rateLimiter')).default;
-        await app.register(rateLimiterPlugin);
+        const rateLimitPlugin = (await import('./plugins/rateLimit')).default;
+        await app.register(rateLimitPlugin);
     }
 
     // ── Route Loading ───────────────────────────────

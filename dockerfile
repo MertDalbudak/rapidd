@@ -44,10 +44,9 @@ COPY --from=builder --chown=rapidd:nodejs /app/dist ./dist
 
 # Runtime assets
 COPY --chown=rapidd:nodejs config ./config
-COPY --chown=rapidd:nodejs strings ./strings
+COPY --chown=rapidd:nodejs locale ./locale
+COPY --chown=rapidd:nodejs templates ./templates
 COPY --chown=rapidd:nodejs public ./public
-
-RUN mkdir -p logs && chown -R rapidd:nodejs logs
 
 RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 

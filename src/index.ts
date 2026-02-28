@@ -56,11 +56,13 @@ export {
 
 // ── Plugins ──────────────────────────────────────────────────────────────────
 export { uploadPlugin } from './plugins/upload';
-export { default as apiPlugin } from './plugins/api';
+export { default as responsePlugin } from './plugins/response';
+export { default as apiPlugin } from './plugins/response'; // backward compat alias
 export { default as authPlugin, Auth as AuthPlugin } from './plugins/auth';
 export { default as languagePlugin } from './plugins/language';
 export { default as securityPlugin } from './plugins/security';
-export { default as rateLimiterPlugin, RateLimiter } from './plugins/rateLimiter';
+export { default as rateLimitPlugin, RateLimiter } from './plugins/rateLimit';
+export { default as rateLimiterPlugin } from './plugins/rateLimit'; // backward compat alias
 export { default as rlsPlugin } from './plugins/rls';
 
 // ── App Builder ──────────────────────────────────────────────────────────────

@@ -1,7 +1,7 @@
 import { ErrorBasicResponse, ErrorResponse, Response } from '../../src/core/errors';
 
 // Mock LanguageDict
-jest.mock('../../src/core/language', () => ({
+jest.mock('../../src/core/i18n', () => ({
     LanguageDict: {
         get: jest.fn((key: string, data: any, _language: string) => {
             if (key === 'not_found') return 'Resource not found';

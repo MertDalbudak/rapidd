@@ -1,4 +1,6 @@
 import nodemailer from 'nodemailer';
+import ejs from 'ejs';
+import fs from 'fs';
 import path from 'path';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -99,6 +101,41 @@ function createTransporter(config: EmailConfig) {
     });
 }
 
+// ── Template Rendering ──────────────────────────────────────────────────────
+
+const TEMPLATES_PATH = path.join(process.cwd(), 'templates', 'email');
+const templateCache = new Map<string, string>();
+
+function loadTemplate(name: string): string {
+    if (templateCache.has(name)) {
+        return templateCache.get(name)!;
+    }
+
+    const filePath = path.join(TEMPLATES_PATH, `${name}.ejs`);
+    if (!fs.existsSync(filePath)) {
+        throw new Error(`Email template '${name}' not found at ${filePath}`);
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    templateCache.set(name, content);
+    return content;
+}
+
+function renderTemplate(name: string, data: Record<string, unknown> = {}): string {
+    const template = loadTemplate(name);
+    const body = ejs.render(template, data, { filename: path.join(TEMPLATES_PATH, `${name}.ejs`) });
+
+    // Wrap in layout if it exists
+    try {
+        const layout = loadTemplate('layout');
+        return ejs.render(layout, { ...data, body }, { filename: path.join(TEMPLATES_PATH, 'layout.ejs') });
+    } catch {
+        return body;
+    }
+}
+
+// ── Validation ──────────────────────────────────────────────────────────────
+
 function validateEmail(email: string): boolean {
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
@@ -149,11 +186,16 @@ function validateOptions(options: EmailOptions): void {
  * });
  *
  * @example
- * // Batch send
- * const results = await Mailer.sendBatch('marketing', [
- *     { to: 'user1@example.com', subject: 'Hi', html: '<p>Hello 1</p>' },
- *     { to: 'user2@example.com', subject: 'Hi', html: '<p>Hello 2</p>' }
- * ]);
+ * // Render EJS template and send
+ * await Mailer.sendTemplate('default', 'confirmation', {
+ *     to: 'user@example.com',
+ *     subject: 'Confirm your email',
+ *     data: { name: 'John', confirmationUrl: 'https://...' }
+ * });
+ *
+ * @example
+ * // Render template without sending
+ * const html = Mailer.render('resetPassword', { name: 'John', resetUrl: '...' });
  */
 export const Mailer = {
     /**
@@ -231,6 +273,33 @@ export const Mailer = {
         } catch {
             return false;
         }
+    },
+
+    /**
+     * Render an EJS email template from templates/email/
+     */
+    render(template: string, data: Record<string, unknown> = {}): string {
+        return renderTemplate(template, data);
+    },
+
+    /**
+     * Render an EJS template and send it as an email
+     */
+    async sendTemplate(
+        configKey: string,
+        template: string,
+        options: { to: string | string[]; subject: string; data?: Record<string, unknown> } & Omit<EmailOptions, 'html'>
+    ): Promise<EmailResult> {
+        const { data = {}, ...emailOptions } = options;
+        const html = renderTemplate(template, { ...data, subject: options.subject });
+        return this.send(configKey, { ...emailOptions, html });
+    },
+
+    /**
+     * Clear the template cache (e.g. after editing templates in dev)
+     */
+    clearTemplateCache(): void {
+        templateCache.clear();
     },
 
     /**
