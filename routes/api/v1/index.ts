@@ -1,6 +1,5 @@
 import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import { Auth } from '../../../src/auth/Auth';
-import { authPrisma } from '../../../src/core/prisma';
 import { ErrorResponse } from '../../../src/core/errors';
 
 /**
@@ -17,7 +16,7 @@ const rootRoutes: FastifyPluginAsync = async (fastify) => {
      * {
      *   "email": "user@example.com",
      *   "password": "securePassword123",
-     *   "name": "John Doe"
+     *   ...additionalFields
      * }
      */
     fastify.post('/register', async (request: FastifyRequest, reply: FastifyReply) => {
@@ -28,8 +27,11 @@ const rootRoutes: FastifyPluginAsync = async (fastify) => {
                 return reply.sendError(400, 'email_and_password_required');
             }
 
+            const User = auth.getUserModel();
+            const passwordField = auth.options.passwordField;
+
             // Check if user exists
-            const existing = await authPrisma.users.findUnique({
+            const existing = await User.findUnique({
                 where: { email: email as string },
             }).catch(() => null);
 
@@ -39,10 +41,10 @@ const rootRoutes: FastifyPluginAsync = async (fastify) => {
 
             // Create user
             const hashedPassword = await auth.hashPassword(password as string);
-            const user = await authPrisma.users.create({
+            const user = await User.create({
                 data: {
                     email: email as string,
-                    password: hashedPassword,
+                    [passwordField]: hashedPassword,
                     ...userData,
                 },
             });

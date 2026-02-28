@@ -48,7 +48,7 @@ export class Auth {
             userSelect: options.userSelect || null,
             userInclude: options.userInclude || null,
             identifierFields: options.identifierFields || ['email'],
-            passwordField: options.passwordField || 'password',
+            passwordField: options.passwordField || process.env.DB_USER_PASSWORD_FIELD || 'password',
             session: {
                 ttl: parseInt(process.env.AUTH_SESSION_TTL || '86400', 10),
                 ...options.session,
