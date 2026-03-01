@@ -48,8 +48,6 @@ export interface EnvConfig {
     // RLS
     RLS_ENABLED?: boolean;
     RLS_NAMESPACE: string;
-    RLS_USER_ID: string;
-    RLS_USER_ROLE: string;
 
     // Proxy
     TRUST_PROXY?: boolean;
@@ -78,9 +76,7 @@ const DEFAULTS: Partial<Record<keyof EnvConfig, string | number | boolean>> = {
     REDIS_PORT: 6379,
     REDIS_DB_RATE_LIMIT: 0,
     REDIS_DB_AUTH: 1,
-    RLS_NAMESPACE: 'app',
-    RLS_USER_ID: 'current_user_id',
-    RLS_USER_ROLE: 'current_user_role'
+    RLS_NAMESPACE: 'app'
 };
 
 /**

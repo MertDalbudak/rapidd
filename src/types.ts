@@ -163,15 +163,12 @@ export interface RelationConfig {
 // PRISMA / RLS
 // =====================================================
 
-export interface RLSContext {
-    userId: string | number;
-    userRole: string;
-}
+export type RLSVariables = Record<string, string | number | null>;
+
+export type RlsContextFn = (request: any) => RLSVariables | Promise<RLSVariables>;
 
 export interface RLSConfig {
     namespace: string;
-    userId: string;
-    userRole: string;
 }
 
 export type DatabaseProvider = 'postgresql' | 'mysql';

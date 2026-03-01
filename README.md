@@ -29,7 +29,7 @@ Rapidd generates a fully-featured REST API from your database schema — then ge
 ## Quick Start
 
 ```bash
-npm install @rapidd/core @rapidd/build
+npm install @rapidd/build
 ```
 
 ```env
@@ -158,15 +158,20 @@ Supports `create`, `update`, `upsert`, `upsertMany`, `delete`, `get`, `getMany`,
 
 ## Row-Level Security
 
-Auto-enabled for PostgreSQL. Every query runs inside a transaction with the authenticated user's context injected as session variables.
+Auto-enabled for PostgreSQL. Define which variables to inject in `src/config/rls.ts`:
 
-```sql
-CREATE POLICY user_isolation ON posts
-    USING (author_id = current_setting('app.current_user_id')::int);
-ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+```typescript
+// src/config/rls.ts
+const rlsContext: RlsContextFn = (request) => ({
+    current_user_id: request.user?.id ?? null,
+    current_tenant_id: request.headers['x-tenant-id'] ?? null,
+});
 ```
 
-RLS provides database-enforced access control that can't be bypassed by application bugs. It works alongside ACL — use ACL for application-level rules, RLS for database-level guarantees.
+```sql
+CREATE POLICY tenant_isolation ON orders
+    USING (tenant_id = current_setting('app.current_tenant_id')::int);
+```
 
 > 📖 **[Row-Level Security wiki →](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS))** — policy examples, RLS vs ACL comparison
 

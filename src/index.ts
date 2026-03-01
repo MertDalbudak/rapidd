@@ -23,6 +23,7 @@ export {
     getAcl,
     setRLSVariables,
     resetRLSVariables,
+    requestContext,
     dbProvider,
     rlsEnabled
 } from './core/prisma';
@@ -82,7 +83,9 @@ export type {
     AclConfig,
     MiddlewareContext,
     MiddlewareHook,
-    MiddlewareOperation
+    MiddlewareOperation,
+    RLSVariables,
+    RlsContextFn
 } from './types';
 
 export type {

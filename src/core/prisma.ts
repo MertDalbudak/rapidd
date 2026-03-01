@@ -1,13 +1,13 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import path from 'path';
-import type { RLSContext, RLSConfig, DatabaseProvider, AdapterResult, AclConfig } from '../types';
+import type { RLSVariables, DatabaseProvider, AdapterResult, AclConfig } from '../types';
 import * as dmmf from './dmmf';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'client'));
 
-/** Request context storage for async operations */
-export const requestContext = new AsyncLocalStorage<RLSContext>();
+/** Request context storage for RLS variables across async operations */
+export const requestContext = new AsyncLocalStorage<{ variables: RLSVariables }>();
 
 /** Validates that an RLS identifier contains only safe characters (letters, digits, underscores) */
 const IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
@@ -18,12 +18,8 @@ function validateIdentifier(value: string, name: string): string {
     return value;
 }
 
-/** RLS configuration from environment variables */
-const RLS_CONFIG: RLSConfig = {
-    namespace: validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE'),
-    userId: validateIdentifier(process.env.RLS_USER_ID || 'current_user_id', 'RLS_USER_ID'),
-    userRole: validateIdentifier(process.env.RLS_USER_ROLE || 'current_user_role', 'RLS_USER_ROLE'),
-};
+/** RLS namespace for SQL session variable prefix */
+const RLS_NAMESPACE = validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE');
 
 // =====================================================
 // DATABASE ADAPTER FACTORY
@@ -102,29 +98,29 @@ function sanitizeRLSValue(value: string | number | null | undefined): string {
     return String(value).replace(/'/g, "''");
 }
 
-export async function setRLSVariables(tx: any, userId: string | number, userRole: string): Promise<void> {
-    const { namespace, userId: userIdVar, userRole: userRoleVar } = RLS_CONFIG;
-    const safeUserId = sanitizeRLSValue(userId);
-    const safeUserRole = sanitizeRLSValue(userRole);
+export async function setRLSVariables(tx: any, variables: RLSVariables): Promise<void> {
+    for (const [name, value] of Object.entries(variables)) {
+        if (value === null || value === undefined) continue;
+        const safeName = validateIdentifier(name, name);
+        const safeValue = sanitizeRLSValue(value);
 
-    if (dbProvider === 'mysql') {
-        await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = '${safeUserId}'`);
-        await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = '${safeUserRole}'`);
-    } else {
-        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userIdVar} = '${safeUserId}'`);
-        await tx.$executeRawUnsafe(`SET LOCAL ${namespace}.${userRoleVar} = '${safeUserRole}'`);
+        if (dbProvider === 'mysql') {
+            await tx.$executeRawUnsafe(`SET @${RLS_NAMESPACE}_${safeName} = '${safeValue}'`);
+        } else {
+            await tx.$executeRawUnsafe(`SET LOCAL ${RLS_NAMESPACE}.${safeName} = '${safeValue}'`);
+        }
     }
 }
 
-export async function resetRLSVariables(tx: any): Promise<void> {
-    const { namespace, userId: userIdVar, userRole: userRoleVar } = RLS_CONFIG;
+export async function resetRLSVariables(tx: any, variables: RLSVariables): Promise<void> {
     try {
-        if (dbProvider === 'mysql') {
-            await tx.$executeRawUnsafe(`SET @${namespace}_${userIdVar} = NULL`);
-            await tx.$executeRawUnsafe(`SET @${namespace}_${userRoleVar} = NULL`);
-        } else {
-            await tx.$executeRawUnsafe(`RESET ${namespace}.${userIdVar}`);
-            await tx.$executeRawUnsafe(`RESET ${namespace}.${userRoleVar}`);
+        for (const name of Object.keys(variables)) {
+            const safeName = validateIdentifier(name, name);
+            if (dbProvider === 'mysql') {
+                await tx.$executeRawUnsafe(`SET @${RLS_NAMESPACE}_${safeName} = NULL`);
+            } else {
+                await tx.$executeRawUnsafe(`RESET ${RLS_NAMESPACE}.${safeName}`);
+            }
         }
     } catch {
         // Ignore errors on reset
@@ -141,22 +137,21 @@ export const prisma = basePrisma.$extends({
             if (!rlsEnabled) return query(args);
 
             const context = requestContext.getStore();
+            const variables = context?.variables;
 
-            if (!context?.userId || !context?.userRole) {
+            if (!variables || Object.keys(variables).length === 0) {
                 return query(args);
             }
 
-            const { userId, userRole } = context;
-
             if (operation === '$transaction') {
                 return basePrisma.$transaction(async (tx: any) => {
-                    await setRLSVariables(tx, userId, userRole);
+                    await setRLSVariables(tx, variables);
                     return query(args);
                 });
             }
 
             return basePrisma.$transaction(async (tx: any) => {
-                await setRLSVariables(tx, userId, userRole);
+                await setRLSVariables(tx, variables);
 
                 if (model) {
                     return tx[model][operation](args);
@@ -179,8 +174,9 @@ export async function prismaTransaction(
     const context = requestContext.getStore();
 
     return basePrisma.$transaction(async (tx: any) => {
-        if (rlsEnabled && context?.userId && context?.userRole) {
-            await setRLSVariables(tx, context.userId, context.userRole);
+        const variables = context?.variables;
+        if (rlsEnabled && variables && Object.keys(variables).length > 0) {
+            await setRLSVariables(tx, variables);
         }
 
         if (Array.isArray(callback)) {
@@ -188,14 +184,6 @@ export async function prismaTransaction(
         }
         return await callback(tx);
     }, options);
-}
-
-// =====================================================
-// CONTEXT HELPERS
-// =====================================================
-
-export function getRLSConfig(): RLSConfig {
-    return RLS_CONFIG;
 }
 
 // =====================================================
