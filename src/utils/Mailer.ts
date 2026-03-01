@@ -2,6 +2,7 @@ import nodemailer from 'nodemailer';
 import ejs from 'ejs';
 import fs from 'fs';
 import path from 'path';
+import { LanguageDict } from '../core/i18n';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -138,15 +139,23 @@ function loadLayout(name: string): string | null {
     return content;
 }
 
-function renderTemplate(name: string, data: Record<string, unknown> = {}, layout: string | false = 'email'): string {
+function renderTemplate(name: string, data: Record<string, unknown> = {}, layout: string | false = 'email', language?: string): string {
     const template = loadTemplate(name);
-    const body = ejs.render(template, data, { filename: path.join(TEMPLATES_PATH, `${name}.ejs`) });
+
+    // Inject __() translation helper into template data
+    const lang = language || (data.language as string) || undefined;
+    const templateData = {
+        ...data,
+        __: (key: string, params?: Record<string, unknown>) => LanguageDict.get(key, params || null, lang || null),
+    };
+
+    const body = ejs.render(template, templateData, { filename: path.join(TEMPLATES_PATH, `${name}.ejs`) });
 
     // Wrap in layout (default: 'email', pass false to skip)
     if (layout !== false) {
         const layoutContent = loadLayout(layout);
         if (layoutContent) {
-            return ejs.render(layoutContent, { ...data, body }, { filename: path.join(LAYOUTS_PATH, `${layout}.ejs`) });
+            return ejs.render(layoutContent, { ...templateData, body }, { filename: path.join(LAYOUTS_PATH, `${layout}.ejs`) });
         }
     }
 
@@ -266,7 +275,7 @@ export const Mailer = {
             emails.map(options => this.send(configKey, options))
         );
 
-        return results.map((result, index) => {
+        return results.map((result) => {
             if (result.status === 'fulfilled') {
                 return result.value;
             }
@@ -296,23 +305,27 @@ export const Mailer = {
 
     /**
      * Render an EJS email template from templates/email/
+     * Templates have access to __() for translations: <%= __('signIn') %>
      * @param layout - Layout name from templates/layouts/ (default: 'email'), or false to skip layout
+     * @param language - Language code for translations (e.g. 'de_DE'), defaults to 'en_US'
      */
-    render(template: string, data: Record<string, unknown> = {}, layout: string | false = 'email'): string {
-        return renderTemplate(template, data, layout);
+    render(template: string, data: Record<string, unknown> = {}, layout: string | false = 'email', language?: string): string {
+        return renderTemplate(template, data, layout, language);
     },
 
     /**
      * Render an EJS template and send it as an email
+     * Templates have access to __() for translations: <%= __('signIn') %>
      * @param options.layout - Layout name from templates/layouts/ (default: 'email'), or false to skip layout
+     * @param options.language - Language code for translations (e.g. 'de_DE'), defaults to 'en_US'
      */
     async sendTemplate(
         configKey: string,
         template: string,
-        options: { to: string | string[]; subject: string; data?: Record<string, unknown>; layout?: string | false } & Omit<EmailOptions, 'html'>
+        options: { to: string | string[]; subject: string; data?: Record<string, unknown>; layout?: string | false; language?: string } & Omit<EmailOptions, 'html'>
     ): Promise<EmailResult> {
-        const { data = {}, layout = 'email', ...emailOptions } = options;
-        const html = renderTemplate(template, { ...data, subject: options.subject }, layout);
+        const { data = {}, layout = 'email', language, ...emailOptions } = options;
+        const html = renderTemplate(template, { ...data, subject: options.subject }, layout, language);
         return this.send(configKey, { ...emailOptions, html });
     },
 
