@@ -104,6 +104,7 @@ function createTransporter(config: EmailConfig) {
 // ── Template Rendering ──────────────────────────────────────────────────────
 
 const TEMPLATES_PATH = path.join(process.cwd(), 'templates', 'email');
+const LAYOUTS_PATH = path.join(process.cwd(), 'templates', 'layouts');
 const templateCache = new Map<string, string>();
 
 function loadTemplate(name: string): string {
@@ -121,17 +122,35 @@ function loadTemplate(name: string): string {
     return content;
 }
 
-function renderTemplate(name: string, data: Record<string, unknown> = {}): string {
+function loadLayout(name: string): string | null {
+    const cacheKey = `layout:${name}`;
+    if (templateCache.has(cacheKey)) {
+        return templateCache.get(cacheKey)!;
+    }
+
+    const filePath = path.join(LAYOUTS_PATH, `${name}.ejs`);
+    if (!fs.existsSync(filePath)) {
+        return null;
+    }
+
+    const content = fs.readFileSync(filePath, 'utf-8');
+    templateCache.set(cacheKey, content);
+    return content;
+}
+
+function renderTemplate(name: string, data: Record<string, unknown> = {}, layout: string | false = 'email'): string {
     const template = loadTemplate(name);
     const body = ejs.render(template, data, { filename: path.join(TEMPLATES_PATH, `${name}.ejs`) });
 
-    // Wrap in layout if it exists
-    try {
-        const layout = loadTemplate('layout');
-        return ejs.render(layout, { ...data, body }, { filename: path.join(TEMPLATES_PATH, 'layout.ejs') });
-    } catch {
-        return body;
+    // Wrap in layout (default: 'email', pass false to skip)
+    if (layout !== false) {
+        const layoutContent = loadLayout(layout);
+        if (layoutContent) {
+            return ejs.render(layoutContent, { ...data, body }, { filename: path.join(LAYOUTS_PATH, `${layout}.ejs`) });
+        }
     }
+
+    return body;
 }
 
 // ── Validation ──────────────────────────────────────────────────────────────
@@ -277,21 +296,23 @@ export const Mailer = {
 
     /**
      * Render an EJS email template from templates/email/
+     * @param layout - Layout name from templates/layouts/ (default: 'email'), or false to skip layout
      */
-    render(template: string, data: Record<string, unknown> = {}): string {
-        return renderTemplate(template, data);
+    render(template: string, data: Record<string, unknown> = {}, layout: string | false = 'email'): string {
+        return renderTemplate(template, data, layout);
     },
 
     /**
      * Render an EJS template and send it as an email
+     * @param options.layout - Layout name from templates/layouts/ (default: 'email'), or false to skip layout
      */
     async sendTemplate(
         configKey: string,
         template: string,
-        options: { to: string | string[]; subject: string; data?: Record<string, unknown> } & Omit<EmailOptions, 'html'>
+        options: { to: string | string[]; subject: string; data?: Record<string, unknown>; layout?: string | false } & Omit<EmailOptions, 'html'>
     ): Promise<EmailResult> {
-        const { data = {}, ...emailOptions } = options;
-        const html = renderTemplate(template, { ...data, subject: options.subject });
+        const { data = {}, layout = 'email', ...emailOptions } = options;
+        const html = renderTemplate(template, { ...data, subject: options.subject }, layout);
         return this.send(configKey, { ...emailOptions, html });
     },
 

@@ -1,0 +1,11 @@
+__test__/
+.github/
+.claude/
+.env
+.env.example
+tsconfig.test.json
+*.test.ts
+*.test.js
+.gitignore
+docker-compose*.yml
+dist/

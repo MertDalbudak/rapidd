@@ -1,0 +1,17 @@
+<p>Hi <%= name %>,</p>
+
+<p>Welcome to <strong><%= appName %></strong>. Your account has been created successfully.</p>
+
+<% if (locals.activationLink) { %>
+<p>Please verify your email address to get started:</p>
+<p style="text-align: center; margin: 32px 0;">
+    <a href="<%= activationLink %>" class="btn">Verify Email</a>
+</p>
+<% } %>
+
+<p>If you have any questions, feel free to reach out to our support team.</p>
+
+<p>
+    Best regards,<br>
+    The <%= appName %> Team
+</p>

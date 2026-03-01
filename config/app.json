@@ -83,15 +83,15 @@
         }
     },
     "languages": [
-        "en-US",
-        "es-ES",
-        "fr-FR",
-        "it-IT",
-        "ar-SA",
-        "pt-BR",
-        "ru-RU",
-        "de-DE",
-        "ja-JP",
-        "tr-TR" 
+        "en_US",
+        "es_ES",
+        "fr_FR",
+        "it_IT",
+        "ar_SA",
+        "pt_BR",
+        "ru_RU",
+        "de_DE",
+        "ja_JP",
+        "tr_TR" 
     ]
 }

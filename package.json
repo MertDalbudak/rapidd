@@ -1,8 +1,31 @@
 {
-  "name": "rapidd",
-  "version": "2.0.0",
-  "description": "A TypeScript/Fastify framework for rapid development of RESTful APIs with built-in ORM, authentication, authorization, and more.",
+  "name": "@rapidd/core",
+  "version": "2.1.0",
+  "description": "Code-first REST API framework for TypeScript. Database in, API out.",
   "main": "dist/main.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MertDalbudak/rapidd.git"
+  },
+  "homepage": "https://github.com/MertDalbudak/rapidd#readme",
+  "bugs": {
+    "url": "https://github.com/MertDalbudak/rapidd/issues"
+  },
+  "keywords": [
+    "rest-api",
+    "typescript",
+    "fastify",
+    "prisma",
+    "orm",
+    "authentication",
+    "acl",
+    "rls",
+    "crud",
+    "api-framework",
+    "code-generation",
+    "postgresql",
+    "mysql"
+  ],
   "scripts": {
     "start": "node dist/main.js",
     "dev": "tsx watch main.ts",
