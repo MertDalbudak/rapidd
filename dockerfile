@@ -1,5 +1,5 @@
 # Stage 1: Install all dependencies and build TypeScript
-FROM node:24-alpine AS builder
+FROM node:current-alpine AS builder
 
 WORKDIR /app
 
@@ -14,7 +14,7 @@ COPY routes ./routes
 RUN npx tsc
 
 # Stage 2: Production dependencies + Prisma client
-FROM node:24-alpine AS deps
+FROM node:current-alpine AS deps
 
 WORKDIR /app
 
@@ -44,7 +44,7 @@ COPY --from=builder --chown=rapidd:nodejs /app/dist ./dist
 
 # Runtime assets
 COPY --chown=rapidd:nodejs config ./config
-COPY --chown=rapidd:nodejs locale ./locale
+COPY --chown=rapidd:nodejs locales ./locales
 COPY --chown=rapidd:nodejs templates ./templates
 COPY --chown=rapidd:nodejs public ./public
 
