@@ -136,12 +136,18 @@ export class Auth {
             }
         }
 
-        // Auto-generate JWT secrets if not set
+        // JWT secret handling: require explicit secrets in production
         if (!this.options.jwt.secret) {
+            if (process.env.NODE_ENV === 'production') {
+                throw new Error('[Auth] JWT_SECRET is required in production. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+            }
             this.options.jwt.secret = crypto.randomBytes(32).toString('hex');
             console.warn('[Auth] No JWT_SECRET set, using auto-generated secret (sessions won\'t persist across restarts)');
         }
         if (!this.options.jwt.refreshSecret) {
+            if (process.env.NODE_ENV === 'production') {
+                throw new Error('[Auth] JWT_REFRESH_SECRET is required in production. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
+            }
             this.options.jwt.refreshSecret = crypto.randomBytes(32).toString('hex');
         }
     }

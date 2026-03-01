@@ -8,3 +8,4 @@ compose.yml
 /data/api_credentials.json
 /prisma/client
 /dist
+/wiki
