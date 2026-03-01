@@ -230,7 +230,8 @@ class Model {
         offset: number = 0,
         sortBy: string = this.defaultSortField,
         sortOrder: string = "asc",
-        options: Record<string, any> = {}
+        options: Record<string, any> = {},
+        fields: string | null = null,
     ): Promise<GetManyResult> => {
         const take = this.take(Number(limit));
         const skip = this.skip(Number(offset));
@@ -249,21 +250,28 @@ class Model {
         }
 
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'getMany', { query: q, include, take, skip, sortBy, sortOrder, options });
+        const beforeCtx = await this._executeMiddleware('before', 'getMany', { query: q, include, take, skip, sortBy, sortOrder, options, fields });
 
         if (beforeCtx.abort) {
             return (beforeCtx.result as GetManyResult) || { data: [], meta: { take, skip, total: 0 } };
         }
 
+        // Build field selection (handles select vs include+omit based on fields param)
+        // Use beforeCtx.fields directly since it's always initialized from the context params
+        const fieldSelection = this.queryBuilder.buildFieldSelection(
+            beforeCtx.fields as string | null,
+            beforeCtx.include || include,
+            this.user
+        );
+
         // Query the database using Prisma with filters, pagination, and limits
         const [data, total] = await prismaTransaction([
             (tx: any) => tx[this.name].findMany({
                 'where': this.filter(beforeCtx.query || q),
-                'include': this.include(beforeCtx.include || include),
+                ...fieldSelection,
                 'take': beforeCtx.take || take,
                 'skip': beforeCtx.skip || skip,
                 'orderBy': this.sort(beforeCtx.sortBy || sortBy, beforeCtx.sortOrder || sortOrder),
-                'omit': this._omit(),
                 ...(beforeCtx.options || options)
             }),
             (tx: any) => tx[this.name].count({
@@ -282,9 +290,9 @@ class Model {
      * Internal method to fetch a single record by primary key
      * Performs parallel permission check to distinguish 404 vs 403 errors
      */
-    _get = async (id: string | number | Record<string, any>, include: string | Record<string, any> = '', options: Record<string, any> = {}): Promise<any> => {
+    _get = async (id: string | number | Record<string, any>, include: string | Record<string, any> = '', options: Record<string, any> = {}, fields: string | null = null): Promise<any> => {
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'get', { id, include, options });
+        const beforeCtx = await this._executeMiddleware('before', 'get', { id, include, options, fields });
 
         if (beforeCtx.abort) {
             return beforeCtx.result;
@@ -294,13 +302,26 @@ class Model {
         const targetId = beforeCtx.id || id;
         const whereId = this.buildWhereId(targetId);
 
+        // Build field selection (handles select vs include+omit based on fields param)
+        // Use beforeCtx.fields directly since it's always initialized from the context params
+        const effectiveFields = beforeCtx.fields as string | null;
+        const effectiveInclude = beforeCtx.include || include;
+
+        let dataQuery: Record<string, any>;
+        if (effectiveFields) {
+            const fieldSelection = this.queryBuilder.buildFieldSelection(effectiveFields, effectiveInclude, this.user);
+            dataQuery = { 'where': whereId, ...fieldSelection, ..._options };
+        } else {
+            dataQuery = {
+                'where': whereId,
+                'include': this.include(effectiveInclude),
+                'omit': { ...this._omit(), ...omit },
+                ..._options
+            };
+        }
+
         // Parallel queries: one for data, one for permission check
-        const _response = this.prisma.findUnique({
-            'where': whereId,
-            'include': this.include(beforeCtx.include || include),
-            'omit': { ...this._omit(), ...omit },
-            ..._options
-        });
+        const _response = this.prisma.findUnique(dataQuery);
 
         const _checkPermission = this.prisma.findUnique({
             'where': {
@@ -691,16 +712,17 @@ class Model {
         limit: number = 25,
         offset: number = 0,
         sortBy: string = this.defaultSortField,
-        sortOrder: string = "asc"
+        sortOrder: string = "asc",
+        fields: string | null = null
     ): Promise<GetManyResult> {
-        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder);
+        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder, {}, fields);
     }
 
     /**
      * Fetch a single record by primary key
      */
-    async get(id: string | number | Record<string, any>, include?: string | Record<string, any>, options: Record<string, any> = {}): Promise<any> {
-        return await this._get(id, include, options);
+    async get(id: string | number | Record<string, any>, include?: string | Record<string, any>, options: Record<string, any> = {}, fields: string | null = null): Promise<any> {
+        return await this._get(id, include, options, fields);
     }
 
     /**

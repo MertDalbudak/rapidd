@@ -80,6 +80,7 @@ export interface MiddlewareContext {
     sortBy?: string;
     sortOrder?: string;
     options?: Record<string, unknown>;
+    fields?: string | null;
     unique_key?: string | string[];
     prismaOptions?: Record<string, unknown>;
     [key: string]: unknown;

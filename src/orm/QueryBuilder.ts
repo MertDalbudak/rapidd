@@ -844,6 +844,141 @@ class QueryBuilder {
     }
 
     /**
+     * Parse a fields string into scalar fields and relation field groups.
+     * e.g., "id,name,posts.title,posts.content,author.name"
+     * → { scalars: ['id','name'], relations: Map { 'posts' => ['title','content'], 'author' => ['name'] } }
+     */
+    #parseFields(fields: string): { scalars: string[]; relations: Map<string, string[]> } {
+        const scalars: string[] = [];
+        const relations = new Map<string, string[]>();
+
+        const parts = fields.split(',').map(f => f.trim()).filter(f => f.length > 0);
+
+        for (const part of parts) {
+            const dotIndex = part.indexOf('.');
+            if (dotIndex === -1) {
+                if (!scalars.includes(part)) scalars.push(part);
+            } else {
+                const relationName = part.substring(0, dotIndex);
+                const fieldName = part.substring(dotIndex + 1);
+                if (!relations.has(relationName)) {
+                    relations.set(relationName, []);
+                }
+                const arr = relations.get(relationName)!;
+                if (!arr.includes(fieldName)) arr.push(fieldName);
+            }
+        }
+
+        return { scalars, relations };
+    }
+
+    /**
+     * Build the Prisma field selection clause.
+     * When `fields` is specified, returns `{ select: ... }` (Prisma select mode).
+     * When `fields` is null/empty, returns `{ include: ..., omit: ... }` (current behavior).
+     *
+     * Prisma does NOT support `select` and `include` together.
+     * When fields are specified, everything goes through `select`.
+     *
+     * @param fields  - Comma-separated field list with dot notation for relations, or null
+     * @param include - Include string ("ALL", "author,posts", etc.)
+     * @param user    - User for ACL filters
+     */
+    buildFieldSelection(
+        fields: string | null,
+        include: string | Record<string, any>,
+        user: any
+    ): { select?: Record<string, any>; include?: Record<string, any>; omit?: Record<string, any> } {
+        // No fields specified → current behavior
+        if (!fields || fields.trim() === '') {
+            const includeClause = this.include(include, user);
+            const omitClause = this.omit(user);
+            return {
+                ...(Object.keys(includeClause).length > 0 ? { include: includeClause } : {}),
+                ...(Object.keys(omitClause).length > 0 ? { omit: omitClause } : {}),
+            };
+        }
+
+        const { scalars, relations } = this.#parseFields(fields);
+        const includeStr = typeof include === 'string' ? include : '';
+
+        // Determine which relations are available from the include param
+        const availableRelations = new Set<string>();
+        const isAll = includeStr.trim() === 'ALL';
+
+        if (isAll) {
+            for (const rel of this.relatedObjects) {
+                availableRelations.add(rel.name);
+            }
+        } else if (includeStr.trim() !== '') {
+            const includeList = includeStr.split(',').map(s => s.trim());
+            for (const item of includeList) {
+                availableRelations.add(item.split('.')[0]);
+            }
+        }
+
+        // Validate: every relation referenced in fields must be in the include set
+        for (const relationName of relations.keys()) {
+            if (!availableRelations.has(relationName)) {
+                throw new ErrorResponse(400, "relation_not_included", {
+                    relation: relationName,
+                    hint: `Add '${relationName}' to the include parameter`,
+                });
+            }
+        }
+
+        // Build select object
+        const select: Record<string, any> = {};
+
+        // Add top-level omit fields to exclude from selection
+        const omitFields = this.omit(user);
+
+        // Add scalar fields
+        for (const field of scalars) {
+            if (!omitFields[field]) {
+                select[field] = true;
+            }
+        }
+
+        // Add relations from the include param
+        for (const relationName of availableRelations) {
+            const rel = this.relatedObjects.find(r => r.name === relationName);
+            if (!rel) continue;
+
+            // Get ACL content for this relation (where, omit)
+            const { content, denied } = this.#buildBaseIncludeContent(rel, user, this.name);
+            if (denied) continue;
+
+            const relationFields = relations.get(relationName);
+
+            if (relationFields && relationFields.length > 0) {
+                // User specified specific fields for this relation
+                const relSelect: Record<string, any> = {};
+                const relOmit = this.getRelatedOmit(rel.object, user);
+
+                for (const f of relationFields) {
+                    if (!relOmit[f]) {
+                        relSelect[f] = true;
+                    }
+                }
+
+                const entry: Record<string, any> = { select: relSelect };
+                if (content.where) entry.where = content.where;
+                select[relationName] = entry;
+            } else {
+                // Relation is in include but no specific fields → include with all fields
+                if (content.where || content.omit) {
+                    select[relationName] = content;
+                } else {
+                    select[relationName] = true;
+                }
+            }
+        }
+
+        return { select };
+    }
+
+    /**
      * Validate and limit result count
      */
     take(limit: number): number {
