@@ -1,5 +1,5 @@
 {
-  "name": "@rapidd/core",
+  "name": "rapidd",
   "version": "2.1.0",
   "description": "Code-first REST API framework for TypeScript. Database in, API out.",
   "main": "dist/main.js",
