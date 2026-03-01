@@ -166,5 +166,90 @@ describe('modelMiddleware', () => {
             expect(context.softDelete).toBe(false);
             expect(context.timestamp).toBeInstanceOf(Date);
         });
+
+        it('should default user to null', () => {
+            const ctx = modelMiddleware.createContext({ name: 'posts' }, 'get', {});
+            expect(ctx.user).toBeNull();
+        });
+
+        it('should spread params into context', () => {
+            const ctx = modelMiddleware.createContext(
+                { name: 'posts' },
+                'getMany',
+                { query: { status: 'active' }, take: 10 }
+            );
+            expect((ctx as any).query).toEqual({ status: 'active' });
+            expect((ctx as any).take).toBe(10);
+        });
+    });
+
+    // ── Edge Cases ────────────────────────────────────────────
+
+    describe('edge cases', () => {
+        it('should handle middleware returning void (no return)', async () => {
+            modelMiddleware.use('before', 'create', async (_ctx) => {
+                // Intentionally no return
+            });
+
+            const context = modelMiddleware.createContext(
+                { name: 'users' },
+                'create',
+                { data: { name: 'test' } },
+                null
+            );
+
+            const result = await modelMiddleware.execute('before', 'create', context);
+            expect((result as any).data).toEqual({ name: 'test' });
+        });
+
+        it('should execute global middleware before model-specific', async () => {
+            const order: string[] = [];
+            modelMiddleware.use('before', 'create', async (ctx) => {
+                order.push('global');
+                return ctx;
+            });
+            modelMiddleware.use('before', 'create', async (ctx) => {
+                order.push('model');
+                return ctx;
+            }, 'posts');
+
+            const ctx = modelMiddleware.createContext({ name: 'posts' }, 'create', {});
+            await modelMiddleware.execute('before', 'create', ctx);
+            expect(order).toEqual(['global', 'model']);
+        });
+
+        it('should support soft delete middleware pattern', async () => {
+            modelMiddleware.use('before', 'delete', async (ctx) => {
+                return { ...ctx, softDelete: true, data: { deletedAt: new Date() } };
+            }, 'posts');
+
+            const ctx = modelMiddleware.createContext({ name: 'posts' }, 'delete', { id: 1 });
+            const result = await modelMiddleware.execute('before', 'delete', ctx);
+            expect(result.softDelete).toBe(true);
+            expect((result as any).data).toHaveProperty('deletedAt');
+        });
+
+        it('should clear only specific hook/operation', () => {
+            modelMiddleware.use('before', 'create', jest.fn());
+            modelMiddleware.use('after', 'update', jest.fn());
+            modelMiddleware.clear('before', 'create');
+            expect(modelMiddleware.getMiddleware('before', 'create', 'test')).toHaveLength(0);
+            expect(modelMiddleware.getMiddleware('after', 'update', 'test')).toHaveLength(1);
+        });
+
+        it('should handle multiple middleware for all operations', () => {
+            for (const op of modelMiddleware.OPERATIONS) {
+                modelMiddleware.use('before', op, jest.fn());
+                modelMiddleware.use('after', op, jest.fn());
+            }
+            for (const op of modelMiddleware.OPERATIONS) {
+                expect(modelMiddleware.getMiddleware('before', op, 'test')).toHaveLength(1);
+                expect(modelMiddleware.getMiddleware('after', op, 'test')).toHaveLength(1);
+            }
+        });
+
+        it('should return empty from getMiddleware for no registrations', () => {
+            expect(modelMiddleware.getMiddleware('before', 'count', 'any')).toEqual([]);
+        });
     });
 });

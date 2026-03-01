@@ -65,6 +65,56 @@ describe('ErrorResponse', () => {
         expect(err).toBeInstanceOf(ErrorBasicResponse);
         expect(err).toBeInstanceOf(Error);
     });
+
+    // ── Static factory methods ───────────────────────────────
+
+    describe('static factories', () => {
+        it('badRequest should create 400 error', () => {
+            const err = ErrorResponse.badRequest('invalid_input');
+            expect(err.status_code).toBe(400);
+            expect(err.message).toBe('invalid_input');
+        });
+
+        it('badRequest should accept data', () => {
+            const err = ErrorResponse.badRequest('invalid_input', { field: 'name' });
+            expect(err.data).toEqual({ field: 'name' });
+        });
+
+        it('unauthorized should create 401 error', () => {
+            const err = ErrorResponse.unauthorized('auth_required');
+            expect(err.status_code).toBe(401);
+        });
+
+        it('forbidden should create 403 error', () => {
+            const err = ErrorResponse.forbidden('no_access');
+            expect(err.status_code).toBe(403);
+        });
+
+        it('notFound should create 404 error', () => {
+            const err = ErrorResponse.notFound('not_found');
+            expect(err.status_code).toBe(404);
+        });
+
+        it('conflict should create 409 error', () => {
+            const err = ErrorResponse.conflict('duplicate');
+            expect(err.status_code).toBe(409);
+        });
+
+        it('tooManyRequests should create 429 error', () => {
+            const err = ErrorResponse.tooManyRequests('slow_down');
+            expect(err.status_code).toBe(429);
+        });
+
+        it('all factories should return ErrorResponse instances', () => {
+            const methods = ['badRequest', 'unauthorized', 'forbidden', 'notFound', 'conflict', 'tooManyRequests'] as const;
+            for (const method of methods) {
+                const err = ErrorResponse[method]('test_key');
+                expect(err).toBeInstanceOf(ErrorResponse);
+                expect(err).toBeInstanceOf(ErrorBasicResponse);
+                expect(err).toBeInstanceOf(Error);
+            }
+        });
+    });
 });
 
 describe('Response', () => {
