@@ -14,14 +14,15 @@ Code-first REST API framework for TypeScript. Database in, API out.
 
 ## Why Rapidd
 
-Rapidd is a backend framework that generates a fully-featured REST API from your existing database schema — then gets out of your way. It's not a scaffolding tool that dumps code you'll rewrite. It's not a hosted service sitting between you and your data. It's a framework that handles CRUD, auth, access control, and a dozen other production concerns, while giving you full TypeScript control over every behavior.
+Rapidd generates a fully-featured REST API from your database schema — then gets out of your way. It's not a scaffolder that dumps code you'll rewrite. It's not a hosted service between you and your data. It's a framework you own, extend, and deploy anywhere.
 
-- **Zero to API in 3 commands** — point it at a database and get REST endpoints with filtering, pagination, relations, and field selection
-- **You own the code** — full TypeScript codebase you control, extend, and deploy anywhere
+**Unlike Hasura or Supabase**, you get a full TypeScript codebase — no vendor lock-in, no managed service dependency. **Unlike PostgREST**, you get auth, ACL, middleware hooks, and utilities built in. **Unlike Strapi**, it's schema-first via Prisma, not UI-driven.
+
+- **Zero to API in 3 commands** — CRUD endpoints with filtering, pagination, relations, and field selection
 - **Convention over configuration** — auto-detects auth tables, password fields, DB provider, and RLS support. Every default overridable
-- **Production-grade from day one** — security headers, JWT with refresh rotation, row-level security, per-model ACL, rate limiting, i18n error messages
-- **Batteries included** — built-in HTTP client, SMTP mailer with templates, file uploads with MIME validation, rate limiting, i18n across 10 languages
-- **Extensible** — before/after middleware hooks on every CRUD operation, custom routes alongside generated ones, model-level overrides
+- **Production-grade from day one** — security headers, JWT with refresh rotation, row-level security, per-model ACL, rate limiting
+- **Batteries included** — HTTP client, SMTP mailer with templates, file uploads, rate limiting, i18n across 10 languages
+- **Fully extensible** — before/after middleware on every CRUD operation, custom routes alongside generated ones
 
 ---
 
@@ -41,9 +42,9 @@ npx rapidd build          # generate models, routes & ACL scaffold
 npm run dev               # http://localhost:3000
 ```
 
-Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected.
+Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
 
-> **[Getting Started guide](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started)** — full walkthrough with project structure
+> 📖 **[Getting Started guide →](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started)** — full walkthrough with project structure
 
 ---
 
@@ -51,37 +52,21 @@ Every table gets full CRUD endpoints. Auth is enabled automatically when a user 
 
 | Feature | PostgreSQL | MySQL/MariaDB |
 |---------|:----------:|:-------------:|
-| CRUD API generation | Yes | Yes |
-| Query filtering (20+ operators) | Yes | Yes |
-| Relations & deep includes | Yes | Yes |
-| Field selection | Yes | Yes |
-| JWT authentication | Yes | Yes |
-| Multi-strategy auth (bearer, basic, cookie, header) | Yes | Yes |
-| Per-model ACL | Yes | Yes |
-| Row-Level Security (database-enforced) | Yes | — |
-| Rate limiting (Redis + memory fallback) | Yes | Yes |
-| File uploads with MIME validation | Yes | Yes |
-| SMTP mailer with EJS templates | Yes | Yes |
-| Config-driven HTTP client (ApiClient) | Yes | Yes |
-| i18n (10 languages) | Yes | Yes |
-| Security headers (HSTS, CSP, etc.) | Yes | Yes |
+| CRUD API generation | ✓ | ✓ |
+| Query filtering (20+ operators) | ✓ | ✓ |
+| Relations & deep includes | ✓ | ✓ |
+| Field selection | ✓ | ✓ |
+| JWT authentication (4 strategies) | ✓ | ✓ |
+| Per-model ACL | ✓ | ✓ |
+| Row-Level Security (database-enforced) | ✓ | — |
+| Rate limiting (Redis + memory fallback) | ✓ | ✓ |
+| File uploads with MIME validation | ✓ | ✓ |
+| SMTP mailer with EJS templates | ✓ | ✓ |
+| Config-driven HTTP client | ✓ | ✓ |
+| i18n (10 languages) | ✓ | ✓ |
+| Security headers (HSTS, CSP, etc.) | ✓ | ✓ |
 
-> **MySQL users:** ACL provides application-level access control for all databases. RLS adds database-enforced row filtering as a second layer — this is PostgreSQL-only because MySQL lacks native RLS support. For MySQL, ACL is your primary access control mechanism and covers most use cases. See the **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** for details.
-
----
-
-## What Gets Auto-Detected
-
-| Feature | How |
-|---------|-----|
-| Database provider | From connection URL (`postgresql://` or `mysql://`) |
-| Auth system | Enabled when a `user`/`users`/`account`/`accounts` table exists |
-| Login fields | Unique string fields on the user model (`email`, `username`, etc.) |
-| Password field | Fields named `password`, `hash`, `passwordHash`, `hashed_password`, etc. |
-| Row-level security | On for PostgreSQL, off for MySQL (override with `RLS_ENABLED`) |
-| Session store | Redis when available, automatic memory fallback for development |
-
-Every value is overridable via env vars. See [`.env.example`](.env.example) for the full list.
+> **MySQL note:** ACL provides application-level access control for all databases. RLS adds database-enforced row filtering as a second layer (PostgreSQL-only). For MySQL, ACL is your primary access control mechanism and covers most use cases. See the **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** for details.
 
 ---
 
@@ -92,44 +77,19 @@ All generated endpoints support filtering, relations, field selection, sorting, 
 ```
 GET /api/v1/posts?filter=status=active,title=%typescript%
 GET /api/v1/posts?filter=createdAt=after:2025-01-01,views=gte:100
-GET /api/v1/posts?filter=category=[tech,science],author.role=admin
-```
-
-**String:** `%text%` (contains), `%text` (ends with), `text%` (starts with), exact match
-**Numeric:** `gt:`, `lt:`, `gte:`, `lte:`, `eq:`, `ne:`, `between:min;max`
-**Date:** `before:`, `after:`, `from:`, `to:`, `on:`, `between:date1;date2`
-**Special:** `not:value`, `[array]`, `#NULL`, `not:#NULL`, nested relation fields (`author.name=%John%`)
-
-### Relations & Field Selection
-
-```
-GET /api/v1/posts?include=author,comments.user           # deep nested
-GET /api/v1/posts?include=ALL                              # all relations
-GET /api/v1/posts?fields=id,title,author.name,author.email # select specific fields
-```
-
-### Sorting & Pagination
-
-```
+GET /api/v1/posts?include=author,comments.user&fields=id,title,author.name
 GET /api/v1/posts?sortBy=createdAt&sortOrder=desc&limit=10&offset=20
 ```
 
-### Response Format
+20+ filter operators for strings, numbers, dates, arrays, nulls, and nested relation fields. Responses include pagination metadata with `total`, `count`, `limit`, `offset`, and `hasMore`.
 
-```json
-{
-    "data": [...],
-    "meta": { "total": 150, "count": 10, "limit": 10, "offset": 20, "hasMore": true }
-}
-```
-
-> **[Query API wiki](https://github.com/MertDalbudak/rapidd/wiki/Query-API)** — all 20+ filter operators, composite PKs, relation filtering
+> 📖 **[Query API wiki →](https://github.com/MertDalbudak/rapidd/wiki/Query-API)** — all operators, composite PKs, relation filtering
 
 ---
 
 ## Authentication
 
-Auto-enabled when a user table is detected. No configuration needed for development.
+Auto-enabled when a user table is detected.
 
 ```
 POST /auth/login          { "user": "john@example.com", "password": "..." }
@@ -138,22 +98,11 @@ POST /auth/refresh        { "refreshToken": "..." }
 GET  /auth/me             Authorization: Bearer <token>
 ```
 
-Four strategies: **bearer** (default), **basic**, **cookie**, and **custom header**. Enable multiple at once:
+Four strategies — **bearer** (default), **basic**, **cookie**, and **custom header** — configurable per-route. Multi-identifier login lets users authenticate with any unique field (email, username, phone) in a single endpoint.
 
-```env
-AUTH_STRATEGIES=bearer,cookie
-```
+⚠️ **Production:** `JWT_SECRET` and `JWT_REFRESH_SECRET` must be set explicitly. The server refuses to start without them to prevent session invalidation on restart.
 
-Multi-identifier login is supported — users can authenticate with any unique field (email, username, phone) in a single endpoint.
-
-**Production requirement:** `JWT_SECRET` and `JWT_REFRESH_SECRET` must be set explicitly. The server will refuse to start without them in production to prevent session invalidation on restart.
-
-```bash
-# Generate secrets
-node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
-```
-
-> **[Authentication wiki](https://github.com/MertDalbudak/rapidd/wiki/Authentication)** — session stores, route protection, per-endpoint strategy overrides
+> 📖 **[Authentication wiki →](https://github.com/MertDalbudak/rapidd/wiki/Authentication)** — session stores, route protection, per-endpoint strategy overrides
 
 ---
 
@@ -175,9 +124,9 @@ const acl: AclConfig = {
 };
 ```
 
-Return `{}` for full access, a filter object to scope records, or `false` to deny. Omitted fields are automatically excluded from all responses — even when explicitly requested via `fields=`.
+Return `{}` for full access, a filter object to scope records, or `false` to deny.
 
-> **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** — all 5 ACL methods, relation ACL, 404 vs 403 distinction
+> 📖 **[Access Control wiki →](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** — all 5 ACL methods, relation ACL, 404 vs 403 distinction
 
 ---
 
@@ -193,23 +142,17 @@ Model.middleware.use('before', 'create', async (ctx) => {
     return ctx;
 });
 
-// Soft deletes
+// Soft deletes (scoped to a specific model)
 Model.middleware.use('before', 'delete', async (ctx) => {
     ctx.softDelete = true;
     ctx.data = { deletedAt: new Date(), deletedBy: ctx.user?.id };
     return ctx;
 }, 'posts');
-
-// Audit logging
-Model.middleware.use('after', 'update', async (ctx) => {
-    await auditLog.write(ctx.model.name, ctx.id, ctx.user, ctx.data);
-    return ctx;
-});
 ```
 
-Supports `create`, `update`, `upsert`, `upsertMany`, `delete`, `get`, `getMany`, and `count`. Middleware can abort operations, modify data, override field selections, and short-circuit with cached results.
+Supports `create`, `update`, `upsert`, `upsertMany`, `delete`, `get`, `getMany`, and `count`. Middleware can abort operations, modify data, and short-circuit with cached results.
 
-> **[Model Middleware wiki](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware)** — all hooks, context object, patterns (soft delete, validation, caching)
+> 📖 **[Model Middleware wiki →](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware)** — all hooks, context object, patterns (soft delete, validation, caching)
 
 ---
 
@@ -225,81 +168,23 @@ ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
 
 RLS provides database-enforced access control that can't be bypassed by application bugs. It works alongside ACL — use ACL for application-level rules, RLS for database-level guarantees.
 
-> **[Row-Level Security wiki](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS))** — policy examples, RLS vs ACL comparison, transaction support
+> 📖 **[Row-Level Security wiki →](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS))** — policy examples, RLS vs ACL comparison
 
 ---
 
 ## Built-in Utilities
 
-### ApiClient
-
-Config-driven HTTP client for service-to-service communication. Supports Bearer, Basic, API Key, and OAuth2 with automatic token caching and refresh.
-
-```typescript
-// Config-based (defined in config/app.json)
-const user = await ApiClient.call('MyAPI', 'getUser', { id: '123' });
-
-// Fluent builder
-const data = await ApiClient.to('https://api.example.com')
-    .bearer(token)
-    .retry(3)
-    .get('/users/123');
-```
-
-> **[ApiClient wiki](https://github.com/MertDalbudak/rapidd/wiki/ApiClient)**
-
-### Mailer
-
-SMTP email with EJS template rendering, layout wrappers, i18n support, batch sending, and attachments.
-
-```typescript
-await Mailer.send('default', {
-    to: 'user@example.com',
-    subject: 'Welcome!',
-    template: 'welcome',
-    data: { name: 'John' },
-    language: 'en_US'
-});
-```
-
-> **[Mailer wiki](https://github.com/MertDalbudak/rapidd/wiki/Mailer)**
-
-### File Uploads
-
-Multipart uploads with MIME validation, size limits, and type presets.
-
-```typescript
-fastify.post('/avatar', async (request) => {
-    const file = await request.handleUpload({ type: 'images', maxFileSize: 5 * 1024 * 1024 });
-    await file.saveTo('./uploads/avatars');
-});
-```
-
-> **[File Uploads wiki](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads)**
-
-### Rate Limiting
-
-Redis-backed with automatic memory fallback. Per-path configuration via `config/rate-limit.json`.
-
-```json
-{ "/auth/login": { "max": 5, "window": 60000 } }
-```
-
-> **[Rate Limiting wiki](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting)**
-
-### Internationalization
-
-10 languages included. Auto-detected from `Accept-Language` header. Parameter interpolation in error messages.
-
-```json
-{ "validation.minLength": "{{field}} must be at least {{min}} characters" }
-```
-
-> **[Internationalization wiki](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n))**
+| Utility | Description | Docs |
+|---------|-------------|------|
+| **ApiClient** | Config-driven HTTP client with Bearer, Basic, API Key, and OAuth2 auth. Automatic token caching, retries, and fluent builder. | [Wiki →](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) |
+| **Mailer** | SMTP email with EJS template rendering, layout wrappers, i18n support, batch sending, and attachments. | [Wiki →](https://github.com/MertDalbudak/rapidd/wiki/Mailer) |
+| **File Uploads** | Multipart uploads with MIME validation, size limits, and type presets (`images`, `documents`, etc.). | [Wiki →](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) |
+| **Rate Limiting** | Redis-backed with automatic memory fallback. Per-path configuration via `config/rate-limit.json`. | [Wiki →](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) |
+| **i18n** | 10 languages included. Auto-detected from `Accept-Language` header. Parameter interpolation in error messages. | [Wiki →](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) |
 
 ---
 
-## Production
+## Production & Deployment
 
 ```env
 NODE_ENV=production
@@ -311,58 +196,28 @@ TRUST_PROXY=true
 
 ```bash
 npm run build && npm start
-```
 
-### Docker
-
-```bash
+# or Docker
 docker build -t rapidd . && docker run -p 3000:3000 --env-file .env rapidd
 ```
 
-Multi-stage build with non-root user, Alpine base, and pre-compiled Prisma client.
+**Security defaults in production:** HSTS, Content-Security-Policy, X-Content-Type-Options, Referrer-Policy, and CORS with explicit origin whitelisting — all enabled automatically.
 
-### Security Defaults
-
-All responses include security headers:
-- `X-Content-Type-Options: nosniff`
-- `Content-Security-Policy: default-src 'none'`
-- `Strict-Transport-Security` (production only)
-- `Referrer-Policy: strict-origin-when-cross-origin`
-- CORS with origin whitelisting in production
-
-> **[Deployment wiki](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)** — Docker Compose, nginx reverse proxy, production checklist, horizontal scaling
+> 📖 **[Deployment wiki →](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)** — Docker Compose, nginx reverse proxy, production checklist, horizontal scaling
 
 ---
 
 ## Documentation
 
-Full documentation is available in the **[Wiki](https://github.com/MertDalbudak/rapidd/wiki)**:
+Full documentation: **[github.com/MertDalbudak/rapidd/wiki](https://github.com/MertDalbudak/rapidd/wiki)**
 
-| Page | Description |
-|------|-------------|
-| [Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) | Installation, setup, project structure |
-| [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) | Environment variables, app.json, paths |
-| [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) | Filtering, sorting, pagination, field selection |
-| [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) | JWT, strategies, sessions, route protection |
-| [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) | Per-model ACL rules, field omission |
-| [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) | Before/after CRUD hooks and patterns |
-| [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) | PostgreSQL RLS with policy examples |
-| [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) | HTTP client with auth, retries, fluent API |
-| [Mailer](https://github.com/MertDalbudak/rapidd/wiki/Mailer) | SMTP email with templates and layouts |
-| [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) | Multipart uploads with validation |
-| [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) | Redis + memory, per-path configuration |
-| [Internationalization](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) | Multi-language support with interpolation |
-| [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production) | Docker, nginx, production checklist |
+[Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) · [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) · [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) · [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) · [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) · [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) · [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) · [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) · [Mailer](https://github.com/MertDalbudak/rapidd/wiki/Mailer) · [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) · [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) · [i18n](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) · [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)
 
 ---
 
-## Configuration
+## Contributing
 
-See [`.env.example`](.env.example) for every available environment variable with descriptions and defaults.
-
-> **[Configuration wiki](https://github.com/MertDalbudak/rapidd/wiki/Configuration)** — all settings, app.json structure, TypeScript config
-
----
+Issues and pull requests are welcome. If you find a bug or have a feature request, [open an issue](https://github.com/MertDalbudak/rapidd/issues).
 
 ## License
 
