@@ -81,6 +81,7 @@ beforeAll(() => {
     process.env.ROUTES_PATH = TEMP_ROUTES;
     process.env.STRINGS_PATH = path.join(__dirname, '__temp_strings_app__');
     process.env.NODE_ENV = 'test';
+    process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 
     // Create strings dir
     fs.mkdirSync(process.env.STRINGS_PATH, { recursive: true });
