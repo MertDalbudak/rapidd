@@ -27,7 +27,7 @@ import type { RapiddOptions } from './types';
 const ROOT = process.env.ROOT || process.cwd();
 process.env.ROOT = ROOT;
 process.env.ROUTES_PATH = process.env.ROUTES_PATH || path.join(ROOT, 'dist', 'routes');
-process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'locale');
+process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'locales');
 process.env.PUBLIC_PATH = process.env.PUBLIC_PATH || path.join(ROOT, 'public');
 process.env.PUBLIC_STATIC = process.env.PUBLIC_STATIC || path.join(process.env.PUBLIC_PATH!, 'static');
 
@@ -35,7 +35,7 @@ const NODE_ENV = process.env.NODE_ENV;
 
 // ─── Initialize LanguageDict ────────────────────────
 
-LanguageDict.initialize(process.env.STRINGS_PATH, 'en-US');
+LanguageDict.initialize(process.env.STRINGS_PATH, 'en_US');
 
 // ─── App Factory ────────────────────────────────────
 

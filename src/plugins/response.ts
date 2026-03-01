@@ -15,7 +15,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
     fastify.decorateRequest('user', null);
     fastify.decorateRequest('remoteAddress', '');
     fastify.decorateRequest('getTranslation', function (this: FastifyRequest, key: string, data?: Record<string, unknown> | null, language?: string) {
-        return LanguageDict.get(key, data ?? null, language || this.language || 'en-US');
+        return LanguageDict.get(key, data ?? null, language || this.language || 'en_US');
     });
 
     // Decorate reply
@@ -35,7 +35,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     fastify.decorateReply('sendError', function (this: FastifyReply, statusCode: number, message: string, data?: unknown) {
         const request = this.request;
-        const language = request?.language || 'en-US';
+        const language = request?.language || 'en_US';
         const error = new ErrorResponse(statusCode, message, data as Record<string, unknown> | null);
         console.error(`Error ${statusCode}: ${message}`);
         return this.code(statusCode).send(error.toJSON(language));
@@ -43,7 +43,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     fastify.decorateReply('sendResponse', function (this: FastifyReply, statusCode: number, message: string, params?: unknown) {
         const request = this.request;
-        const language = request?.language || 'en-US';
+        const language = request?.language || 'en_US';
         const translatedMessage = LanguageDict.get(message, params as Record<string, unknown> | null, language);
         return this.code(statusCode).send({ status_code: statusCode, message: translatedMessage });
     });
@@ -55,7 +55,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     // Global error handler
     fastify.setErrorHandler((error, request, reply) => {
-        const language = request.language || 'en-US';
+        const language = request.language || 'en_US';
         const status = (error as any).status_code || (error as any).statusCode || 500;
 
         if (error instanceof ErrorResponse) {

@@ -202,7 +202,7 @@ class Model {
 
     // ACL METHODS
     /** Check if user can create records */
-    _canCreate = (): boolean => this.acl.canCreate ? this.acl.canCreate(this.user) : true;
+    _canCreate = (data?: Record<string, any>): boolean => this.acl.canCreate ? this.acl.canCreate(this.user, data) : true;
     /** Get access filter from ACL */
     _getAccessFilter = (): any => this.acl.getAccessFilter?.(this.user);
     /** Get update filter from ACL */
@@ -333,7 +333,7 @@ class Model {
      */
     _create = async (data: Record<string, any>, options: Record<string, any> = {}): Promise<any> => {
         // CHECK CREATE PERMISSION
-        if (!this.canCreate()) {
+        if (!this.canCreate(data)) {
             throw new ErrorResponse(403, "no_permission_to_create");
         }
 
@@ -818,9 +818,9 @@ class Model {
     /**
      * Check if user has permission to create records
      */
-    canCreate(): boolean {
+    canCreate(data?: Record<string, any>): boolean {
         if (this.user.role == "application") return true;
-        return this._canCreate();
+        return this._canCreate(data);
     }
 
     /**

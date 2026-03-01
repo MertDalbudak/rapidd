@@ -49,14 +49,14 @@ describe('ErrorResponse', () => {
 
     it('should serialize with i18n translation', () => {
         const err = new ErrorResponse(404, 'not_found');
-        const json = err.toJSON('en-US');
+        const json = err.toJSON('en_US');
         expect(json.status_code).toBe(404);
         expect(json.message).toBe('Resource not found');
     });
 
     it('should serialize with data interpolation', () => {
         const err = new ErrorResponse(200, 'hello_user', { name: 'Alice' });
-        const json = err.toJSON('en-US');
+        const json = err.toJSON('en_US');
         expect(json.message).toBe('Hello Alice');
     });
 
@@ -82,7 +82,7 @@ describe('Response', () => {
 
     it('should serialize to JSON with i18n', () => {
         const res = new Response(200, 'hello_user', { name: 'Bob' });
-        const json = res.toJSON('en-US');
+        const json = res.toJSON('en_US');
         expect(json.status_code).toBe(200);
         expect(json.message).toBe('Hello Bob');
         expect(json.data).toEqual({ name: 'Bob' });

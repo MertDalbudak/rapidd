@@ -998,8 +998,12 @@ class QueryBuilder {
 
         if (createItems.length > 0) {
             // Check canCreate permission for nested creates
-            if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
-                throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+            if (user && relatedAcl?.canCreate) {
+                for (const item of createItems) {
+                    if (!relatedAcl.canCreate(user, item)) {
+                        throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+                    }
+                }
             }
 
             // Remove omitted fields from create items
@@ -1039,8 +1043,12 @@ class QueryBuilder {
 
         if (upsertItems.length > 0) {
             // Check canCreate permission for nested connectOrCreate
-            if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
-                throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+            if (user && relatedAcl?.canCreate) {
+                for (const item of upsertItems) {
+                    if (!relatedAcl.canCreate(user, item)) {
+                        throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+                    }
+                }
             }
 
             // Remove omitted fields from connectOrCreate items
@@ -1093,7 +1101,7 @@ class QueryBuilder {
         const relatedAcl = acl.model[relatedObject.object];
 
         // Check canCreate permission
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, item)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
         }
 
@@ -1456,12 +1464,16 @@ class QueryBuilder {
             }
         }
 
-        // Check canCreate permission once for items that may create records
+        // Check canCreate permission for items that may create records
         const canCreate = !user || !relatedAcl?.canCreate || relatedAcl.canCreate(user);
 
-        // If user can't create and has items without PK, throw error
-        if (!canCreate && createItems.length > 0) {
-            throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        // Check per-item for createItems (no PK = always creates)
+        if (user && relatedAcl?.canCreate && createItems.length > 0) {
+            for (const item of createItems) {
+                if (!relatedAcl.canCreate(user, item)) {
+                    throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+                }
+            }
         }
 
         const result: Record<string, any> = {};
@@ -1561,7 +1573,7 @@ class QueryBuilder {
         const relatedAcl = acl.model[relatedObject.object];
 
         // Check canCreate permission since upsert may create new records
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user)) {
+        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
         }
 

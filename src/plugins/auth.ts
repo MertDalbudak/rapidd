@@ -2,7 +2,7 @@ import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Auth } from '../auth/Auth';
 import { ErrorResponse } from '../core/errors';
-import type { RapiddUser, AuthOptions } from '../types';
+import type { RapiddUser, AuthOptions, AuthStrategy, RouteAuthConfig } from '../types';
 
 interface AuthPluginOptions {
     auth?: Auth;
@@ -35,11 +35,17 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         return;
     }
 
-    // Parse auth on every request using configured strategies (checked in order)
+    // Parse auth on every request using configured strategies (checked in order).
+    // Routes can override via config.auth: { strategies, cookieName, customHeaderName }
     fastify.addHook('onRequest', async (request) => {
+        const routeAuth = (request.routeOptions?.config as any)?.auth as RouteAuthConfig | undefined;
+        const strategies = routeAuth?.strategies || auth.options.strategies;
+        const cookieName = routeAuth?.cookieName || auth.options.cookieName;
+        const customHeaderName = routeAuth?.customHeaderName || auth.options.customHeaderName;
+
         let user: RapiddUser | null = null;
 
-        for (const strategy of auth.options.strategies) {
+        for (const strategy of strategies) {
             if (user) break;
 
             switch (strategy) {
@@ -58,7 +64,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
                     break;
                 }
                 case 'cookie': {
-                    const raw = request.cookies?.[auth.options.cookieName];
+                    const raw = request.cookies?.[cookieName];
                     if (raw) {
                         const val = typeof raw === 'object' ? (raw as any).value : raw;
                         user = await auth.handleCookieAuth(val);
@@ -66,7 +72,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
                     break;
                 }
                 case 'header': {
-                    const val = request.headers[auth.options.customHeaderName.toLowerCase()] as string | undefined;
+                    const val = request.headers[customHeaderName.toLowerCase()] as string | undefined;
                     if (val) {
                         user = await auth.handleCustomHeaderAuth(val);
                     }
@@ -148,5 +154,9 @@ declare module 'fastify' {
         auth: Auth;
         requireAuth(request: FastifyRequest): void;
         requireRole(...roles: string[]): (request: FastifyRequest) => Promise<void>;
+    }
+
+    interface FastifyContextConfig {
+        auth?: RouteAuthConfig;
     }
 }

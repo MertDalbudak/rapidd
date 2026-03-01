@@ -4,9 +4,9 @@ import fp from 'fastify-plugin';
 
 const ALLOWED_LANGUAGES: string[] = (() => {
     try {
-        return require(path.join(process.cwd(), 'config', 'app.json')).languages || ['en-US'];
+        return require(path.join(process.cwd(), 'config', 'app.json')).languages || ['en_US'];
     } catch {
-        return ['en-US'];
+        return ['en_US'];
     }
 })();
 
@@ -14,10 +14,10 @@ const SUPPORTED_LANGUAGES: string[] = (() => {
     try {
         const fs = require('fs');
         const path = require('path');
-        const stringsPath = process.env.STRINGS_PATH || './locale';
+        const stringsPath = process.env.STRINGS_PATH || './locales';
         return fs.readdirSync(stringsPath).map((e: string) => path.parse(e).name);
     } catch {
-        return ['en-US'];
+        return ['en_US'];
     }
 })();
 
@@ -27,7 +27,7 @@ const SUPPORTED_LANGUAGES: string[] = (() => {
 function resolveLanguage(headerValue: string): string {
     const defaultLang = ALLOWED_LANGUAGES.find((allowed: string) =>
         SUPPORTED_LANGUAGES.find((avail: string) => avail.toLowerCase() === allowed.toLowerCase())
-    ) || 'en-US';
+    ) || 'en_US';
 
     if (!headerValue || typeof headerValue !== 'string') return defaultLang;
 
@@ -49,7 +49,7 @@ function resolveLanguage(headerValue: string): string {
             if (match) return match;
         }
 
-        // Language family match (e.g. "en-GB" → "en-US")
+        // Language family match (e.g. "en-GB" → "en_US")
         for (const lang of languages) {
             const prefix = lang.code.split('-')[0];
             const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase().startsWith(prefix + '-'));
@@ -67,7 +67,7 @@ function resolveLanguage(headerValue: string): string {
  * Sets request.language based on cookie or Accept-Language header.
  */
 const languagePlugin: FastifyPluginAsync = async (fastify) => {
-    fastify.decorateRequest('language', 'en-US');
+    fastify.decorateRequest('language', 'en_US');
 
     fastify.addHook('onRequest', async (request) => {
         const cookieLang = (request as any).cookies?.['lang'];

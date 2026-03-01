@@ -37,7 +37,7 @@ jest.mock('../src/core/i18n', () => ({
     LanguageDict: {
         initialize: jest.fn(),
         get: jest.fn((key: string) => key),
-        getAvailableLanguages: jest.fn(() => ['en-US']),
+        getAvailableLanguages: jest.fn(() => ['en_US']),
         hasLanguage: jest.fn(() => true),
         getDictionary: jest.fn(() => ({})),
     },
@@ -85,7 +85,7 @@ beforeAll(() => {
     // Create strings dir
     fs.mkdirSync(process.env.STRINGS_PATH, { recursive: true });
     fs.writeFileSync(
-        path.join(process.env.STRINGS_PATH, 'en-US.json'),
+        path.join(process.env.STRINGS_PATH, 'en_US.json'),
         JSON.stringify({ hello: 'Hello' })
     );
 

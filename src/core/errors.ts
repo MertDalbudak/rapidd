@@ -31,7 +31,7 @@ export class ErrorResponse extends ErrorBasicResponse {
         this.data = data;
     }
 
-    toJSON(language: string = 'en-US'): { status_code: number; message: string } {
+    toJSON(language: string = 'en_US'): { status_code: number; message: string } {
         return {
             status_code: this.status_code,
             message: LanguageDict.get(this.message, this.data, language),
@@ -77,7 +77,7 @@ export class Response {
         this.data = data;
     }
 
-    toJSON(language: string = 'en-US'): { status_code: number; message: string; data: Record<string, unknown> | null } {
+    toJSON(language: string = 'en_US'): { status_code: number; message: string; data: Record<string, unknown> | null } {
         return {
             status_code: this.status_code,
             message: LanguageDict.get(this.message, this.data, language),

@@ -12,6 +12,12 @@ export interface RapiddUser {
 
 export type AuthStrategy = 'bearer' | 'basic' | 'cookie' | 'header';
 
+export interface RouteAuthConfig {
+    strategies?: AuthStrategy[];
+    cookieName?: string;
+    customHeaderName?: string;
+}
+
 export interface AuthOptions {
     userModel?: string;
     userSelect?: Record<string, boolean> | null;
@@ -36,7 +42,7 @@ export interface AuthOptions {
 // =====================================================
 
 export interface ModelAcl {
-    canCreate?: (user: RapiddUser) => boolean;
+    canCreate?: (user: RapiddUser, data?: Record<string, unknown>) => boolean;
     getAccessFilter?: (user: RapiddUser) => Record<string, unknown> | boolean;
     getUpdateFilter?: (user: RapiddUser) => Record<string, unknown> | boolean | false;
     getDeleteFilter?: (user: RapiddUser) => Record<string, unknown> | boolean | false;

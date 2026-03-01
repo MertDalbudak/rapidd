@@ -41,14 +41,20 @@ export class Auth {
     private _explicitPasswordField: boolean;
 
     constructor(options: AuthOptions = {}) {
-        this._explicitIdentifierFields = !!(options.identifierFields && options.identifierFields.length > 0);
+        const envIdentifierFields = process.env.DB_USER_IDENTIFIER_FIELDS
+            ?.split(',').map(s => s.trim()).filter(Boolean);
+
+        this._explicitIdentifierFields = !!(
+            (options.identifierFields && options.identifierFields.length > 0)
+            || (envIdentifierFields && envIdentifierFields.length > 0)
+        );
         this._explicitPasswordField = !!(options.passwordField || process.env.DB_USER_PASSWORD_FIELD);
 
         this.options = {
             userModel: options.userModel || process.env.DB_USER_TABLE,
             userSelect: options.userSelect || null,
             userInclude: options.userInclude || null,
-            identifierFields: options.identifierFields || ['email'],
+            identifierFields: options.identifierFields || envIdentifierFields || ['email'],
             passwordField: options.passwordField || process.env.DB_USER_PASSWORD_FIELD || 'password',
             session: {
                 ttl: parseInt(process.env.AUTH_SESSION_TTL || '86400', 10),

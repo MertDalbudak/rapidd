@@ -2,7 +2,7 @@ import { readdirSync } from 'fs';
 import path from 'path';
 
 const ROOT = process.env.ROOT || '';
-const DEFAULT_STRINGS_PATH = ROOT ? path.join(ROOT, 'locale') : './locale';
+const DEFAULT_STRINGS_PATH = ROOT ? path.join(ROOT, 'locales') : './locale';
 
 /**
  * Singleton LanguageDict class for efficient translation management.
@@ -12,13 +12,13 @@ export class LanguageDict {
     private static _dictionaries: Record<string, Record<string, string>> = {};
     private static _available: string[] = [];
     private static _dictionaryPath: string | null = null;
-    private static _defaultLanguage: string = 'en-US';
+    private static _defaultLanguage: string = 'en_US';
     private static _initialized: boolean = false;
 
     /**
      * Initialize the LanguageDict system
      */
-    static initialize(dictionaryPath: string = DEFAULT_STRINGS_PATH, defaultLanguage: string = 'en-US'): void {
+    static initialize(dictionaryPath: string = DEFAULT_STRINGS_PATH, defaultLanguage: string = 'en_US'): void {
         if (this._initialized && this._dictionaryPath === dictionaryPath) {
             return;
         }

@@ -8,7 +8,7 @@ const TEMP_STRINGS = path.join(__dirname, '__temp_strings__');
 beforeAll(() => {
     fs.mkdirSync(TEMP_STRINGS, { recursive: true });
     fs.writeFileSync(
-        path.join(TEMP_STRINGS, 'en-US.json'),
+        path.join(TEMP_STRINGS, 'en_US.json'),
         JSON.stringify({
             hello: 'Hello',
             hello_user: 'Hello {name}',
@@ -19,7 +19,7 @@ beforeAll(() => {
         })
     );
     fs.writeFileSync(
-        path.join(TEMP_STRINGS, 'de-DE.json'),
+        path.join(TEMP_STRINGS, 'de_DE.json'),
         JSON.stringify({
             hello: 'Hallo',
             hello_user: 'Hallo {name}',
@@ -37,19 +37,19 @@ describe('LanguageDict', () => {
         // Force re-initialization for each test
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         (LanguageDict)['_initialized'] = false;
-        LanguageDict.initialize(TEMP_STRINGS, 'en-US');
+        LanguageDict.initialize(TEMP_STRINGS, 'en_US');
     });
 
     describe('initialize()', () => {
         it('should load dictionaries from directory', () => {
             const languages = LanguageDict.getAvailableLanguages();
-            expect(languages).toContain('en-US');
-            expect(languages).toContain('de-DE');
+            expect(languages).toContain('en_US');
+            expect(languages).toContain('de_DE');
         });
 
         it('should not re-initialize with same path', () => {
             const spy = jest.spyOn(fs, 'readdirSync');
-            LanguageDict.initialize(TEMP_STRINGS, 'en-US');
+            LanguageDict.initialize(TEMP_STRINGS, 'en_US');
             expect(spy).not.toHaveBeenCalled();
             spy.mockRestore();
         });
@@ -77,12 +77,12 @@ describe('LanguageDict', () => {
         });
 
         it('should use specified language', () => {
-            expect(LanguageDict.get('hello', null, 'de-DE')).toBe('Hallo');
-            expect(LanguageDict.get('not_found', null, 'de-DE')).toBe('Ressource nicht gefunden');
+            expect(LanguageDict.get('hello', null, 'de_DE')).toBe('Hallo');
+            expect(LanguageDict.get('not_found', null, 'de_DE')).toBe('Ressource nicht gefunden');
         });
 
         it('should fall back to default language', () => {
-            expect(LanguageDict.get('duplicate_entry', { modelName: 'users' }, 'fr-FR'))
+            expect(LanguageDict.get('duplicate_entry', { modelName: 'users' }, 'fr_FR'))
                 .toBe('Duplicate entry for users');
         });
 
@@ -93,31 +93,31 @@ describe('LanguageDict', () => {
 
     describe('hasLanguage()', () => {
         it('should return true for loaded languages', () => {
-            expect(LanguageDict.hasLanguage('en-US')).toBe(true);
-            expect(LanguageDict.hasLanguage('de-DE')).toBe(true);
+            expect(LanguageDict.hasLanguage('en_US')).toBe(true);
+            expect(LanguageDict.hasLanguage('de_DE')).toBe(true);
         });
 
         it('should return false for unloaded languages', () => {
-            expect(LanguageDict.hasLanguage('ja-JP')).toBe(false);
+            expect(LanguageDict.hasLanguage('ja_JP')).toBe(false);
         });
     });
 
     describe('getDictionary()', () => {
         it('should return full dictionary for a language', () => {
-            const dict = LanguageDict.getDictionary('en-US');
+            const dict = LanguageDict.getDictionary('en_US');
             expect(dict.hello).toBe('Hello');
             expect(dict.not_found).toBe('Resource not found');
         });
 
         it('should fall back to default language for unknown', () => {
-            const dict = LanguageDict.getDictionary('xx-XX');
+            const dict = LanguageDict.getDictionary('xx_XX');
             expect(dict.hello).toBe('Hello');
         });
     });
 
     describe('instance API', () => {
         it('should work with constructor-based API', () => {
-            const dict = new LanguageDict('de-DE');
+            const dict = new LanguageDict('de_DE');
             expect(dict.get('hello')).toBe('Hallo');
             expect(dict.get('hello_user', { name: 'Max' })).toBe('Hallo Max');
         });
