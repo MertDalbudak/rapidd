@@ -3,6 +3,7 @@
 /node_modules
 .env
 compose.yml
+/config/app.json
 /logs
 /data/api_credentials.json
 /prisma/client

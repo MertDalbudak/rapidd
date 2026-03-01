@@ -1,85 +1,154 @@
 {
-    "database": {
-        "default": {
-            "host": "localhost",
-            "port": 3306,
-            "username": "username",
-            "password": "password",
-            "database": "db",
-            "type": "MariaDB"
-        }
-    },
     "services": {
-        "GoogleOAuth": {
-            "hostname": "oauth2.googleapis.com",
-            "path": "",
+        "InternalAPI": {
+            "hostname": "api.internal.example.com",
+            "path": "/v1",
             "secure": true,
-            "port": 443,
-            "headers": {
-                "Accept": "application/json"
+            "authorization": {
+                "type": "basic",
+                "username": "service-account",
+                "password": "secret"
             },
-            "queries": {},
-            "endpoints": {
-                "verifyToken": {
-                    "path": "/tokeninfo",
-                    "method": "GET",
-                    "headers": {},
-                    "queries": {}
-                }
-            }
-        },
-        "GoogleAPI": {
-            "hostname": "www.googleapis.com",
-            "path": "/oauth2/v2",
-            "secure": true,
-            "port": 443,
             "headers": {
-                "Accept": "application/json"
+                "Accept": "application/json",
+                "X-Service-Name": "rapidd"
             },
-            "queries": {},
             "endpoints": {
-                "getUserInfo": {
-                    "path": "/userinfo",
-                    "method": "GET",
-                    "headers": {},
-                    "queries": {}
-                }
-            }
-        },
-        "FacebookGraph": {
-            "hostname": "graph.facebook.com",
-            "path": "/v18.0",
-            "secure": true,
-            "port": 443,
-            "headers": {
-                "Accept": "application/json"
-            },
-            "queries": {},
-            "endpoints": {
-                "debugToken": {
-                    "path": "/debug_token",
-                    "method": "GET",
-                    "headers": {},
-                    "queries": {}
+                "getUser": {
+                    "path": "/users/{{id}}",
+                    "method": "GET"
                 },
-                "getUserInfo": {
-                    "path": "/me",
+                "createUser": {
+                    "path": "/users",
+                    "method": "POST"
+                },
+                "updateUser": {
+                    "path": "/users/{{id}}",
+                    "method": "PUT"
+                },
+                "deleteUser": {
+                    "path": "/users/{{id}}",
+                    "method": "DELETE"
+                }
+            }
+        },
+        "PartnerAPI": {
+            "hostname": "partner.example.com",
+            "path": "/api",
+            "secure": true,
+            "authorization": {
+                "type": "bearer",
+                "token": "your-static-bearer-token"
+            },
+            "endpoints": {
+                "listProducts": {
+                    "path": "/products",
                     "method": "GET",
-                    "headers": {},
                     "queries": {
-                        "fields": "id,email,name,first_name,last_name,picture"
+                        "format": "json"
                     }
+                },
+                "getProduct": {
+                    "path": "/products/{{productId}}",
+                    "method": "GET"
+                }
+            }
+        },
+        "WeatherService": {
+            "hostname": "api.weather.example.com",
+            "secure": true,
+            "authorization": {
+                "type": "api-key",
+                "key": "your-api-key",
+                "key-header": "X-API-Key"
+            },
+            "queries": {
+                "units": "metric"
+            },
+            "endpoints": {
+                "current": {
+                    "path": "/current",
+                    "method": "GET"
+                },
+                "forecast": {
+                    "path": "/forecast/{{city}}",
+                    "method": "GET",
+                    "queries": {
+                        "days": "7"
+                    }
+                }
+            }
+        },
+        "CloudStorage": {
+            "hostname": "storage.example.com",
+            "path": "/v2",
+            "secure": true,
+            "authorization": {
+                "type": "oauth2",
+                "hostname": "auth.example.com",
+                "token_path": "/oauth/token",
+                "client_id": "your-client-id",
+                "client_secret": "your-client-secret",
+                "grant_type": "client_credentials",
+                "scope": "storage.read storage.write"
+            },
+            "endpoints": {
+                "listBuckets": {
+                    "path": "/buckets",
+                    "method": "GET"
+                },
+                "getObject": {
+                    "path": "/buckets/{{bucket}}/objects/{{key}}",
+                    "method": "GET"
+                },
+                "uploadObject": {
+                    "path": "/buckets/{{bucket}}/objects",
+                    "method": "POST",
+                    "headers": {
+                        "Content-Type": "application/octet-stream"
+                    }
+                },
+                "deleteObject": {
+                    "path": "/buckets/{{bucket}}/objects/{{key}}",
+                    "method": "DELETE"
+                }
+            }
+        },
+        "CustomAuthAPI": {
+            "hostname": "api.custom.example.com",
+            "secure": true,
+            "authorization": {
+                "type": "api-key",
+                "key": "your-secret-key",
+                "key-header": "X-Custom-Auth",
+                "auth-header": "X-Custom-Auth"
+            },
+            "endpoints": {
+                "healthcheck": {
+                    "path": "/health",
+                    "method": "GET"
                 }
             }
         }
     },
     "emails": {
         "default": {
-            "host": "localhost",
-            "port": 25,
-            "user": null,
-            "password": null,
-            "client": null
+            "host": "smtp.example.com",
+            "port": 587,
+            "secure": false,
+            "user": "noreply@example.com",
+            "password": "your-smtp-password",
+            "from": "\"My App\" <noreply@example.com>",
+            "name": "My App"
+        },
+        "support": {
+            "host": "smtp.example.com",
+            "port": 465,
+            "secure": true,
+            "user": "support@example.com",
+            "password": "your-smtp-password",
+            "from": "\"Support Team\" <support@example.com>",
+            "name": "Support Team"
         }
     },
     "languages": [
@@ -92,6 +161,6 @@
         "ru_RU",
         "de_DE",
         "ja_JP",
-        "tr_TR" 
+        "tr_TR"
     ]
 }
