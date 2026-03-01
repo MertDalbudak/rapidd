@@ -2,26 +2,31 @@
 
 # Rapidd
 
-**Rapidd** is a TypeScript/Fastify framework for rapid development of RESTful APIs with built-in ORM, authentication, authorization, and more. It generates models, routes, and access control rules from your Prisma schema so you can focus on business logic instead of boilerplate.
+**Rapidd** is a TypeScript/Fastify framework for rapid development of RESTful APIs. It generates models, routes, and access control rules from your Prisma schema so you can focus on business logic instead of boilerplate.
+
+**Zero-config by design:** provide a `DATABASE_URL` and Rapidd auto-detects everything else — auth, security, database provider, and more.
 
 ## Features
 
+- **Zero-Config** - Only `DATABASE_URL` required; everything else is auto-detected
 - **Schema-Driven API Generation** - Auto-generate REST endpoints from Prisma schema
 - **TypeScript First** - Full type safety across models, routes, and middleware
 - **Fastify 5** - High-performance HTTP server with plugin architecture
 - **Multi-Database Support** - PostgreSQL and MySQL/MariaDB via Prisma adapters
-- **Row-Level Security (RLS)** - Database-enforced security via session variables
+- **Row-Level Security (RLS)** - Database-enforced security (auto-enabled for PostgreSQL)
 - **Access Control Layer (ACL)** - Fine-grained model-level permissions with relation filtering
 - **Advanced Query Building** - Filtering, sorting, pagination, and relation loading
 - **Model Middleware** - Before/after hooks for all CRUD operations
-- **JWT Authentication** - Built-in auth with access/refresh token rotation
+- **JWT Authentication** - Auto-configured auth with access/refresh token rotation
 - **Rate Limiting** - Redis-backed with memory fallback
 - **Internationalization** - Multi-language support (10 languages included)
 - **Security Headers** - Strict CSP, HSTS, Permissions-Policy out of the box
+- **Reverse Proxy Ready** - Proper `X-Forwarded-For` handling with `TRUST_PROXY`
 
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Zero-Config Philosophy](#zero-config-philosophy)
 - [Configuration](#configuration)
 - [Core Concepts](#core-concepts)
   - [Model Class](#model-class)
@@ -35,6 +40,7 @@
   - [Sorting](#sorting)
   - [Pagination](#pagination)
 - [Authentication](#authentication)
+- [Reverse Proxy](#reverse-proxy)
 - [API Reference](#api-reference)
 - [Docker](#docker)
 - [Examples](#examples)
@@ -51,25 +57,13 @@ npm install
 
 ### 2. Configure Environment
 
-Create `.env` file (see `.env.example`):
+Create a `.env` file with your database connection:
 
 ```env
-# Database
 DATABASE_URL="postgresql://user:pass@localhost:5432/db"
-DATABASE_URL_ADMIN="postgresql://admin:pass@localhost:5432/db"
-
-# JWT
-JWT_SECRET="your-secret-key"
-JWT_REFRESH_SECRET="your-refresh-secret"
-
-# Server
-PORT=3000
-NODE_ENV=development
-
-# Optional
-ALLOWED_ORIGINS="localhost,example.com"
-COOKIE_SECRET="cookie-secret"
 ```
+
+That's it. Rapidd auto-detects everything else. See [Configuration](#configuration) for optional overrides.
 
 ### 3. Set Up Your Database
 
@@ -102,28 +96,49 @@ Your API is now live at `http://localhost:3000`!
 
 ---
 
+## Zero-Config Philosophy
+
+Rapidd is designed to work out of the box. The only required configuration is `DATABASE_URL`. Everything else is auto-detected:
+
+| Feature | Auto-Detection |
+|---------|---------------|
+| **Database Provider** | Detected from URL prefix (`postgresql://` or `mysql://`) |
+| **Auth** | Enabled when a user table is found in the schema (`user`, `users`, `account`, `accounts`) |
+| **Identifier Fields** | Unique string fields on the user model (e.g., `email`, `username`) |
+| **Password Field** | Fields named `password`, `hash`, `passwordHash`, etc. |
+| **JWT Secrets** | Auto-generated if not set (warning: won't persist across restarts) |
+| **RLS** | Enabled for PostgreSQL, disabled for MySQL |
+| **Proxy** | Trusted in production, configurable via `TRUST_PROXY` |
+| **Session Storage** | Redis with automatic memory fallback |
+
+Every auto-detected value can be explicitly overridden via environment variables.
+
+---
+
 ## Configuration
 
 ### Environment Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `DATABASE_URL` | Yes | - | Main database connection string |
+| `DATABASE_URL` | **Yes** | - | Main database connection string |
 | `DATABASE_URL_ADMIN` | No | DATABASE_URL | Admin connection (bypasses RLS) |
 | `DATABASE_PROVIDER` | No | auto-detect | `postgresql` or `mysql` |
-| `JWT_SECRET` | Yes | - | Secret for access tokens |
-| `JWT_REFRESH_SECRET` | Yes | - | Secret for refresh tokens |
 | `PORT` | No | 3000 | Server port |
 | `HOST` | No | 0.0.0.0 | Server bind address |
-| `NODE_ENV` | No | development | `development` or `production` |
+| `NODE_ENV` | No | development | `development`, `production`, or `test` |
+| `TRUST_PROXY` | No | true in prod | Enable reverse proxy support (`true`/`false`) |
 | `ALLOWED_ORIGINS` | No | * | Comma-separated allowed CORS origins |
 | `COOKIE_SECRET` | No | - | Secret for signed cookies |
+| `JWT_SECRET` | No | auto-generated | Secret for access tokens |
+| `JWT_REFRESH_SECRET` | No | auto-generated | Secret for refresh tokens |
 | `AUTH_SALT_ROUNDS` | No | 10 | bcrypt salt rounds |
 | `AUTH_SESSION_STORAGE` | No | redis | Session store (`redis` or `memory`) |
 | `AUTH_SESSION_TTL` | No | 86400 | Session TTL in seconds |
 | `AUTH_ACCESS_TOKEN_EXPIRY` | No | 1d | JWT access token expiry |
 | `AUTH_REFRESH_TOKEN_EXPIRY` | No | 7d | JWT refresh token expiry |
-| `DB_USER_TABLE` | No | users | Prisma user model name |
+| `DB_USER_TABLE` | No | auto-detect | Prisma user model name |
+| `DB_USER_PASSWORD_FIELD` | No | auto-detect | Password field name |
 | `API_RESULT_LIMIT` | No | 500 | Max results per query |
 | `RATE_LIMIT_WINDOW_MS` | No | 900000 | Rate limit window in ms |
 | `RATE_LIMIT_MAX_REQUESTS` | No | 100 | Max requests per window |
@@ -132,6 +147,7 @@ Your API is now live at `http://localhost:3000`!
 | `REDIS_PASSWORD` | No | - | Redis password |
 | `REDIS_DB_RATE_LIMIT` | No | 0 | Redis DB for rate limiting |
 | `REDIS_DB_AUTH` | No | 1 | Redis DB for auth sessions |
+| `RLS_ENABLED` | No | auto-detect | Enable RLS (`true`/`false`); auto: on for PG, off for MySQL |
 | `RLS_NAMESPACE` | No | app | RLS variable namespace |
 | `RLS_USER_ID` | No | current_user_id | RLS user ID variable name |
 | `RLS_USER_ROLE` | No | current_user_role | RLS user role variable name |
@@ -199,7 +215,7 @@ const result = await contacts.upsertMany([
     { contact_id: '3', first_name: 'Bob', email: 'bob@example.com' }
 ], 'contact_id');
 
-// Returns: { created: 2, updated: 1, total: 3 }
+// Returns: { created: 2, updated: 1, totalSuccess: 3, totalFailed: 0 }
 ```
 
 ### QueryBuilder
@@ -232,12 +248,10 @@ import type { AclConfig, RapiddUser } from '../types';
 const acl: AclConfig = {
     model: {
         posts: {
-            // Who can create?
             canCreate(user: RapiddUser): boolean {
                 return ['ADMIN', 'AUTHOR'].includes(user.role);
             },
 
-            // Filter for read access
             getAccessFilter(user: RapiddUser) {
                 if (user.role === 'ADMIN') return {};  // Full access
                 return {
@@ -248,19 +262,16 @@ const acl: AclConfig = {
                 };
             },
 
-            // Filter for update access
             getUpdateFilter(user: RapiddUser) {
                 if (user.role === 'ADMIN') return {};
                 return { authorId: user.id }; // Only own posts
             },
 
-            // Filter for delete access
             getDeleteFilter(user: RapiddUser) {
                 if (user.role === 'ADMIN') return {};
                 return false; // Others can't delete
             },
 
-            // Fields to hide based on role
             getOmitFields(user: RapiddUser): string[] {
                 if (user.role !== 'ADMIN') {
                     return ['internalNotes', 'adminComments'];
@@ -284,7 +295,9 @@ export default acl;
 
 ### Row-Level Security (RLS)
 
-RLS enforces security at the database level using session variables.
+RLS enforces security at the database level using session variables. It is **auto-enabled for PostgreSQL** and **disabled for MySQL** by default. Override with `RLS_ENABLED=true` or `RLS_ENABLED=false`.
+
+When RLS is disabled, queries execute directly without transaction wrapping, improving performance for use cases that don't need database-level security.
 
 **PostgreSQL Setup:**
 ```sql
@@ -305,6 +318,7 @@ SELECT * FROM posts WHERE author_id = @app_current_user_id;
 
 **Configuration:**
 ```env
+RLS_ENABLED=true                  # Override auto-detection
 RLS_NAMESPACE=app
 RLS_USER_ID=current_user_id
 RLS_USER_ROLE=current_user_role
@@ -502,9 +516,11 @@ GET /api/users?limit=10&offset=20  # Page 3
 {
     "data": [...],
     "meta": {
-        "take": 10,
-        "skip": 0,
-        "total": 150
+        "total": 150,
+        "count": 10,
+        "limit": 10,
+        "offset": 0,
+        "hasMore": true
     }
 }
 ```
@@ -513,36 +529,27 @@ GET /api/users?limit=10&offset=20  # Page 3
 
 ## Authentication
 
+Auth is **auto-enabled** when Rapidd detects a user table in your Prisma schema (models named `user`, `users`, `account`, or `accounts`). Identifier fields (e.g., `email`, `username`) and the password field (e.g., `password`, `hash`) are auto-detected from the schema.
+
+When no user table is found, auth routes are not registered and the API operates without authentication.
+
 ### Built-in Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/api/v1/register` | POST | Register new user |
-| `/api/v1/login` | POST | Login with email/password |
-| `/api/v1/logout` | POST | Logout (invalidate session) |
-| `/api/v1/refresh` | POST | Refresh access token |
-| `/api/v1/me` | GET | Get current user |
-
-### Registration
-
-```bash
-POST /api/v1/register
-Content-Type: application/json
-
-{
-    "email": "user@example.com",
-    "password": "securePassword123"
-}
-```
+| `/auth/login` | POST | Login with identifier/password |
+| `/auth/logout` | POST | Logout (invalidate session) |
+| `/auth/refresh` | POST | Refresh access token |
+| `/auth/me` | GET | Get current user |
 
 ### Login
 
 ```bash
-POST /api/v1/login
+POST /auth/login
 Content-Type: application/json
 
 {
-    "email": "user@example.com",
+    "user": "user@example.com",
     "password": "securePassword123"
 }
 ```
@@ -570,10 +577,39 @@ Authorization: Bearer eyJhbG...
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `JWT_SECRET` | auto-generated | Access token secret |
+| `JWT_REFRESH_SECRET` | auto-generated | Refresh token secret |
 | `AUTH_ACCESS_TOKEN_EXPIRY` | 1d | Access token lifetime |
 | `AUTH_REFRESH_TOKEN_EXPIRY` | 7d | Refresh token lifetime |
 | `AUTH_SESSION_TTL` | 86400 | Session TTL in seconds |
 | `AUTH_SESSION_STORAGE` | redis | `redis` or `memory` |
+
+> **Note:** Auto-generated JWT secrets change on every restart. For production, set `JWT_SECRET` and `JWT_REFRESH_SECRET` explicitly to persist sessions across deployments.
+
+---
+
+## Reverse Proxy
+
+Rapidd works behind reverse proxies (nginx, load balancers, etc.) out of the box.
+
+### Configuration
+
+```env
+TRUST_PROXY=true    # Explicitly enable (default: true in production)
+```
+
+When `TRUST_PROXY` is enabled, Fastify correctly resolves client IPs from `X-Forwarded-For` headers. `request.ip` and `request.remoteAddress` will return the real client IP instead of the proxy IP.
+
+### nginx Example
+
+```nginx
+location /api/ {
+    proxy_pass http://localhost:3000;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Host $host;
+}
+```
 
 ---
 
@@ -602,7 +638,7 @@ throw ErrorResponse.tooManyRequests('rate_limit_exceeded');
 ```typescript
 import { prisma, authPrisma } from './src/core/prisma';
 
-// prisma - User context with RLS
+// prisma - User context with RLS (when enabled)
 const posts = await prisma.posts.findMany();
 
 // authPrisma - Admin context (bypasses RLS)
@@ -623,7 +659,7 @@ const [users, posts] = await prismaTransaction([
 ### DMMF Utilities
 
 ```typescript
-import dmmf from './src/core/dmmf';
+import * as dmmf from './src/core/dmmf';
 
 // Get model definition
 const model = dmmf.getModel('users');
@@ -637,8 +673,10 @@ const pk = dmmf.getPrimaryKey('users');
 // Get relations
 const relations = dmmf.getRelations('users');
 
-// Check if list relation
-const isList = dmmf.isListRelation('users', 'posts');
+// Auto-detection helpers
+const userModel = dmmf.findUserModel();
+const identifiers = dmmf.findIdentifierFields('user');
+const passwordField = dmmf.findPasswordField('user');
 ```
 
 ---
@@ -727,7 +765,6 @@ const acl: AclConfig = {
 
             getAccessFilter(user: RapiddUser) {
                 if (user.role === 'ADMIN') return {};
-                // Users see published posts + their own drafts
                 return {
                     OR: [
                         { published: true },
@@ -793,13 +830,13 @@ rapidd/
 │   ├── index.ts               # Framework barrel exports
 │   ├── types.ts               # Shared TypeScript types
 │   ├── auth/                  # Authentication system
-│   │   ├── Auth.ts            # Auth class (login, register, etc.)
+│   │   ├── Auth.ts            # Auth class (auto-detection, login, etc.)
 │   │   └── stores/            # Session stores (Redis, memory)
 │   ├── config/
 │   │   └── acl.ts             # Access control rules (generated)
 │   ├── core/
 │   │   ├── prisma.ts          # Prisma clients, RLS, transactions
-│   │   ├── dmmf.ts            # Schema introspection (DMMF)
+│   │   ├── dmmf.ts            # Schema introspection + auto-detection
 │   │   ├── env.ts             # Environment validation & typed access
 │   │   ├── errors.ts          # ErrorResponse, Response classes
 │   │   ├── i18n.ts            # Language dictionary (LanguageDict)
@@ -809,7 +846,7 @@ rapidd/
 │   │   ├── Model.ts           # Base ORM model class
 │   │   └── QueryBuilder.ts    # REST→Prisma query translation
 │   ├── plugins/               # Fastify plugins
-│   │   ├── auth.ts            # Auth middleware + routes
+│   │   ├── auth.ts            # Auth middleware + conditional routes
 │   │   ├── language.ts        # Accept-Language resolution
 │   │   ├── rateLimit.ts       # Rate limiting (Redis + memory)
 │   │   ├── response.ts        # Reply decorators + error handler
@@ -858,7 +895,7 @@ rapidd/
 DATABASE_URL="postgresql://user:pass@localhost:5432/db"
 ```
 
-Uses `@prisma/adapter-pg` with native `pg` driver.
+Uses `@prisma/adapter-pg` with native `pg` driver. RLS is **auto-enabled**.
 
 ### MySQL / MariaDB
 
@@ -866,7 +903,7 @@ Uses `@prisma/adapter-pg` with native `pg` driver.
 DATABASE_URL="mysql://user:pass@localhost:3306/db"
 ```
 
-Uses `@prisma/adapter-mariadb`.
+Uses `@prisma/adapter-mariadb`. RLS is **auto-disabled** (enable with `RLS_ENABLED=true` if using session variables).
 
 ### Provider Detection
 
@@ -886,18 +923,20 @@ Override with `DATABASE_PROVIDER` environment variable if needed.
 - **Security Headers** - Strict CSP, HSTS, Permissions-Policy
 - **Password Hashing** - bcrypt with configurable rounds
 - **JWT Authentication** - Signed tokens with expiration and refresh rotation
-- **RLS** - Database-level row security
+- **RLS** - Database-level row security (PostgreSQL)
 - **ACL** - Application-level access control with relation filtering
 - **Input Sanitization** - SQL injection prevention via Prisma
+- **Proxy Support** - Proper client IP resolution behind reverse proxies
 
 ### Production Checklist
 
 - [ ] Set `NODE_ENV=production`
-- [ ] Configure strong `JWT_SECRET` and `JWT_REFRESH_SECRET`
+- [ ] Set strong `JWT_SECRET` and `JWT_REFRESH_SECRET`
 - [ ] Set up Redis for rate limiting and sessions
 - [ ] Configure `ALLOWED_ORIGINS` for CORS
 - [ ] Enable HTTPS (reverse proxy or load balancer)
-- [ ] Set up RLS policies in database
+- [ ] Set `TRUST_PROXY=true` if behind a reverse proxy
+- [ ] Set up RLS policies in database (PostgreSQL)
 - [ ] Review and customize ACL rules in `src/config/acl.ts`
 
 ---

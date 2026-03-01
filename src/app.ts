@@ -45,7 +45,9 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
 
     const app = Fastify({
         logger: NODE_ENV !== 'test',
-        trustProxy: NODE_ENV === 'production',
+        trustProxy: process.env.TRUST_PROXY !== undefined
+            ? process.env.TRUST_PROXY === 'true'
+            : NODE_ENV === 'production',
         routerOptions: {
             caseSensitive: true,
         },
@@ -81,9 +83,18 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     const corsOptions = NODE_ENV === 'production'
         ? {
             origin: (origin: string, cb: (err: Error | null, origin: boolean) => void) => {
-                if (!origin || allowedOrigins.find((e: string) => origin.endsWith(e))) {
-                    return cb(null, true);
+                if (!origin) return cb(null, true);
+                let originHost: string;
+                try {
+                    originHost = new URL(origin).hostname;
+                } catch {
+                    return cb(new ErrorResponse(403, 'cors_blocked', { origin }), false);
                 }
+                const allowed = allowedOrigins.some((e: string) => {
+                    const trimmed = e.replace(/^https?:\/\//, '');
+                    return originHost === trimmed || originHost.endsWith(`.${trimmed}`);
+                });
+                if (allowed) return cb(null, true);
                 return cb(new ErrorResponse(403, 'cors_blocked', { origin }), false);
             },
         }

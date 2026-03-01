@@ -128,6 +128,65 @@ export function getRelationInfo(
     };
 }
 
+// =====================================================
+// AUTO-DETECTION HELPERS
+// =====================================================
+
+const USER_MODEL_NAMES = ['user', 'users', 'account', 'accounts'];
+const PASSWORD_FIELD_NAMES = ['password', 'hash', 'passwordhash', 'password_hash', 'passwd', 'pwd', 'hashed_password'];
+
+/**
+ * Find a user-like model by common naming conventions
+ */
+export function findUserModel(): DMMFModel | null {
+    if (!_dmmf) return null;
+    for (const name of USER_MODEL_NAMES) {
+        const model = _dmmf.datamodel.models.find(
+            (m: DMMFModel) => m.name.toLowerCase() === name
+        );
+        if (model) return model;
+    }
+    return null;
+}
+
+/**
+ * Find unique scalar string fields suitable as login identifiers
+ */
+export function findIdentifierFields(modelName: string): string[] {
+    const fields = getScalarFields(modelName);
+    const result: string[] = [];
+
+    for (const [name, field] of Object.entries(fields)) {
+        if (field.isUnique && field.type === 'String' && !field.isId) {
+            const lower = name.toLowerCase();
+            if (!PASSWORD_FIELD_NAMES.includes(lower)) {
+                result.push(name);
+            }
+        }
+    }
+
+    return result.length > 0 ? result : ['email'];
+}
+
+/**
+ * Find the password field by common naming conventions
+ */
+export function findPasswordField(modelName: string): string | null {
+    const fields = getScalarFields(modelName);
+
+    for (const [name] of Object.entries(fields)) {
+        if (PASSWORD_FIELD_NAMES.includes(name.toLowerCase())) {
+            return name;
+        }
+    }
+
+    return null;
+}
+
+// =====================================================
+// RELATIONSHIP BUILDING
+// =====================================================
+
 /**
  * Build relationships configuration for a model (replaces relationships.json)
  */

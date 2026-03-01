@@ -48,6 +48,7 @@ class Model {
      */
     constructor(name: string, options?: ModelOptions) {
         this.name = name;
+        this.prisma = (prisma as any)[name];
         this.queryBuilder = (this.constructor as typeof Model).QueryBuilder ?? new QueryBuilder(name);
         const aclConfig = getAcl();
         this.acl = aclConfig.model[name] || {};

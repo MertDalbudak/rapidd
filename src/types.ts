@@ -10,6 +10,8 @@ export interface RapiddUser {
     [key: string]: unknown;
 }
 
+export type AuthStrategy = 'bearer' | 'basic' | 'cookie' | 'header';
+
 export interface AuthOptions {
     userModel?: string;
     userSelect?: Record<string, boolean> | null;
@@ -24,6 +26,9 @@ export interface AuthOptions {
         refreshExpiry?: string;
     };
     saltRounds?: number;
+    strategies?: AuthStrategy[];
+    cookieName?: string;
+    customHeaderName?: string;
 }
 
 // =====================================================

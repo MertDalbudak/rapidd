@@ -4,7 +4,8 @@ import crypto from 'crypto';
 import { authPrisma } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { createStore, SessionStoreManager } from './stores';
-import type { RapiddUser, AuthOptions, ISessionStore } from '../types';
+import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField } from '../core/dmmf';
+import type { RapiddUser, AuthOptions, AuthStrategy, ISessionStore } from '../types';
 
 /**
  * Authentication class for user login, logout, and session management
@@ -12,37 +13,37 @@ import type { RapiddUser, AuthOptions, ISessionStore } from '../types';
  * Provides JWT-based authentication with access/refresh token rotation,
  * password hashing with bcrypt, and pluggable session storage (Redis/memory).
  *
- * @example
- * // Create auth instance
- * const auth = new Auth({
- *     userModel: 'users',
- *     identifierFields: ['email', 'username'],
- *     session: { ttl: 86400 }
- * });
+ * Auto-detects user model, identifier fields, and password field from Prisma schema.
+ * When no user table is found, auth is gracefully disabled.
  *
  * @example
- * // Use in Fastify route
- * fastify.post('/login', async (request, reply) => {
+ * const auth = new Auth();
+ * await auth.initialize(); // Auto-detects config from DMMF
+ * if (auth.isEnabled()) {
  *     const result = await auth.login(request.body);
- *     return result;
- * });
- *
- * @example
- * // Hash password before creating user
- * const hashedPassword = await auth.hashPassword('mypassword');
- * await prisma.users.create({ data: { email, password: hashedPassword } });
+ * }
  */
 export class Auth {
     options: Required<Pick<AuthOptions, 'passwordField' | 'saltRounds'>> & AuthOptions & {
         identifierFields: string[];
+        strategies: AuthStrategy[];
+        cookieName: string;
+        customHeaderName: string;
         session: { ttl: number; store?: string };
         jwt: { secret?: string; refreshSecret?: string; accessExpiry: string; refreshExpiry: string };
     };
 
     private _userModel: any = null;
     private _sessionStore: ISessionStore | null = null;
+    private _authDisabled = false;
+    private _initPromise: Promise<void> | null = null;
+    private _explicitIdentifierFields: boolean;
+    private _explicitPasswordField: boolean;
 
     constructor(options: AuthOptions = {}) {
+        this._explicitIdentifierFields = !!(options.identifierFields && options.identifierFields.length > 0);
+        this._explicitPasswordField = !!(options.passwordField || process.env.DB_USER_PASSWORD_FIELD);
+
         this.options = {
             userModel: options.userModel || process.env.DB_USER_TABLE,
             userSelect: options.userSelect || null,
@@ -61,6 +62,11 @@ export class Auth {
                 ...options.jwt,
             },
             saltRounds: options.saltRounds || parseInt(process.env.AUTH_SALT_ROUNDS || '10', 10),
+            strategies: options.strategies
+                || (process.env.AUTH_STRATEGIES?.split(',').map(s => s.trim()) as AuthStrategy[])
+                || ['bearer'],
+            cookieName: options.cookieName || process.env.AUTH_COOKIE_NAME || 'token',
+            customHeaderName: options.customHeaderName || process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token',
         };
 
         // Bind methods for use as handlers
@@ -70,9 +76,80 @@ export class Auth {
         this.me = this.me.bind(this);
     }
 
+    // ── Initialization ──────────────────────────────
+
+    /**
+     * Initialize auth by auto-detecting config from DMMF.
+     * Must be called before using auth (the auth plugin calls this automatically).
+     */
+    async initialize(): Promise<void> {
+        if (this._initPromise) return this._initPromise;
+
+        this._initPromise = this._doInitialize();
+        return this._initPromise;
+    }
+
+    private async _doInitialize(): Promise<void> {
+        try {
+            await loadDMMF();
+        } catch {
+            console.warn('[Auth] Could not load DMMF, auth auto-detection skipped');
+            return;
+        }
+
+        // Auto-detect user model from DMMF
+        const userModel = findUserModel();
+        if (!userModel) {
+            // Check if a model name was explicitly configured
+            if (!this.options.userModel) {
+                this._authDisabled = true;
+                console.log('[Auth] No user table detected in schema, auth disabled');
+                return;
+            }
+            // Model name was set but not found in DMMF — warn but don't disable
+            // (it might still exist in the Prisma client under a different casing)
+        }
+
+        const modelName = this.options.userModel || userModel?.name;
+
+        if (modelName && !this.options.userModel) {
+            this.options.userModel = modelName;
+        }
+
+        // Auto-detect identifier fields
+        if (!this._explicitIdentifierFields && modelName) {
+            const detected = findIdentifierFields(modelName);
+            this.options.identifierFields = detected;
+        }
+
+        // Auto-detect password field
+        if (!this._explicitPasswordField && modelName) {
+            const detected = findPasswordField(modelName);
+            if (detected) {
+                this.options.passwordField = detected;
+            }
+        }
+
+        // Auto-generate JWT secrets if not set
+        if (!this.options.jwt.secret) {
+            this.options.jwt.secret = crypto.randomBytes(32).toString('hex');
+            console.warn('[Auth] No JWT_SECRET set, using auto-generated secret (sessions won\'t persist across restarts)');
+        }
+        if (!this.options.jwt.refreshSecret) {
+            this.options.jwt.refreshSecret = crypto.randomBytes(32).toString('hex');
+        }
+    }
+
+    /**
+     * Whether auth is enabled (user table was found or configured)
+     */
+    isEnabled(): boolean {
+        return !this._authDisabled;
+    }
+
     // ── User Model ──────────────────────────────────
 
-    getUserModel(): any {
+    getUserModel(): any | null {
         if (this._userModel) return this._userModel;
 
         const modelName = this.options.userModel?.toLowerCase();
@@ -94,7 +171,7 @@ export class Auth {
             }
         }
 
-        throw new Error('[Auth] Could not find user model. Set userModel option or DB_USER_TABLE env.');
+        return null;
     }
 
     private _buildUserQuery(includePassword = false): Record<string, unknown> {
@@ -142,7 +219,7 @@ export class Auth {
         return jwt.sign(
             { sub: user.id, sessionId, user: sanitizedUser },
             this.options.jwt.secret,
-            { expiresIn: this.options.jwt.accessExpiry } as any
+            { algorithm: 'HS256', expiresIn: this.options.jwt.accessExpiry as any }
         );
     }
 
@@ -153,7 +230,7 @@ export class Auth {
         return jwt.sign(
             { sub: user.id, type: 'refresh' },
             secret,
-            { expiresIn: this.options.jwt.refreshExpiry } as any
+            { algorithm: 'HS256', expiresIn: this.options.jwt.refreshExpiry as any }
         );
     }
 
@@ -163,7 +240,7 @@ export class Auth {
                 ? (this.options.jwt.refreshSecret || this.options.jwt.secret)
                 : this.options.jwt.secret;
             if (!secret) return null;
-            return jwt.verify(token, secret);
+            return jwt.verify(token, secret, { algorithms: ['HS256'] });
         } catch {
             return null;
         }
@@ -186,6 +263,7 @@ export class Auth {
             if (!identifier || !password) return null;
 
             const User = this.getUserModel();
+            if (!User) return null;
             let user: Record<string, unknown> | null = null;
 
             for (const field of this.options.identifierFields) {
@@ -230,6 +308,16 @@ export class Auth {
         return null;
     }
 
+    async handleCookieAuth(cookieValue: string): Promise<RapiddUser | null> {
+        if (!cookieValue) return null;
+        return this.handleBearerAuth(cookieValue);
+    }
+
+    async handleCustomHeaderAuth(headerValue: string): Promise<RapiddUser | null> {
+        if (!headerValue) return null;
+        return this.handleBearerAuth(headerValue);
+    }
+
     // ── Route Handlers (framework-agnostic) ─────────
 
     async login(body: { user: string; password: string }): Promise<{
@@ -244,6 +332,10 @@ export class Auth {
         }
 
         const User = this.getUserModel();
+        if (!User) {
+            throw new ErrorResponse(500, 'auth_not_configured');
+        }
+
         const search = this.options.identifierFields.reduce((acc: any, curr: string) => {
             acc.OR.push({[curr]: identifier});
             return acc;
@@ -300,6 +392,10 @@ export class Auth {
         }
 
         const User = this.getUserModel();
+        if (!User) {
+            throw new ErrorResponse(500, 'auth_not_configured');
+        }
+
         const user = await User.findUnique({
             where: { id: decoded.sub },
             ...this._buildUserQuery(false),
@@ -336,6 +432,3 @@ export class Auth {
         return bcrypt.compare(password, hash);
     }
 }
-
-// Default instance
-export const defaultAuth = new Auth();

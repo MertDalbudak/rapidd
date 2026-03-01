@@ -23,7 +23,8 @@ export {
     getAcl,
     setRLSVariables,
     resetRLSVariables,
-    dbProvider
+    dbProvider,
+    rlsEnabled
 } from './core/prisma';
 
 export * as dmmf from './core/dmmf';
@@ -58,7 +59,7 @@ export {
 export { uploadPlugin } from './plugins/upload';
 export { default as responsePlugin } from './plugins/response';
 export { default as apiPlugin } from './plugins/response'; // backward compat alias
-export { default as authPlugin, Auth as AuthPlugin } from './plugins/auth';
+export { default as authPlugin } from './plugins/auth';
 export { default as languagePlugin } from './plugins/language';
 export { default as securityPlugin } from './plugins/security';
 export { default as rateLimitPlugin, RateLimiter } from './plugins/rateLimit';
@@ -71,6 +72,7 @@ export { buildApp } from './app';
 // ── Types ────────────────────────────────────────────────────────────────────
 export type {
     RapiddUser,
+    AuthStrategy,
     ModelOptions,
     GetManyResult,
     UpsertManyResult,

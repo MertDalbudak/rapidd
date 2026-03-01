@@ -48,9 +48,9 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         return this.code(statusCode).send({ status_code: statusCode, message: translatedMessage });
     });
 
-    // Request logging
+    // Set remote address (Fastify resolves X-Forwarded-For when trustProxy is enabled)
     fastify.addHook('onRequest', async (request) => {
-        request.remoteAddress = (request.headers['x-forwarded-for'] as string) || request.ip;
+        request.remoteAddress = request.ip;
     });
 
     // Global error handler

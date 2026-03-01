@@ -1,6 +1,6 @@
 import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
-import { Auth, defaultAuth } from '../auth/Auth';
+import { Auth } from '../auth/Auth';
 import { ErrorResponse } from '../core/errors';
 import type { RapiddUser, AuthOptions } from '../types';
 
@@ -12,38 +12,98 @@ interface AuthPluginOptions {
 /**
  * Authentication plugin for Fastify.
  * Parses Authorization header (Basic / Bearer) and sets request.user.
- * Also registers /auth/* routes for login, logout, refresh, me.
+ * Registers /auth/* routes when a user table is detected.
+ * Gracefully disables auth when no user table exists in the schema.
  */
 const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, options) => {
-    const auth = options.auth || (options.authOptions ? new Auth(options.authOptions) : defaultAuth);
+    const auth = options.auth || new Auth(options.authOptions);
 
-    // Parse auth on every request
+    // Initialize auth (auto-detects user model, fields, JWT secrets)
+    await auth.initialize();
+
+    if (!auth.isEnabled()) {
+        // Auth disabled — still decorate for type safety but skip routes
+        fastify.decorate('auth', auth);
+        fastify.decorate('requireAuth', function requireAuth(_request: FastifyRequest) {
+            throw new ErrorResponse(401, 'authentication_not_available');
+        });
+        fastify.decorate('requireRole', function requireRole(..._roles: string[]) {
+            return async function (_request: FastifyRequest) {
+                throw new ErrorResponse(401, 'authentication_not_available');
+            };
+        });
+        return;
+    }
+
+    // Parse auth on every request using configured strategies (checked in order)
     fastify.addHook('onRequest', async (request) => {
-        const authHeader = request.headers.authorization;
+        let user: RapiddUser | null = null;
 
-        if (authHeader) {
-            let user: RapiddUser | null = null;
+        for (const strategy of auth.options.strategies) {
+            if (user) break;
 
-            if (authHeader.startsWith('Basic ')) {
-                user = await auth.handleBasicAuth(authHeader.substring(6));
-            } else if (authHeader.startsWith('Bearer ')) {
-                user = await auth.handleBearerAuth(authHeader.substring(7));
+            switch (strategy) {
+                case 'bearer': {
+                    const h = request.headers.authorization;
+                    if (h?.startsWith('Bearer ')) {
+                        user = await auth.handleBearerAuth(h.substring(7));
+                    }
+                    break;
+                }
+                case 'basic': {
+                    const h = request.headers.authorization;
+                    if (h?.startsWith('Basic ')) {
+                        user = await auth.handleBasicAuth(h.substring(6));
+                    }
+                    break;
+                }
+                case 'cookie': {
+                    const raw = request.cookies?.[auth.options.cookieName];
+                    if (raw) {
+                        const val = typeof raw === 'object' ? (raw as any).value : raw;
+                        user = await auth.handleCookieAuth(val);
+                    }
+                    break;
+                }
+                case 'header': {
+                    const val = request.headers[auth.options.customHeaderName.toLowerCase()] as string | undefined;
+                    if (val) {
+                        user = await auth.handleCustomHeaderAuth(val);
+                    }
+                    break;
+                }
             }
+        }
 
-            if (user) {
-                request.user = user;
-            }
+        if (user) {
+            request.user = user;
         }
     });
 
     // Auth routes
     fastify.post('/auth/login', async (request, reply) => {
         const result = await auth.login(request.body as { user: string; password: string });
+
+        if (auth.options.strategies.includes('cookie')) {
+            reply.setCookie(auth.options.cookieName, result.accessToken, {
+                path: '/',
+                httpOnly: true,
+                secure: process.env.NODE_ENV === 'production',
+                sameSite: 'strict',
+                signed: !!process.env.COOKIE_SECRET,
+            });
+        }
+
         return reply.send(result);
     });
 
     fastify.post('/auth/logout', async (request, reply) => {
         const result = await auth.logout(request.headers.authorization);
+
+        if (auth.options.strategies.includes('cookie')) {
+            reply.clearCookie(auth.options.cookieName, { path: '/' });
+        }
+
         return reply.send(result);
     });
 
@@ -80,7 +140,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
 };
 
 export default fp(authPlugin, { name: 'rapidd-auth' });
-export { Auth, defaultAuth };
+export { Auth };
 
 // Fastify type augmentation for auth decorators
 declare module 'fastify' {

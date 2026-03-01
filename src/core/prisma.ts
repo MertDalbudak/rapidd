@@ -9,11 +9,20 @@ const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'cli
 /** Request context storage for async operations */
 export const requestContext = new AsyncLocalStorage<RLSContext>();
 
+/** Validates that an RLS identifier contains only safe characters (letters, digits, underscores) */
+const IDENTIFIER_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+function validateIdentifier(value: string, name: string): string {
+    if (!IDENTIFIER_RE.test(value)) {
+        throw new Error(`[RLS] Invalid identifier for ${name}: "${value}". Only letters, numbers, and underscores allowed.`);
+    }
+    return value;
+}
+
 /** RLS configuration from environment variables */
 const RLS_CONFIG: RLSConfig = {
-    namespace: process.env.RLS_NAMESPACE || 'app',
-    userId: process.env.RLS_USER_ID || 'current_user_id',
-    userRole: process.env.RLS_USER_ROLE || 'current_user_role',
+    namespace: validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE'),
+    userId: validateIdentifier(process.env.RLS_USER_ID || 'current_user_id', 'RLS_USER_ID'),
+    userRole: validateIdentifier(process.env.RLS_USER_ROLE || 'current_user_role', 'RLS_USER_ROLE'),
 };
 
 // =====================================================
@@ -68,6 +77,11 @@ const authConnection = createAdapter(process.env.DATABASE_URL_ADMIN || process.e
 const baseConnection = createAdapter(process.env.DATABASE_URL || '');
 
 export const dbProvider: DatabaseProvider = baseConnection.provider;
+
+/** Whether RLS is enabled. Auto: true for PostgreSQL, false for MySQL. Override with RLS_ENABLED env var. */
+export const rlsEnabled: boolean = process.env.RLS_ENABLED !== undefined
+    ? process.env.RLS_ENABLED === 'true'
+    : dbProvider === 'postgresql';
 
 export const authPrisma = new PrismaClient({
     adapter: authConnection.adapter,
@@ -124,6 +138,8 @@ export async function resetRLSVariables(tx: any): Promise<void> {
 export const prisma = basePrisma.$extends({
     query: {
         async $allOperations({ operation, args, query, model }: any) {
+            if (!rlsEnabled) return query(args);
+
             const context = requestContext.getStore();
 
             if (!context?.userId || !context?.userRole) {
@@ -163,7 +179,7 @@ export async function prismaTransaction(
     const context = requestContext.getStore();
 
     return basePrisma.$transaction(async (tx: any) => {
-        if (context?.userId && context?.userRole) {
+        if (rlsEnabled && context?.userId && context?.userRole) {
             await setRLSVariables(tx, context.userId, context.userRole);
         }
 

@@ -13,6 +13,7 @@ jest.mock('../src/core/prisma', () => ({
     requestContext: { run: jest.fn((store: any, fn: any) => fn()) },
     getAcl: () => ({ model: {} }),
     disconnectAll: jest.fn().mockResolvedValue(undefined),
+    rlsEnabled: false,
 }));
 
 jest.mock('../src/core/dmmf', () => ({
@@ -26,6 +27,9 @@ jest.mock('../src/core/dmmf', () => ({
     isListRelation: jest.fn(() => false),
     getRelationInfo: jest.fn(),
     buildRelationships: jest.fn(() => []),
+    findUserModel: jest.fn(() => null),
+    findIdentifierFields: jest.fn(() => ['email']),
+    findPasswordField: jest.fn(() => 'password'),
 }));
 
 // Must mock LanguageDict before app imports it
@@ -43,8 +47,13 @@ jest.mock('../src/core/i18n', () => ({
 jest.mock('../src/auth/Auth', () => {
     return {
         Auth: class MockAuth {
+            options = { strategies: ['bearer'], cookieName: 'token', customHeaderName: 'X-Auth-Token' };
+            initialize() { return Promise.resolve(); }
+            isEnabled() { return false; }
             handleBasicAuth() { return null; }
             handleBearerAuth() { return null; }
+            handleCookieAuth() { return null; }
+            handleCustomHeaderAuth() { return null; }
         }
     };
 });

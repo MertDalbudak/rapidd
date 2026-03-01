@@ -6,8 +6,10 @@
 export interface EnvConfig {
     // Required
     DATABASE_URL: string;
-    JWT_SECRET: string;
-    JWT_REFRESH_SECRET: string;
+
+    // Optional (auto-generated if auth is enabled)
+    JWT_SECRET?: string;
+    JWT_REFRESH_SECRET?: string;
 
     // Optional with defaults
     NODE_ENV: 'development' | 'production' | 'test';
@@ -44,15 +46,17 @@ export interface EnvConfig {
     REDIS_DB_AUTH: number;
 
     // RLS
+    RLS_ENABLED?: boolean;
     RLS_NAMESPACE: string;
     RLS_USER_ID: string;
     RLS_USER_ROLE: string;
+
+    // Proxy
+    TRUST_PROXY?: boolean;
 }
 
 const REQUIRED_VARS = [
-    'DATABASE_URL',
-    'JWT_SECRET',
-    'JWT_REFRESH_SECRET'
+    'DATABASE_URL'
 ] as const;
 
 const DEFAULTS: Partial<Record<keyof EnvConfig, string | number | boolean>> = {
