@@ -1,5 +1,6 @@
 import { readdirSync } from 'fs';
 import path from 'path';
+import { Logger } from '../utils/Logger';
 
 const ROOT = process.env.ROOT || '';
 const DEFAULT_STRINGS_PATH = ROOT ? path.join(ROOT, 'locales') : './locale';
@@ -40,14 +41,14 @@ export class LanguageDict {
                         this._dictionaries[langCode] = require(dictPath);
                         this._available.push(langCode);
                     } catch (error) {
-                        console.error(`Failed to load dictionary for ${langCode}:`, (error as Error).message);
+                        Logger.error(error as Error, { langCode });
                     }
                 }
             }
 
             this._initialized = true;
         } catch (error) {
-            console.error('Failed to initialize LanguageDict:', (error as Error).message);
+            Logger.error(error as Error);
             this._dictionaries = {};
             this._available = [];
         }

@@ -44,6 +44,7 @@ export { modelMiddleware } from './core/middleware';
 // ── Utilities ────────────────────────────────────────────────────────────────
 export { ApiClient, ApiClientError } from './utils/ApiClient';
 export { Mailer } from './utils/Mailer';
+export { Logger } from './utils/Logger';
 export { env } from './utils';
 
 // ── Environment ──────────────────────────────────────────────────────────────
@@ -110,3 +111,4 @@ export type {
 } from './plugins/upload';
 
 export type { EnvConfig } from './core/env';
+export type { LogLevel } from './utils/Logger';

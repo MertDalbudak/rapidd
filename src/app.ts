@@ -12,6 +12,7 @@ import { LanguageDict } from './core/i18n';
 import { disconnectAll } from './core/prisma';
 import { validateEnv } from './core/env';
 import { env } from './utils';
+import { Logger } from './utils/Logger';
 
 // Plugins
 import securityPlugin from './plugins/security';
@@ -183,7 +184,7 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
                         await app.register(plugin, { prefix: route });
                     }
                 } catch (err) {
-                    console.error(`Failed to load route ${route}:`, (err as Error).message);
+                    Logger.error(err as Error, { route });
                 }
             }
         }
@@ -193,12 +194,12 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
 
 // Handle uncaught errors
 process.on('uncaughtException', (err) => {
-    console.error('[Uncaught Exception]', err);
+    Logger.error(err);
     process.exit(1);
 });
 
-process.on('unhandledRejection', (reason, promise) => {
-    console.error('[Unhandled Rejection] at:', promise, 'reason:', reason);
+process.on('unhandledRejection', (reason) => {
+    Logger.error(reason as Error);
 });
 
 export default buildApp;

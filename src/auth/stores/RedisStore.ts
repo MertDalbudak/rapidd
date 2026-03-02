@@ -1,5 +1,6 @@
 import Redis from 'ioredis';
 import { ISessionStore } from './ISessionStore';
+import { Logger } from '../../utils/Logger';
 
 /**
  * Redis session store using ioredis.
@@ -36,11 +37,11 @@ export class RedisStore extends ISessionStore {
             connectTimeout: 5000,
         });
 
-        this.client.on('connect', () => console.log('[RedisStore] Connected'));
-        this.client.on('ready', () => console.log('[RedisStore] Ready'));
-        this.client.on('error', (err: Error) => console.error('[RedisStore] Error:', err.message));
-        this.client.on('close', () => console.warn('[RedisStore] Connection closed'));
-        this.client.on('reconnecting', () => console.log('[RedisStore] Reconnecting...'));
+        this.client.on('connect', () => Logger.log('RedisStore connected'));
+        this.client.on('ready', () => Logger.log('RedisStore ready'));
+        this.client.on('error', (err: Error) => Logger.error(err));
+        this.client.on('close', () => Logger.warn('RedisStore connection closed'));
+        this.client.on('reconnecting', () => Logger.log('RedisStore reconnecting'));
 
         this._initialized = true;
         return this.client;

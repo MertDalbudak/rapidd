@@ -51,6 +51,10 @@ export interface EnvConfig {
 
     // Proxy
     TRUST_PROXY?: boolean;
+
+    // Logging
+    LOG_LEVEL: 'essential' | 'fine' | 'finest';
+    LOG_DIR: string;
 }
 
 const REQUIRED_VARS = [
@@ -76,7 +80,9 @@ const DEFAULTS: Partial<Record<keyof EnvConfig, string | number | boolean>> = {
     REDIS_PORT: 6379,
     REDIS_DB_RATE_LIMIT: 0,
     REDIS_DB_AUTH: 1,
-    RLS_NAMESPACE: 'app'
+    RLS_NAMESPACE: 'app',
+    LOG_LEVEL: 'essential',
+    LOG_DIR: 'logs',
 };
 
 /**

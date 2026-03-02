@@ -25,7 +25,7 @@ COPY prisma ./prisma
 RUN npx prisma generate --generator client
 
 # Stage 3: Runtime
-FROM node:24-alpine
+FROM node:current-alpine
 
 WORKDIR /app
 
@@ -50,8 +50,16 @@ COPY --chown=rapidd:nodejs public ./public
 
 RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
+RUN mkdir -p /app/uploads /app/temp/uploads /app/logs && \
+    chown -R rapidd:nodejs /app/uploads /app/temp /app/logs
+
+VOLUME ["/app/uploads", "/app/logs"]
+
 USER rapidd
 
 EXPOSE 3000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD node -e "fetch('http://localhost:3000/').then(r => process.exit(r.status === 404 ? 0 : 1)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["node", "dist/main.js"]

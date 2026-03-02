@@ -31,18 +31,14 @@ Rapidd generates a fully-featured REST API from your database schema — then ge
 
 ```bash
 mkdir my-api && cd my-api
-npx rapidd create-project # scaffold project files
-npm install
+npx @rapidd/core create-project && npm install
 ```
 
-```env
-DATABASE_URL="postgresql://user:pass@localhost:5432/mydb"
-```
+Set `DATABASE_URL` in `.env`, then add your schema in `prisma/schema.prisma`(or create from DB via `npx prisma db pull`):
 
 ```bash
-npx prisma db pull        # introspect existing database
-npx rapidd build          # generate models, routes & ACL scaffold
-npm run dev               # http://localhost:3000
+npx rapidd build            # generate models, routes & ACL scaffold
+npm run dev                 # http://localhost:3000
 ```
 
 Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
@@ -51,25 +47,22 @@ Every table gets full CRUD endpoints. Auth is enabled automatically when a user 
 
 ---
 
-## Features
+## How It Compares
 
-| Feature | PostgreSQL | MySQL/MariaDB |
-|---------|:----------:|:-------------:|
-| CRUD API generation | ✓ | ✓ |
-| Query filtering (20+ operators) | ✓ | ✓ |
-| Relations & deep includes | ✓ | ✓ |
-| Field selection | ✓ | ✓ |
-| JWT authentication (4 methods) | ✓ | ✓ |
-| Per-model ACL | ✓ | ✓ |
-| Row-Level Security (database-enforced) | ✓ | — |
-| Rate limiting (Redis + memory fallback) | ✓ | ✓ |
-| File uploads with MIME validation | ✓ | ✓ |
-| SMTP mailer with EJS templates | ✓ | ✓ |
-| Config-driven HTTP client | ✓ | ✓ |
-| i18n (10 languages) | ✓ | ✓ |
-| Security headers (HSTS, CSP, etc.) | ✓ | ✓ |
+| | Rapidd | Hasura | PostgREST | Supabase | Strapi |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Full source code ownership | ✓ | — | — | — | ✓ |
+| Schema-first (no UI) | ✓ | ✓ | ✓ | ✓ | — |
+| REST API | ✓ | — | ✓ | ✓ | ✓ |
+| Multi-database | ✓ | ✓ | — | — | ✓ |
+| Built-in auth | ✓ | — | — | ✓ | ✓ |
+| Per-model ACL | ✓ | ✓ | — | — | ✓ |
+| Row-level security | ✓* | ✓ | ✓ | ✓ | — |
+| Before/after middleware | ✓ | — | — | — | ✓ |
+| Custom routes alongside generated | ✓ | — | — | ✓ | ✓ |
+| No vendor dependency | ✓ | ✓ | ✓ | — | ✓ |
 
-> **MySQL note:** ACL provides application-level access control for all databases. RLS adds database-enforced row filtering as a second layer (PostgreSQL-only). For MySQL, ACL is your primary access control mechanism and covers most use cases. See the **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** for details.
+<sub>* PostgreSQL only. All other features support PostgreSQL and MySQL/MariaDB.</sub>
 
 ---
 
@@ -235,11 +228,9 @@ docker build -t my-api . && docker run -p 3000:3000 --env-file .env my-api
 | [`@rapidd/core`](https://www.npmjs.com/package/@rapidd/core) | Framework runtime, project scaffolding, and unified `npx rapidd` CLI |
 | [`@rapidd/build`](https://www.npmjs.com/package/@rapidd/build) | Code generation — models, routes, and ACL from your Prisma schema |
 
-All commands go through `npx rapidd`:
-
 ```bash
-npx rapidd create-project   # scaffold a new project (@rapidd/core)
-npx rapidd build             # generate from schema  (@rapidd/build)
+npx @rapidd/core create-project   # scaffold a new project
+npx rapidd build                   # generate from schema (after npm install)
 ```
 
 ---

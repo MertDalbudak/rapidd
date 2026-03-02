@@ -1,5 +1,6 @@
 import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
+import { Logger } from '../utils/Logger';
 import * as dmmf from '../core/dmmf';
 import type {
     RelationConfig,
@@ -2065,7 +2066,7 @@ class QueryBuilder {
      * Handle Prisma errors and convert to standardized error responses
      */
     static errorHandler(error: any, data: Record<string, unknown> = {}): QueryErrorResponse {
-        console.error(error);
+        Logger.error(error);
 
         // Default values
         let statusCode: number = error.status_code || 500;

@@ -2,6 +2,7 @@ import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { ErrorResponse, ErrorBasicResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
+import { Logger } from '../utils/Logger';
 import type { ListMeta } from '../types';
 
 /**
@@ -37,7 +38,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         const request = this.request;
         const language = request?.language || 'en_US';
         const error = new ErrorResponse(statusCode, message, data as Record<string, unknown> | null);
-        console.error(`Error ${statusCode}: ${message}`);
+        Logger.error(message, { statusCode });
         return this.code(statusCode).send(error.toJSON(language));
     });
 
@@ -72,7 +73,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
                 ? 'Something went wrong'
                 : err.message || String(error);
 
-        console.error(error);
+        Logger.error(error);
         return reply.code(status).send({ status_code: status, message });
     });
 };

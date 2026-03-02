@@ -5,6 +5,7 @@ import { authPrisma } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { createStore, SessionStoreManager } from './stores';
 import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField } from '../core/dmmf';
+import { Logger } from '../utils/Logger';
 import type { RapiddUser, AuthOptions, AuthMethod, ISessionStore } from '../types';
 
 /**
@@ -99,7 +100,7 @@ export class Auth {
         try {
             await loadDMMF();
         } catch {
-            console.warn('[Auth] Could not load DMMF, auth auto-detection skipped');
+            Logger.warn('Auth: could not load DMMF, auto-detection skipped');
             return;
         }
 
@@ -109,7 +110,7 @@ export class Auth {
             // Check if a model name was explicitly configured
             if (!this.options.userModel) {
                 this._authDisabled = true;
-                console.log('[Auth] No user table detected in schema, auth disabled');
+                Logger.log('Auth: no user table detected, auth disabled');
                 return;
             }
             // Model name was set but not found in DMMF — warn but don't disable
@@ -142,7 +143,7 @@ export class Auth {
                 throw new Error('[Auth] JWT_SECRET is required in production. Generate one with: node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"');
             }
             this.options.jwt.secret = crypto.randomBytes(32).toString('hex');
-            console.warn('[Auth] No JWT_SECRET set, using auto-generated secret (sessions won\'t persist across restarts)');
+            Logger.warn('Auth: no JWT_SECRET set, using auto-generated secret (sessions won\'t persist across restarts)');
         }
         if (!this.options.jwt.refreshSecret) {
             if (process.env.NODE_ENV === 'production') {
@@ -173,7 +174,7 @@ export class Auth {
                 this._userModel = (authPrisma as any)[match];
                 return this._userModel;
             }
-            console.warn(`[Auth] userModel="${modelName}" not found in Prisma models`);
+            Logger.warn('Auth: userModel not found in Prisma models', { userModel: modelName });
         }
 
         for (const name of ['users', 'user', 'Users', 'User']) {

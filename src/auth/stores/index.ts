@@ -1,6 +1,7 @@
 import { ISessionStore } from './ISessionStore';
 import { MemoryStore } from './MemoryStore';
 import { RedisStore } from './RedisStore';
+import { Logger } from '../../utils/Logger';
 
 const builtInStores: Record<string, new (options?: any) => ISessionStore> = {
     memory: MemoryStore,
@@ -41,7 +42,7 @@ export class SessionStoreManager extends ISessionStore {
 
         const StoreClass = builtInStores[this.storeName];
         if (!StoreClass) {
-            console.warn(`[SessionStore] Unknown store "${this.storeName}", using memory`);
+            Logger.warn('SessionStore: unknown store, using memory', { store: this.storeName });
             this._primaryStore = this._fallbackStore;
             this._initialized = true;
             return;
@@ -50,7 +51,7 @@ export class SessionStoreManager extends ISessionStore {
         try {
             this._primaryStore = new StoreClass({ ttl: this.ttl });
         } catch (err) {
-            console.warn(`[SessionStore] Failed to create ${this.storeName}: ${(err as Error).message}, using memory`);
+            Logger.warn('SessionStore: failed to create store, using memory', { store: this.storeName, error: (err as Error).message });
             this._primaryStore = this._fallbackStore;
         }
 
@@ -70,15 +71,15 @@ export class SessionStoreManager extends ISessionStore {
         try {
             const isHealthy = await this._primaryStore!.isHealthy();
             if (isHealthy && this._usingFallback) {
-                console.log(`[SessionStore] ${this.storeName} recovered, switching back from memory`);
+                Logger.log('SessionStore: recovered, switching back from memory', { store: this.storeName });
                 this._usingFallback = false;
             } else if (!isHealthy && !this._usingFallback) {
-                console.warn(`[SessionStore] ${this.storeName} unavailable, switching to memory`);
+                Logger.warn('SessionStore: unavailable, switching to memory', { store: this.storeName });
                 this._usingFallback = true;
             }
         } catch {
             if (!this._usingFallback) {
-                console.warn(`[SessionStore] ${this.storeName} health check failed, switching to memory`);
+                Logger.warn('SessionStore: health check failed, switching to memory', { store: this.storeName });
                 this._usingFallback = true;
             }
         }
@@ -98,7 +99,7 @@ export class SessionStoreManager extends ISessionStore {
         try {
             return await (this._primaryStore as any)[operation](...args);
         } catch (err) {
-            console.warn(`[SessionStore] ${this.storeName}.${operation} failed: ${(err as Error).message}, switching to memory`);
+            Logger.warn('SessionStore: operation failed, switching to memory', { store: this.storeName, operation, error: (err as Error).message });
             this._usingFallback = true;
             return (this._fallbackStore as any)[operation](...args);
         }

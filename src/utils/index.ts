@@ -4,6 +4,9 @@ export type { ServiceConfig, EndpointConfig, AuthConfig, RequestOptions, ApiResp
 export { Mailer } from './Mailer';
 export type { EmailConfig, EmailOptions, EmailAttachment, EmailResult } from './Mailer';
 
+export { Logger } from './Logger';
+export type { LogLevel } from './Logger';
+
 export const env = {
     isProduction: () => process.env.NODE_ENV === 'production',
     isDevelopment: () => __filename.endsWith('.ts') || process.env.NODE_ENV === 'development',

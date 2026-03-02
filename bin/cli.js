@@ -87,6 +87,19 @@ function createProject() {
         }
     }
 
+    // Read versions from this package's own package.json so they never drift
+    const corePkg = JSON.parse(fs.readFileSync(path.join(packageRoot, 'package.json'), 'utf-8'));
+    const coreDeps = corePkg.dependencies || {};
+    const coreDevDeps = corePkg.devDependencies || {};
+
+    function pick(source, keys) {
+        const result = {};
+        for (const key of keys) {
+            if (source[key]) result[key] = source[key];
+        }
+        return result;
+    }
+
     // Generate a fresh package.json for the new project
     const pkg = {
         name: projectName,
@@ -97,41 +110,19 @@ function createProject() {
             dev: 'tsx watch main.ts',
             build: 'tsc',
         },
-        engines: { node: '>=24.0.0' },
-        dependencies: {
-            '@fastify/cookie': '^11.0.2',
-            '@fastify/cors': '^11.0.0',
-            '@fastify/formbody': '^8.0.2',
-            '@fastify/multipart': '^9.4.0',
-            '@fastify/static': '^9.0.0',
-            '@prisma/adapter-mariadb': '^7.0.1',
-            '@prisma/adapter-pg': '^7.0.1',
-            '@prisma/client': '^7.0.1',
-            '@prisma/internals': '^7.0.1',
-            'bcrypt': '^6.0.0',
-            'dotenv': '^17.3.1',
-            'ejs': '^4.0.1',
-            'fastify': '^5.2.1',
-            'fastify-plugin': '^5.0.1',
-            'ioredis': '^5.6.1',
-            'jsonwebtoken': '^9.0.2',
-            'luxon': '^3.7.2',
-            'nodemailer': '^8.0.1',
-            'pg': '^8.16.3',
-        },
-        devDependencies: {
-            '@rapidd/build': '^2.1.3',
-            '@types/bcrypt': '^6.0.0',
-            '@types/ejs': '^3.1.5',
-            '@types/jsonwebtoken': '^9.0.8',
-            '@types/luxon': '^3.7.1',
-            '@types/node': '^22.12.0',
-            '@types/nodemailer': '^7.0.9',
-            '@types/pg': '^8.11.11',
-            'prisma': '^7.0.2',
-            'tsx': '^4.19.2',
-            'typescript': '^5.7.3',
-        },
+        engines: corePkg.engines || { node: '>=24.0.0' },
+        dependencies: pick(coreDeps, [
+            '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/static',
+            '@prisma/adapter-mariadb', '@prisma/adapter-pg', '@prisma/client', '@prisma/internals',
+            'bcrypt', 'dotenv', 'ejs', 'fastify', 'fastify-plugin',
+            'ioredis', 'jsonwebtoken', 'luxon', 'nodemailer', 'pg',
+        ]),
+        devDependencies: pick(coreDevDeps, [
+            '@rapidd/build',
+            '@types/bcrypt', '@types/ejs', '@types/jsonwebtoken', '@types/luxon',
+            '@types/node', '@types/nodemailer', '@types/pg',
+            'prisma', 'tsx', 'typescript',
+        ]),
     };
 
     fs.writeFileSync(
