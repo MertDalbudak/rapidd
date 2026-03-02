@@ -39,7 +39,7 @@ describe('Auth', () => {
             jwt: { secret: TEST_SECRET, refreshSecret: TEST_REFRESH_SECRET, accessExpiry: '1h', refreshExpiry: '7d' },
             identifierFields: ['email'],
             passwordField: 'password',
-            strategies: ['bearer'],
+            methods: ['bearer'],
             cookieName: 'token',
             customHeaderName: 'X-Auth-Token',
         });
@@ -52,7 +52,7 @@ describe('Auth', () => {
             const a = new Auth();
             expect(a.options.identifierFields).toEqual(['email']);
             expect(a.options.passwordField).toBe('password');
-            expect(a.options.strategies).toEqual(['bearer']);
+            expect(a.options.methods).toEqual(['bearer']);
             expect(a.options.cookieName).toBe('token');
             expect(a.options.customHeaderName).toBe('X-Auth-Token');
         });
@@ -62,11 +62,11 @@ describe('Auth', () => {
             expect(auth.options.jwt.refreshSecret).toBe(TEST_REFRESH_SECRET);
         });
 
-        it('should read strategies from env', () => {
-            process.env.AUTH_STRATEGIES = 'bearer,cookie';
+        it('should read methods from env', () => {
+            process.env.AUTH_METHODS = 'bearer,cookie';
             const a = new Auth();
-            expect(a.options.strategies).toEqual(['bearer', 'cookie']);
-            delete process.env.AUTH_STRATEGIES;
+            expect(a.options.methods).toEqual(['bearer', 'cookie']);
+            delete process.env.AUTH_METHODS;
         });
 
         it('should read cookie name from env', () => {
@@ -105,10 +105,10 @@ describe('Auth', () => {
         });
 
         it('should use options over env vars', () => {
-            process.env.AUTH_STRATEGIES = 'basic';
-            const a = new Auth({ strategies: ['cookie'] });
-            expect(a.options.strategies).toEqual(['cookie']);
-            delete process.env.AUTH_STRATEGIES;
+            process.env.AUTH_METHODS = 'basic';
+            const a = new Auth({ methods: ['cookie'] });
+            expect(a.options.methods).toEqual(['cookie']);
+            delete process.env.AUTH_METHODS;
         });
 
         it('should bind route handler methods', () => {

@@ -5,7 +5,7 @@ import { authPrisma } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { createStore, SessionStoreManager } from './stores';
 import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField } from '../core/dmmf';
-import type { RapiddUser, AuthOptions, AuthStrategy, ISessionStore } from '../types';
+import type { RapiddUser, AuthOptions, AuthMethod, ISessionStore } from '../types';
 
 /**
  * Authentication class for user login, logout, and session management
@@ -26,7 +26,7 @@ import type { RapiddUser, AuthOptions, AuthStrategy, ISessionStore } from '../ty
 export class Auth {
     options: Required<Pick<AuthOptions, 'passwordField' | 'saltRounds'>> & AuthOptions & {
         identifierFields: string[];
-        strategies: AuthStrategy[];
+        methods: AuthMethod[];
         cookieName: string;
         customHeaderName: string;
         session: { ttl: number; store?: string };
@@ -68,8 +68,8 @@ export class Auth {
                 ...options.jwt,
             },
             saltRounds: options.saltRounds || parseInt(process.env.AUTH_SALT_ROUNDS || '10', 10),
-            strategies: options.strategies
-                || (process.env.AUTH_STRATEGIES?.split(',').map(s => s.trim()) as AuthStrategy[])
+            methods: options.methods
+                || (process.env.AUTH_METHODS?.split(',').map(s => s.trim()) as AuthMethod[])
                 || ['bearer'],
             cookieName: options.cookieName || process.env.AUTH_COOKIE_NAME || 'token',
             customHeaderName: options.customHeaderName || process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token',

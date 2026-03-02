@@ -73,7 +73,7 @@ export { buildApp } from './app';
 // ── Types ────────────────────────────────────────────────────────────────────
 export type {
     RapiddUser,
-    AuthStrategy,
+    AuthMethod,
     RouteAuthConfig,
     ModelOptions,
     GetManyResult,

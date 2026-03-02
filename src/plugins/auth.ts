@@ -1,8 +1,9 @@
+import path from 'path';
 import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Auth } from '../auth/Auth';
 import { ErrorResponse } from '../core/errors';
-import type { RapiddUser, AuthOptions, AuthStrategy, RouteAuthConfig } from '../types';
+import type { RapiddUser, AuthOptions, AuthMethod, RouteAuthConfig } from '../types';
 
 interface AuthPluginOptions {
     auth?: Auth;
@@ -35,20 +36,54 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         return;
     }
 
-    // Parse auth on every request using configured strategies (checked in order).
-    // Routes can override via config.auth: { strategies, cookieName, customHeaderName }
+    // Load endpointAuthMethod from config/app.json (prefix → method(s) mapping)
+    let endpointAuthMethod: Record<string, AuthMethod | AuthMethod[] | null> = {};
+    try {
+        const appConfig = require(path.join(process.cwd(), 'config', 'app.json'));
+        if (appConfig.endpointAuthMethod) {
+            endpointAuthMethod = appConfig.endpointAuthMethod;
+        }
+    } catch {
+        // No app.json or no endpointAuthMethod — use global default
+    }
+
+    // Pre-sort prefixes by length (longest first) for correct matching
+    const sortedPrefixes = Object.keys(endpointAuthMethod)
+        .sort((a, b) => b.length - a.length);
+
+    // Parse auth on every request using configured methods (checked in order).
+    // Priority: route config > endpointAuthMethod prefix match > global default
     fastify.addHook('onRequest', async (request) => {
         const routeAuth = (request.routeOptions?.config as any)?.auth as RouteAuthConfig | undefined;
-        const strategies = routeAuth?.strategies || auth.options.strategies;
+
+        let methods: AuthMethod[];
+        if (routeAuth?.methods) {
+            methods = routeAuth.methods;
+        } else {
+            const matchedPrefix = sortedPrefixes.find(p => request.url.startsWith(p));
+            if (matchedPrefix) {
+                const value = endpointAuthMethod[matchedPrefix];
+                if (value === null) {
+                    methods = auth.options.methods;
+                } else if (typeof value === 'string') {
+                    methods = [value];
+                } else {
+                    methods = value;
+                }
+            } else {
+                methods = auth.options.methods;
+            }
+        }
+
         const cookieName = routeAuth?.cookieName || auth.options.cookieName;
         const customHeaderName = routeAuth?.customHeaderName || auth.options.customHeaderName;
 
         let user: RapiddUser | null = null;
 
-        for (const strategy of strategies) {
+        for (const method of methods) {
             if (user) break;
 
-            switch (strategy) {
+            switch (method) {
                 case 'bearer': {
                     const h = request.headers.authorization;
                     if (h?.startsWith('Bearer ')) {
@@ -90,7 +125,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     fastify.post('/auth/login', async (request, reply) => {
         const result = await auth.login(request.body as { user: string; password: string });
 
-        if (auth.options.strategies.includes('cookie')) {
+        if (auth.options.methods.includes('cookie')) {
             reply.setCookie(auth.options.cookieName, result.accessToken, {
                 path: '/',
                 httpOnly: true,
@@ -106,7 +141,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     fastify.post('/auth/logout', async (request, reply) => {
         const result = await auth.logout(request.headers.authorization);
 
-        if (auth.options.strategies.includes('cookie')) {
+        if (auth.options.methods.includes('cookie')) {
             reply.clearCookie(auth.options.cookieName, { path: '/' });
         }
 

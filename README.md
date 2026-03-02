@@ -59,7 +59,7 @@ Every table gets full CRUD endpoints. Auth is enabled automatically when a user 
 | Query filtering (20+ operators) | ✓ | ✓ |
 | Relations & deep includes | ✓ | ✓ |
 | Field selection | ✓ | ✓ |
-| JWT authentication (4 strategies) | ✓ | ✓ |
+| JWT authentication (4 methods) | ✓ | ✓ |
 | Per-model ACL | ✓ | ✓ |
 | Row-Level Security (database-enforced) | ✓ | — |
 | Rate limiting (Redis + memory fallback) | ✓ | ✓ |
@@ -101,11 +101,24 @@ POST /auth/refresh        { "refreshToken": "..." }
 GET  /auth/me             Authorization: Bearer <token>
 ```
 
-Four strategies — **bearer** (default), **basic**, **cookie**, and **custom header** — configurable per-route. Multi-identifier login lets users authenticate with any unique field (email, username, phone) in a single endpoint.
+Four methods — **bearer** (default), **basic**, **cookie**, and **custom header** — configurable globally via `AUTH_METHODS` env var or per endpoint prefix in `config/app.json`:
+
+```json
+{
+    "endpointAuthMethod": {
+        "/api/v1": ["basic", "bearer"],
+        "/api/v2": "bearer"
+    }
+}
+```
+
+Set `null` for the global default, a string for a single method, or an array for multiple. Route-level config takes highest priority, then prefix match, then global default.
+
+Multi-identifier login lets users authenticate with any unique field (email, username, phone) in a single endpoint.
 
 **Production:** `JWT_SECRET` and `JWT_REFRESH_SECRET` must be set explicitly. The server refuses to start without them to prevent session invalidation on restart.
 
-> **[Authentication wiki](https://github.com/MertDalbudak/rapidd/wiki/Authentication)** — session stores, route protection, per-endpoint strategy overrides
+> **[Authentication wiki](https://github.com/MertDalbudak/rapidd/wiki/Authentication)** — session stores, route protection, per-endpoint method overrides
 
 ---
 

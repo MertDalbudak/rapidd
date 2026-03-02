@@ -1,12 +1,11 @@
 import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
-import { Auth } from '../../../src/auth/Auth';
 import { ErrorResponse } from '../../../src/core/errors';
 
 /**
  * Auth routes — /register, /login, /logout, /refresh, /me
  */
 const rootRoutes: FastifyPluginAsync = async (fastify) => {
-    const auth = fastify.auth ?? new Auth();
+    const auth = fastify.auth;
 
     /**
      * POST /register

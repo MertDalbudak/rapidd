@@ -187,7 +187,7 @@ jest.mock('../../src/core/i18n', () => ({
 
 jest.mock('../../src/auth/Auth', () => ({
     Auth: class MockAuth {
-        options = { strategies: ['bearer'], cookieName: 'token', customHeaderName: 'X-Auth-Token' };
+        options = { methods: ['bearer'], cookieName: 'token', customHeaderName: 'X-Auth-Token' };
         initialize() { return Promise.resolve(); }
         isEnabled() { return false; }
         handleBasicAuth() { return null; }
