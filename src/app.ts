@@ -150,8 +150,8 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
 
     const entries = fs.readdirSync(routePath, { withFileTypes: true })
         .sort((a, b) =>
-            (a.name === 'index.js' || a.name === 'root.ts' ? -2 : a.isDirectory() ? 0 : -1) -
-            (b.name === 'index.js' || b.name === 'root.ts' ? -2 : b.isDirectory() ? 0 : -1)
+            (a.name === 'index.js' || a.name === 'index.ts' ? -2 : a.isDirectory() ? 0 : -1) -
+            (b.name === 'index.js' || b.name === 'index.ts' ? -2 : b.isDirectory() ? 0 : -1)
         );
 
     for (const entry of entries) {
@@ -160,7 +160,7 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
         } else {
             const ext = path.extname(entry.name);
             if ((ext === '.js' || ext === '.ts') && entry.name[0] !== '_' && !entry.name.endsWith('.d.ts')) {
-                const isRoot = entry.name === 'index.js' || entry.name === 'root.ts';
+                const isRoot = entry.name === 'index.js' || entry.name === 'index.ts';
                 const route = isRoot
                     ? relativePath
                     : `${relativePath.length > 1 ? relativePath : ''}/${path.parse(entry.name).name}`;
