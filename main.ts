@@ -16,6 +16,12 @@ export async function start(): Promise<void> {
         await app.listen({ port, host });
         console.log(`[Rapidd] Server running at http://${host}:${port}`);
         console.log(`[Rapidd] Environment: ${getEnv('NODE_ENV')}`);
+
+        // Warn if running compiled build with development NODE_ENV
+        if (process.argv[1]?.includes('/dist/') && getEnv('NODE_ENV') === 'development') {
+            console.warn('[Rapidd] Warning: Running compiled build with NODE_ENV=development.');
+            console.warn('[Rapidd] Set NODE_ENV=production in your .env for production use.');
+        }
     } catch (err) {
         console.error('[Startup Error]', (err as Error).message);
         process.exit(1);

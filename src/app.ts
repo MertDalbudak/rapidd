@@ -22,6 +22,13 @@ import rlsPlugin from './plugins/rls';
 
 import type { RapiddOptions } from './types';
 
+// ─── BigInt Serialization ────────────────────────────
+// Prisma returns BigInt values that JSON.stringify cannot handle natively.
+// This polyfill converts them to strings during serialization.
+(BigInt.prototype as any).toJSON = function () {
+    return this.toString();
+};
+
 // ─── Path Setup ─────────────────────────────────────
 // Use process.cwd() as the project root — works from both source (tsx) and compiled (dist/) contexts.
 

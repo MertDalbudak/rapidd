@@ -177,6 +177,7 @@ class Model {
         const field = this.fields[fieldName];
         if (!field) return value;
         if (field.type === 'Int') return parseInt(value, 10);
+        if (field.type === 'BigInt') return BigInt(value);
         if (field.type === 'Float' || field.type === 'Decimal') return parseFloat(value);
         if (field.type === 'Boolean') return value === 'true';
         return value;
@@ -239,10 +240,13 @@ class Model {
         sortBy = sortBy?.trim();
         sortOrder = sortOrder?.trim();
 
-        // Validate sort field - fall back to default for composite PK names
+        // Validate sort field - fall back to default for composite PK names or missing 'id'
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
-            // If the sortBy is a composite key name (e.g., "email_companyId"), use first PK field
             if (sortBy === this.primaryKey && this.isCompositePK) {
+                // Composite key name (e.g., "email_companyId") → use first PK field
+                sortBy = this.defaultSortField;
+            } else if (sortBy === 'id') {
+                // Model doesn't have an 'id' field → fall back to actual primary key
                 sortBy = this.defaultSortField;
             } else {
                 throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });

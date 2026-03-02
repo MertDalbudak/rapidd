@@ -501,10 +501,10 @@ class QueryBuilder {
     /**
      * Parse numeric filter operators
      */
-    #filterNumber(value: string): Record<string, number> | null {
+    #filterNumber(value: string): Record<string, number | bigint> | null {
         const numOperators = ['lt:', 'lte:', 'gt:', 'gte:', 'eq:', 'ne:', 'between:'];
         const foundOperator = numOperators.find((op: string) => value.startsWith(op));
-        let numValue: string | number = value;
+        let numValue: string = value;
         let prismaOp = 'equals';
 
         if (foundOperator) {
@@ -517,19 +517,36 @@ class QueryBuilder {
                 case 'eq:': prismaOp = 'equals'; break;
                 case 'ne:': prismaOp = 'not'; break;
                 case 'between:': {
-                    // Support between for decimals: between:1.5;3.7
-                    const [start, end] = (numValue as string).split(';').map((v: string) => parseFloat(v.trim()));
-                    if (isNaN(start) || isNaN(end)) return null;
+                    const parts = numValue.split(';').map((v: string) => v.trim());
+                    const [startStr, endStr] = parts;
+                    const start = this.#parseNumericValue(startStr);
+                    const end = this.#parseNumericValue(endStr);
+                    if (start == null || end == null) return null;
                     return { gte: start, lte: end };
                 }
             }
         }
 
-        // Support decimal numbers
-        numValue = parseFloat(numValue as string);
-        if (isNaN(numValue)) return null;
+        const parsed = this.#parseNumericValue(numValue);
+        if (parsed == null) return null;
 
-        return { [prismaOp]: numValue };
+        return { [prismaOp]: parsed };
+    }
+
+    /**
+     * Parse a numeric string, returning BigInt for integers beyond safe range
+     */
+    #parseNumericValue(value: string): number | bigint | null {
+        if (value.includes('.')) {
+            const num = parseFloat(value);
+            return isNaN(num) ? null : num;
+        }
+        const num = Number(value);
+        if (isNaN(num)) return null;
+        if (!Number.isSafeInteger(num)) {
+            try { return BigInt(value); } catch { return null; }
+        }
+        return num;
     }
 
     /**
