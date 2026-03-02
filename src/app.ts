@@ -11,6 +11,7 @@ import { ErrorResponse } from './core/errors';
 import { LanguageDict } from './core/i18n';
 import { disconnectAll } from './core/prisma';
 import { validateEnv } from './core/env';
+import { env } from './utils';
 
 // Plugins
 import securityPlugin from './plugins/security';
@@ -26,7 +27,7 @@ import type { RapiddOptions } from './types';
 
 const ROOT = process.env.ROOT || process.cwd();
 process.env.ROOT = ROOT;
-process.env.ROUTES_PATH = process.env.ROUTES_PATH || path.join(ROOT, 'dist', 'routes');
+process.env.ROUTES_PATH = process.env.ROUTES_PATH || path.join(ROOT, env.isDevelopment() ? 'routes' : 'dist/routes');
 process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'locales');
 process.env.PUBLIC_PATH = process.env.PUBLIC_PATH || path.join(ROOT, 'public');
 process.env.PUBLIC_STATIC = process.env.PUBLIC_STATIC || path.join(process.env.PUBLIC_PATH!, 'static');

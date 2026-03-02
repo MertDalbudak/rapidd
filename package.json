@@ -28,7 +28,7 @@
   ],
   "scripts": {
     "start": "node dist/main.js",
-    "dev": "ROUTES_PATH=routes tsx watch main.ts",
+    "dev": "tsx watch main.ts",
     "build": "tsc",
     "test": "jest --forceExit",
     "typecheck": "tsc --noEmit"

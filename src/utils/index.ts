@@ -6,7 +6,7 @@ export type { EmailConfig, EmailOptions, EmailAttachment, EmailResult } from './
 
 export const env = {
     isProduction: () => process.env.NODE_ENV === 'production',
-    isDevelopment: () => process.env.NODE_ENV === 'development',
+    isDevelopment: () => __filename.endsWith('.ts') || process.env.NODE_ENV === 'development',
     isTest: () => process.env.NODE_ENV === 'test',
     current: () => process.env.NODE_ENV || 'development',
 
