@@ -1,8 +1,31 @@
 {
-  "name": "rapidd",
+  "name": "@rapidd/core",
+  "publishConfig": {
+    "access": "public"
+  },
   "version": "2.1.0",
   "description": "Code-first REST API framework for TypeScript. Database in, API out.",
   "main": "dist/main.js",
+  "bin": {
+    "rapidd": "bin/cli.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "config/",
+    "locales/",
+    "routes/",
+    "templates/",
+    "public/",
+    "prisma/schema.prisma",
+    "prisma.config.ts",
+    "main.ts",
+    "tsconfig.json",
+    ".env.example",
+    ".gitignore",
+    ".dockerignore",
+    "dockerfile"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/MertDalbudak/rapidd.git"

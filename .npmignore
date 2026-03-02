@@ -1,11 +1,29 @@
+# Tests
 __test__/
-.github/
-.claude/
-.env
-.env.example
-tsconfig.test.json
 *.test.ts
 *.test.js
-.gitignore
-docker-compose*.yml
+tsconfig.test.json
+
+# CI/CD & tooling
+.github/
+.claude/
+
+# Documentation (not needed in extracted project)
+wiki/
+RELEASE_*.md
+
+# Environment & secrets
+.env
+
+# Build output (user builds themselves)
 dist/
+
+# Generated Prisma client (user runs prisma generate)
+prisma/client/
+
+# OS files
+.DS_Store
+
+# Docker compose (project-specific)
+docker-compose*.yml
+compose.yml
