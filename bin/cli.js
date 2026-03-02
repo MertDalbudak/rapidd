@@ -2,20 +2,40 @@
 
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const COMMANDS = { 'create-project': createProject };
 
 const args = process.argv.slice(2);
 const command = args[0];
 
-if (!command || !COMMANDS[command]) {
+if (!command) {
     console.log('Usage: npx rapidd <command>\n');
     console.log('Commands:');
     console.log('  create-project   Scaffold a new Rapidd project in the current directory');
-    process.exit(command ? 1 : 0);
+    console.log('  build            Generate models, routes & ACL from Prisma schema (@rapidd/build)');
+    process.exit(0);
 }
 
-COMMANDS[command](args.slice(1));
+if (COMMANDS[command]) {
+    COMMANDS[command](args.slice(1));
+} else if (command === 'build') {
+    // Proxy to @rapidd/build
+    try {
+        const buildBin = require.resolve('@rapidd/build/bin/cli.js');
+        execFileSync(process.execPath, [buildBin, ...args], { stdio: 'inherit' });
+    } catch (err) {
+        if (err.code === 'MODULE_NOT_FOUND') {
+            console.error('@rapidd/build is not installed.\n');
+            console.error('  npm install -D @rapidd/build');
+            process.exit(1);
+        }
+        process.exit(err.status ?? 1);
+    }
+} else {
+    console.error(`Unknown command: ${command}`);
+    process.exit(1);
+}
 
 function createProject() {
     const targetDir = process.cwd();
