@@ -64,6 +64,8 @@ jest.mock('../../src/core/dmmf', () => ({
                 userId: { name: 'userId', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: false },
                 createdAt: { name: 'createdAt', kind: 'scalar', type: 'DateTime', isList: false, isRequired: true, isId: false },
                 internal_notes: { name: 'internal_notes', kind: 'scalar', type: 'String', isList: false, isRequired: false, isId: false },
+                user: { name: 'user', kind: 'object', type: 'users', isList: false, isRequired: false, isId: false, relationFromFields: ['userId'], relationToFields: ['id'], relationName: 'MessagesToUsers' },
+                attachments: { name: 'attachments', kind: 'object', type: 'message_attachments', isList: true, isRequired: false, isId: false, relationFromFields: [], relationToFields: [], relationName: 'MessagesToAttachments' },
             },
             users: {
                 id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
@@ -194,6 +196,50 @@ describe('QueryBuilder (TypeScript)', () => {
             const result: any = qb.filter('createdAt=between:2024-01-01;2024-12-31');
             expect(result).toBeDefined();
             expect(result.createdAt).toBeDefined();
+        });
+
+        it('should handle #NULL on nullable scalar field', () => {
+            const result: any = qb.filter('internal_notes=#NULL');
+            expect(result.internal_notes).toEqual({ equals: null });
+        });
+
+        it('should handle not:#NULL on nullable scalar field', () => {
+            const result: any = qb.filter('internal_notes=not:#NULL');
+            expect(result.internal_notes).toEqual({ not: { equals: null } });
+        });
+
+        it('should throw for #NULL on non-nullable scalar field', () => {
+            expect(() => qb.filter('content=#NULL')).toThrow();
+        });
+
+        it('should skip not:#NULL on non-nullable scalar field', () => {
+            const result: any = qb.filter('content=not:#NULL');
+            expect(result.content).toBeUndefined();
+        });
+
+        it('should use { is: null } for #NULL on relation field', () => {
+            const result: any = qb.filter('user=#NULL');
+            expect(result.user).toEqual({ is: null });
+        });
+
+        it('should use { isNot: null } for not:#NULL on relation field', () => {
+            const result: any = qb.filter('user=not:#NULL');
+            expect(result.user).toEqual({ isNot: null });
+        });
+
+        it('should use { is: null } for #NULL on list relation field', () => {
+            const result: any = qb.filter('attachments=#NULL');
+            expect(result.attachments).toEqual({ is: null });
+        });
+
+        it('should use { isNot: null } for not:#NULL on list relation field', () => {
+            const result: any = qb.filter('attachments=not:#NULL');
+            expect(result.attachments).toEqual({ isNot: null });
+        });
+
+        it('should skip empty filter value (no null filter applied)', () => {
+            const result: any = qb.filter('content=');
+            expect(result.content).toBeUndefined();
         });
     });
 

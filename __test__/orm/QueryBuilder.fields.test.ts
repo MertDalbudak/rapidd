@@ -302,6 +302,66 @@ describe('QueryBuilder - buildFieldSelection()', () => {
         });
     });
 
+    // ── Deep nested relation fields ─────────────────────
+
+    describe('deep nested relation fields', () => {
+        it('should nest 2-level deep fields correctly', () => {
+            const result = qb.buildFieldSelection('id,attachments.uploader.name', 'attachments', adminUser);
+            expect(result.select!.id).toBe(true);
+            expect(result.select!.attachments.select.uploader).toEqual({
+                select: { name: true },
+            });
+        });
+
+        it('should nest 3-level deep fields correctly', () => {
+            const result = qb.buildFieldSelection('id,attachments.uploader.profile.avatar', 'attachments', adminUser);
+            expect(result.select!.attachments.select.uploader).toEqual({
+                select: {
+                    profile: {
+                        select: { avatar: true },
+                    },
+                },
+            });
+        });
+
+        it('should merge multiple deep fields into the same nested path', () => {
+            const result = qb.buildFieldSelection(
+                'id,attachments.uploader.name,attachments.uploader.email',
+                'attachments',
+                adminUser
+            );
+            expect(result.select!.attachments.select.uploader).toEqual({
+                select: { name: true, email: true },
+            });
+        });
+
+        it('should handle mix of shallow and deep fields on same relation', () => {
+            const result = qb.buildFieldSelection(
+                'id,attachments.url,attachments.uploader.name',
+                'attachments',
+                adminUser
+            );
+            expect(result.select!.attachments.select.url).toBe(true);
+            expect(result.select!.attachments.select.uploader).toEqual({
+                select: { name: true },
+            });
+        });
+
+        it('should handle deep fields across multiple relations', () => {
+            const result = qb.buildFieldSelection(
+                'id,user.profile.avatar,attachments.uploader.name',
+                'user,attachments',
+                adminUser
+            );
+            expect(result.select!.user.select.profile).toEqual({
+                select: { avatar: true },
+            });
+            expect(result.select!.attachments.select.uploader).toEqual({
+                select: { name: true },
+            });
+        });
+    });
+
     // ── Relations in include without specific fields ─────
 
     describe('relations in include without specific fields', () => {

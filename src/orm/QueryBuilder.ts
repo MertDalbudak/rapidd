@@ -230,21 +230,22 @@ class QueryBuilder {
             }
 
             // Navigate to the correct filter context for nested relations
-            const filterContext = this.#navigateToFilterContext(result, relationPath);
+            const { filter: filterContext, modelName } = this.#navigateToFilterContext(result, relationPath);
 
-            // Apply the filter value
-            this.#applyFilterValue(filterContext, fieldName, trimmedValue);
+            // Apply the filter value (with model context for null/relation handling)
+            this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName);
         }
 
         return result;
     }
 
     /**
-     * Navigate through relation path and return the filter context object
+     * Navigate through relation path and return the filter context object and current model name
      */
-    #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[]): Record<string, any> {
+    #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[]): { filter: Record<string, any>; modelName: string } {
         let filter: Record<string, any> = rootFilter;
         let currentRelations: RelationConfig[] | RelationConfig = this.relatedObjects;
+        let currentModelName = this.name;
 
         for (const relationName of relationPath) {
             // Find the relation in current context
@@ -275,35 +276,56 @@ class QueryBuilder {
                 filter = filter[rel.name].some || filter[rel.name];
             }
 
+            currentModelName = rel.object;
             currentRelations = rel;
         }
 
-        return filter;
+        return { filter, modelName: currentModelName };
     }
 
     /**
      * Apply a filter value to a field in the filter context
      */
-    #applyFilterValue(filter: Record<string, any>, fieldName: string, value: string | null): void {
-        // Handle null values
+    #applyFilterValue(filter: Record<string, any>, fieldName: string, value: string | null, modelName: string = this.name): void {
+        // Resolve field metadata from the correct model
+        const fields = modelName === this.name ? this.fields : this.#getRelatedModelFields(modelName);
+        const field = fields[fieldName];
+        const isRelation = field?.kind === 'object';
+
+        // Handle explicit null filter tokens
         if (value === '#NULL') {
-            filter[fieldName] = null;
+            if (isRelation) {
+                // Relations use { is: null } in Prisma
+                filter[fieldName] = { is: null };
+            } else if (field?.isRequired) {
+                // Non-nullable scalar fields can never be null — reject the filter
+                throw new ErrorResponse(400, "field_not_nullable", { field: fieldName });
+            } else {
+                filter[fieldName] = { equals: null };
+            }
             return;
         }
         if (value === 'not:#NULL') {
-            filter[fieldName] = { not: null };
+            if (isRelation) {
+                // Relations use { isNot: null } in Prisma
+                filter[fieldName] = { isNot: null };
+            } else if (field?.isRequired) {
+                // Non-nullable scalar fields are always not-null — skip (always true)
+                return;
+            } else {
+                filter[fieldName] = { not: { equals: null } };
+            }
             return;
         }
 
         // Handle not: prefix (negation)
         if (value?.startsWith('not:')) {
-            this.#applyNegatedFilter(filter, fieldName, value.substring(4));
+            this.#applyNegatedFilter(filter, fieldName, value.substring(4), modelName);
             return;
         }
 
-        // Handle empty/null value
+        // Skip empty/null values — don't filter on empty strings
         if (!value) {
-            filter[fieldName] = null;
             return;
         }
 
@@ -314,10 +336,22 @@ class QueryBuilder {
     /**
      * Apply a negated filter (not:value)
      */
-    #applyNegatedFilter(filter: Record<string, any>, fieldName: string, value: string): void {
+    #applyNegatedFilter(filter: Record<string, any>, fieldName: string, value: string, modelName: string = this.name): void {
         // not:#NULL
         if (value === '#NULL') {
-            filter[fieldName] = { not: null };
+            const fields = modelName === this.name ? this.fields : this.#getRelatedModelFields(modelName);
+            const field = fields[fieldName];
+
+            if (field?.kind === 'object') {
+                // Relations use { isNot: null } in Prisma
+                filter[fieldName] = { isNot: null };
+                return;
+            }
+            // Non-nullable scalar fields are always not-null — skip (always true)
+            if (field?.isRequired) {
+                return;
+            }
+            filter[fieldName] = { not: { equals: null } };
             return;
         }
 
@@ -873,6 +907,26 @@ class QueryBuilder {
     }
 
     /**
+     * Recursively set a nested field path into a select object.
+     * e.g. "agency.name" on obj → obj.agency = { select: { name: true } }
+     */
+    #setNestedField(obj: Record<string, any>, fieldPath: string): void {
+        const dotIdx = fieldPath.indexOf('.');
+        if (dotIdx === -1) {
+            obj[fieldPath] = true;
+        } else {
+            const key = fieldPath.substring(0, dotIdx);
+            const rest = fieldPath.substring(dotIdx + 1);
+            if (!obj[key]) {
+                obj[key] = { select: {} };
+            } else if (obj[key] === true) {
+                obj[key] = { select: {} };
+            }
+            this.#setNestedField(obj[key].select, rest);
+        }
+    }
+
+    /**
      * Build the Prisma field selection clause.
      * When `fields` is specified, returns `{ select: ... }` (Prisma select mode).
      * When `fields` is null/empty, returns `{ include: ..., omit: ... }` (current behavior).
@@ -957,7 +1011,19 @@ class QueryBuilder {
                 const relOmit = this.getRelatedOmit(rel.object, user);
 
                 for (const f of relationFields) {
-                    if (!relOmit[f]) {
+                    if (f.includes('.')) {
+                        // Nested relation field (e.g. "agency.name" → agency: { select: { name: true } })
+                        const dotIdx = f.indexOf('.');
+                        const nestedRel = f.substring(0, dotIdx);
+                        const nestedField = f.substring(dotIdx + 1);
+
+                        if (!relSelect[nestedRel]) {
+                            relSelect[nestedRel] = { select: {} };
+                        } else if (relSelect[nestedRel] === true) {
+                            relSelect[nestedRel] = { select: {} };
+                        }
+                        this.#setNestedField(relSelect[nestedRel].select, nestedField);
+                    } else if (!relOmit[f]) {
                         relSelect[f] = true;
                     }
                 }
