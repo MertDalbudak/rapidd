@@ -3,6 +3,7 @@ import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Auth } from '../auth/Auth';
 import { ErrorResponse } from '../core/errors';
+import { LanguageDict } from '../core/i18n';
 import type { RapiddUser, AuthOptions, AuthStrategy, RouteAuthConfig } from '../types';
 
 interface AuthPluginOptions {
@@ -139,13 +140,14 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     });
 
     fastify.post('/auth/logout', async (request, reply) => {
-        const result = await auth.logout(request.headers.authorization);
+        await auth.logout(request.headers.authorization);
 
         if (auth.options.strategies.includes('cookie')) {
             reply.clearCookie(auth.options.cookieName, { path: '/' });
         }
 
-        return reply.send(result);
+        const language = request.language || 'en_US';
+        return reply.send({ message: LanguageDict.get('logged_out', null, language) });
     });
 
     fastify.post('/auth/refresh', async (request, reply) => {

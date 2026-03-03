@@ -39,41 +39,41 @@ const FILTER_PATTERNS = {
  */
 const PRISMA_ERROR_MAP: Record<string, PrismaErrorInfo> = {
     // Connection errors
-    P1001: { status: 500, message: 'Connection to the database could not be established' },
+    P1001: { status: 500, message: 'db_connection_failed' },
 
     // Query errors (4xx - client errors)
-    P2000: { status: 400, message: 'The provided value for the column is too long' },
-    P2001: { status: 404, message: 'The record searched for in the where condition does not exist' },
+    P2000: { status: 400, message: 'value_too_long' },
+    P2001: { status: 404, message: 'record_not_found' },
     P2002: { status: 409, message: null }, // Dynamic message for duplicates
-    P2003: { status: 400, message: 'Foreign key constraint failed' },
-    P2004: { status: 400, message: 'A constraint failed on the database' },
-    P2005: { status: 400, message: 'The value stored in the database is invalid for the field type' },
-    P2006: { status: 400, message: 'The provided value is not valid' },
-    P2007: { status: 400, message: 'Data validation error' },
-    P2008: { status: 400, message: 'Failed to parse the query' },
-    P2009: { status: 400, message: 'Failed to validate the query' },
-    P2010: { status: 500, message: 'Raw query failed' },
-    P2011: { status: 400, message: 'Null constraint violation' },
-    P2012: { status: 400, message: 'Missing a required value' },
-    P2013: { status: 400, message: 'Missing the required argument' },
-    P2014: { status: 400, message: 'The change would violate the required relation' },
-    P2015: { status: 404, message: 'A related record could not be found' },
-    P2016: { status: 400, message: 'Query interpretation error' },
-    P2017: { status: 400, message: 'The records for relation are not connected' },
-    P2018: { status: 404, message: 'The required connected records were not found' },
-    P2019: { status: 400, message: 'Input error' },
-    P2020: { status: 400, message: 'Value out of range for the type' },
-    P2021: { status: 404, message: 'The table does not exist in the current database' },
-    P2022: { status: 404, message: 'The column does not exist in the current database' },
-    P2023: { status: 400, message: 'Inconsistent column data' },
-    P2024: { status: 408, message: 'Timed out fetching a new connection from the connection pool' },
-    P2025: { status: 404, message: 'Operation failed: required records not found' },
-    P2026: { status: 400, message: 'Database provider does not support this feature' },
-    P2027: { status: 500, message: 'Multiple errors occurred during query execution' },
-    P2028: { status: 500, message: 'Transaction API error' },
-    P2030: { status: 404, message: 'Cannot find a fulltext index for the search' },
-    P2033: { status: 400, message: 'A number in the query exceeds 64 bit signed integer' },
-    P2034: { status: 409, message: 'Transaction failed due to write conflict or deadlock' },
+    P2003: { status: 400, message: 'foreign_key_constraint_failed' },
+    P2004: { status: 400, message: 'database_constraint_failed' },
+    P2005: { status: 400, message: 'invalid_stored_value' },
+    P2006: { status: 400, message: 'invalid_value' },
+    P2007: { status: 400, message: 'data_validation_error' },
+    P2008: { status: 400, message: 'query_parse_failed' },
+    P2009: { status: 400, message: 'query_validation_failed' },
+    P2010: { status: 500, message: 'raw_query_failed' },
+    P2011: { status: 400, message: 'null_constraint_violation' },
+    P2012: { status: 400, message: 'missing_required_value' },
+    P2013: { status: 400, message: 'missing_required_argument' },
+    P2014: { status: 400, message: 'required_relation_violation' },
+    P2015: { status: 404, message: 'related_record_not_found' },
+    P2016: { status: 400, message: 'query_interpretation_error' },
+    P2017: { status: 400, message: 'records_not_connected' },
+    P2018: { status: 404, message: 'required_connected_records_not_found' },
+    P2019: { status: 400, message: 'input_error' },
+    P2020: { status: 400, message: 'value_out_of_range' },
+    P2021: { status: 404, message: 'table_not_found' },
+    P2022: { status: 404, message: 'column_not_found' },
+    P2023: { status: 400, message: 'inconsistent_column_data' },
+    P2024: { status: 408, message: 'connection_pool_timeout' },
+    P2025: { status: 404, message: 'required_records_not_found' },
+    P2026: { status: 400, message: 'feature_not_supported' },
+    P2027: { status: 500, message: 'multiple_query_errors' },
+    P2028: { status: 500, message: 'transaction_api_error' },
+    P2030: { status: 404, message: 'fulltext_index_not_found' },
+    P2033: { status: 400, message: 'number_exceeds_range' },
+    P2034: { status: 409, message: 'transaction_write_conflict' },
 };
 
 /**
@@ -2086,7 +2086,7 @@ class QueryBuilder {
                 const modelName = error.meta?.modelName;
                 message = LanguageDict.get('duplicate_entry', { model: modelName, field: target, value: data[target as string] });
             } else {
-                message = errorInfo.message!;
+                message = LanguageDict.get(errorInfo.message!);
             }
         }
 
