@@ -286,9 +286,31 @@ describe('Language resolution', () => {
         });
 
         expect(response.statusCode).toBe(200);
-        // The language should be resolved (exact value depends on available languages)
-        expect(resolvedLanguage).toBeDefined();
-        expect(typeof resolvedLanguage).toBe('string');
+        expect(resolvedLanguage).toBe('de_DE');
+        await app.close();
+    });
+
+    it('should resolve language family from Accept-Language header', async () => {
+        const app = await buildApp({ routesPath: TEMP_ROUTES, rateLimit: false });
+
+        let resolvedLanguage = '';
+        app.get('/test-lang-family', async (request) => {
+            resolvedLanguage = request.language;
+            return { language: request.language };
+        });
+
+        await app.ready();
+
+        const response = await app.inject({
+            method: 'GET',
+            url: '/test-lang-family',
+            headers: {
+                'accept-language': 'de',
+            },
+        });
+
+        expect(response.statusCode).toBe(200);
+        expect(resolvedLanguage).toBe('de_DE');
         await app.close();
     });
 });

@@ -37,22 +37,22 @@ function resolveLanguage(headerValue: string): string {
             .split(',')
             .map((lang: string) => {
                 const parts = lang.trim().split(';');
-                const code = parts[0].trim();
+                const code = parts[0].trim().replace(/-/g, '_');
                 const quality = parts[1] ? parseFloat(parts[1].replace('q=', '')) : 1.0;
                 return { code, quality };
             })
             .sort((a, b) => b.quality - a.quality);
 
-        // Exact match
+        // Exact match (e.g. "de_DE" header → "de_DE" locale)
         for (const lang of languages) {
             const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase() === lang.code);
             if (match) return match;
         }
 
-        // Language family match (e.g. "en-GB" → "en_US")
+        // Language family match (e.g. "en_GB" header → "en_US" locale)
         for (const lang of languages) {
-            const prefix = lang.code.split('-')[0];
-            const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase().startsWith(prefix + '-'));
+            const prefix = lang.code.split('_')[0];
+            const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase().startsWith(prefix + '_'));
             if (match) return match;
         }
     } catch {
