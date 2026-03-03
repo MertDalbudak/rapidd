@@ -29,6 +29,9 @@ export class Auth {
         identifierFields: string[];
         strategies: AuthStrategy[];
         cookieName: string;
+        cookieDomain: string;
+        cookieSameSite: 'strict' | 'lax' | 'none';
+        cookieSecure: boolean;
         customHeaderName: string;
         session: { ttl: number; store?: string };
         jwt: { secret?: string; refreshSecret?: string; accessExpiry: string; refreshExpiry: string };
@@ -73,6 +76,9 @@ export class Auth {
                 || (process.env.AUTH_STRATEGIES?.split(',').map(s => s.trim()) as AuthStrategy[])
                 || ['bearer'],
             cookieName: options.cookieName || process.env.AUTH_COOKIE_NAME || 'token',
+            cookieDomain: options.cookieDomain || process.env.AUTH_COOKIE_DOMAIN || '',
+            cookieSameSite: (options.cookieSameSite || process.env.AUTH_COOKIE_SAME_SITE || 'strict') as 'strict' | 'lax' | 'none',
+            cookieSecure: options.cookieSecure ?? (process.env.AUTH_COOKIE_SECURE ? process.env.AUTH_COOKIE_SECURE === 'true' : process.env.NODE_ENV === 'production'),
             customHeaderName: options.customHeaderName || process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token',
         };
 

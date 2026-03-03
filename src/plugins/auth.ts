@@ -102,7 +102,8 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
                 case 'cookie': {
                     const raw = request.cookies?.[cookieName];
                     if (raw) {
-                        const val = typeof raw === 'object' ? (raw as any).value : raw;
+                        const unsigned = request.unsignCookie(raw);
+                        const val = unsigned.valid ? unsigned.value! : raw;
                         user = await auth.handleCookieAuth(val);
                     }
                     break;
@@ -122,18 +123,31 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         }
     });
 
+    // Cookie-only mode: tokens live exclusively in signed httpOnly cookies
+    const cookieOnly = auth.options.strategies.length === 1 && auth.options.strategies[0] === 'cookie';
+    const usesCookie = auth.options.strategies.includes('cookie');
+
+    const setCookieToken = (reply: any, token: string) => {
+        reply.setCookie(auth.options.cookieName, token, {
+            path: '/',
+            httpOnly: true,
+            secure: auth.options.cookieSecure,
+            sameSite: auth.options.cookieSameSite,
+            signed: !!process.env.COOKIE_SECRET,
+            ...(auth.options.cookieDomain && { domain: auth.options.cookieDomain }),
+        });
+    };
+
     // Auth routes
     fastify.post('/auth/login', async (request, reply) => {
         const result = await auth.login(request.body as { user: string; password: string });
 
-        if (auth.options.strategies.includes('cookie')) {
-            reply.setCookie(auth.options.cookieName, result.accessToken, {
-                path: '/',
-                httpOnly: true,
-                secure: process.env.NODE_ENV === 'production',
-                sameSite: 'strict',
-                signed: !!process.env.COOKIE_SECRET,
-            });
+        if (usesCookie) {
+            setCookieToken(reply, result.accessToken);
+        }
+
+        if (cookieOnly) {
+            return reply.send({ user: result.user });
         }
 
         return reply.send(result);
@@ -142,7 +156,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     fastify.post('/auth/logout', async (request, reply) => {
         await auth.logout(request.headers.authorization);
 
-        if (auth.options.strategies.includes('cookie')) {
+        if (usesCookie) {
             reply.clearCookie(auth.options.cookieName, { path: '/' });
         }
 
@@ -152,6 +166,15 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
 
     fastify.post('/auth/refresh', async (request, reply) => {
         const result = await auth.refresh(request.body as { refreshToken: string });
+
+        if (usesCookie) {
+            setCookieToken(reply, result.accessToken);
+        }
+
+        if (cookieOnly) {
+            return reply.send({ message: 'refreshed' });
+        }
+
         return reply.send(result);
     });
 

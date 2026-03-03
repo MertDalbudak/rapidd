@@ -34,6 +34,9 @@ export interface AuthOptions {
     saltRounds?: number;
     strategies?: AuthStrategy[];
     cookieName?: string;
+    cookieDomain?: string;
+    cookieSameSite?: 'strict' | 'lax' | 'none';
+    cookieSecure?: boolean;
     customHeaderName?: string;
 }
 
