@@ -76,6 +76,32 @@ function formatDataPretty(data: unknown[]): string {
     return '\n' + parts.join('\n');
 }
 
+function formatHeaders(headers: Record<string, unknown>): string {
+    return Object.entries(headers)
+        .filter(([, v]) => v !== undefined)
+        .map(([k, v]) => `  ${k}: ${Array.isArray(v) ? v.join(', ') : v}`)
+        .join('\n');
+}
+
+function formatBody(body: unknown): string {
+    if (body === null || body === undefined) return '  (empty)';
+    if (typeof body === 'string') {
+        try {
+            return '  ' + JSON.stringify(JSON.parse(body), null, 2).replace(/\n/g, '\n  ');
+        } catch {
+            return '  ' + body;
+        }
+    }
+    if (typeof body === 'object') {
+        try {
+            return '  ' + JSON.stringify(body, null, 2).replace(/\n/g, '\n  ');
+        } catch {
+            return '  ' + String(body);
+        }
+    }
+    return '  ' + String(body);
+}
+
 function formatError(error: Error | string | unknown): { message: string; toString: string; stack: string } {
     if (error instanceof Error) {
         return {
@@ -151,6 +177,60 @@ export const Logger = {
 
         console.error(output);
         writeToFile('error.log', output);
+    },
+
+    request(info: {
+        method: string;
+        url: string;
+        status: number;
+        time: number;
+        ip?: string;
+        contentLength?: string;
+        userId?: string | number;
+        userAgent?: string;
+        requestHeaders?: Record<string, unknown>;
+        requestBody?: unknown;
+        responseHeaders?: Record<string, unknown>;
+        responseBody?: unknown;
+    }): void {
+        if (_silent) return;
+
+        const { method, url, status, time } = info;
+        const timeStr = `${time.toFixed(0)}ms`;
+        let output: string;
+
+        switch (_level) {
+            case 'essential':
+                output = `[${timestamp()}] ${method} ${url} ${status} ${timeStr}`;
+                break;
+            case 'fine':
+                output = `[${timestamp()}] ${method} ${url} ${status} ${timeStr} | ${info.ip || '-'}${info.userId ? ` | user:${info.userId}` : ''}`;
+                break;
+            case 'finest': {
+                const lines = [`[${timestamp()}] ${method} ${url} ${status} ${timeStr} | ${info.ip || '-'}${info.userId ? ` | user:${info.userId}` : ''}`];
+                if (info.requestHeaders) {
+                    lines.push('  ── Request Headers');
+                    lines.push(formatHeaders(info.requestHeaders));
+                }
+                if (info.requestBody !== undefined && info.requestBody !== null) {
+                    lines.push('  ── Request Body');
+                    lines.push(formatBody(info.requestBody));
+                }
+                if (info.responseHeaders) {
+                    lines.push('  ── Response Headers');
+                    lines.push(formatHeaders(info.responseHeaders));
+                }
+                if (info.responseBody !== undefined && info.responseBody !== null) {
+                    lines.push('  ── Response Body');
+                    lines.push(formatBody(info.responseBody));
+                }
+                output = lines.join('\n');
+                break;
+            }
+        }
+
+        console.log(output);
+        writeToFile('access.log', output);
     },
 };
 

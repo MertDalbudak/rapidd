@@ -138,6 +138,31 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
         await loadRoutes(app, routesPath);
     }
 
+    // ── Request Logging ─────────────────────────────
+    app.addHook('onSend', async (request, _reply, payload) => {
+        if (typeof payload === 'string') {
+            (request as any)._responsePayload = payload;
+        }
+        return payload;
+    });
+
+    app.addHook('onResponse', async (request, reply) => {
+        Logger.request({
+            method: request.method,
+            url: request.url,
+            status: reply.statusCode,
+            time: reply.elapsedTime,
+            ip: request.ip,
+            contentLength: request.headers['content-length'],
+            userId: request.user?.id,
+            userAgent: request.headers['user-agent'],
+            requestHeaders: request.headers,
+            requestBody: request.body,
+            responseHeaders: reply.getHeaders(),
+            responseBody: (request as any)._responsePayload,
+        });
+    });
+
     // ── 404 Handler ─────────────────────────────────
     app.setNotFoundHandler((request, reply) => {
         const language = request.language || 'en_US';
