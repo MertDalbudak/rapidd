@@ -151,7 +151,7 @@
             "name": "Support Team"
         }
     },
-    "endpointAuthMethod": {
+    "endpointAuthStrategy": {
         "/api/v1": null
     },
     "languages": [

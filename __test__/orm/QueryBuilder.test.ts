@@ -401,8 +401,7 @@ describe('QueryBuilder (TypeScript)', () => {
             };
             const result = QueryBuilder.errorHandler(err, { email: 'test@test.com' });
             expect(result.status_code).toBe(409);
-            expect(result.message).toContain('Duplicate');
-            expect(result.message).toContain('email');
+            expect(result.message).toMatch(/duplicate_entry|Duplicate entry/);
         });
 
         it('should handle Prisma P2025 not found error', () => {

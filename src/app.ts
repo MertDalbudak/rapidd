@@ -139,8 +139,9 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     }
 
     // ── 404 Handler ─────────────────────────────────
-    app.setNotFoundHandler((_request, reply) => {
-        reply.code(404).send({ status_code: 404, message: 'Not found' });
+    app.setNotFoundHandler((request, reply) => {
+        const language = request.language || 'en_US';
+        reply.code(404).send({ status_code: 404, message: LanguageDict.get('record_not_found', null, language) });
     });
 
     // ── Graceful Shutdown ───────────────────────────

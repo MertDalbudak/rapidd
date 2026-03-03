@@ -1,5 +1,6 @@
 import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
+import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
 import * as dmmf from '../core/dmmf';
 import type {
@@ -2072,7 +2073,7 @@ class QueryBuilder {
         let statusCode: number = error.status_code || 500;
         let message: string = error instanceof ErrorResponse
             ? error.message
-            : (process.env.NODE_ENV === 'production' ? 'Something went wrong' : (error.message || String(error)));
+            : (process.env.NODE_ENV === 'production' ? LanguageDict.get('internal_server_error') : (error.message || String(error)));
 
         // Handle Prisma error codes
         if (error?.code && PRISMA_ERROR_MAP[error.code]) {
@@ -2083,7 +2084,7 @@ class QueryBuilder {
             if (error.code === 'P2002') {
                 const target = error.meta?.target;
                 const modelName = error.meta?.modelName;
-                message = `Duplicate entry for ${modelName}. Record with ${target}: '${data[target as string]}' already exists`;
+                message = LanguageDict.get('duplicate_entry', { model: modelName, field: target, value: data[target as string] });
             } else {
                 message = errorInfo.message!;
             }

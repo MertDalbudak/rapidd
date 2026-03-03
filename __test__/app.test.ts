@@ -47,7 +47,7 @@ jest.mock('../src/core/i18n', () => ({
 jest.mock('../src/auth/Auth', () => {
     return {
         Auth: class MockAuth {
-            options = { methods: ['bearer'], cookieName: 'token', customHeaderName: 'X-Auth-Token' };
+            options = { strategies: ['bearer'], cookieName: 'token', customHeaderName: 'X-Auth-Token' };
             initialize() { return Promise.resolve(); }
             isEnabled() { return false; }
             handleBasicAuth() { return null; }
@@ -162,7 +162,7 @@ describe('buildApp()', () => {
 
         expect(response.statusCode).toBe(404);
         const body = JSON.parse(response.payload);
-        expect(body.message).toBe('Not found');
+        expect(body.message).toMatch(/record_not_found|Record not found/);
         await app.close();
     });
 });

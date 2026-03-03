@@ -10,10 +10,10 @@ export interface RapiddUser {
     [key: string]: unknown;
 }
 
-export type AuthMethod = 'bearer' | 'basic' | 'cookie' | 'header';
+export type AuthStrategy = 'bearer' | 'basic' | 'cookie' | 'header';
 
 export interface RouteAuthConfig {
-    methods?: AuthMethod[];
+    strategies?: AuthStrategy[];
     cookieName?: string;
     customHeaderName?: string;
 }
@@ -32,7 +32,7 @@ export interface AuthOptions {
         refreshExpiry?: string;
     };
     saltRounds?: number;
-    methods?: AuthMethod[];
+    strategies?: AuthStrategy[];
     cookieName?: string;
     customHeaderName?: string;
 }

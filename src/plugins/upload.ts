@@ -5,6 +5,7 @@ import { pipeline } from 'stream/promises';
 import { Transform } from 'stream';
 import { randomUUID } from 'crypto';
 import path from 'path';
+import { ErrorResponse } from '../core/errors';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -85,9 +86,9 @@ function getAllowedTypes(option: UploadOptions['allowedTypes']): AllowedType[] {
 function validateFile(
     file: { mimetype: string; filename: string },
     allowedTypes: AllowedType[]
-): { valid: boolean; error?: string } {
+): { valid: boolean; errorKey?: string; errorData?: Record<string, unknown> } {
     if (file.filename.includes('..') || file.filename.includes('/') || file.filename.includes('\\')) {
-        return { valid: false, error: 'Invalid filename' };
+        return { valid: false, errorKey: 'invalid_file_name' };
     }
 
     if (allowedTypes.length === 0) {
@@ -98,11 +99,11 @@ function validateFile(
     const allowedType = allowedTypes.find(t => t.mime === file.mimetype);
 
     if (!allowedType) {
-        return { valid: false, error: `File type '${file.mimetype}' not allowed` };
+        return { valid: false, errorKey: 'file_type_not_allowed', errorData: { mimetype: file.mimetype } };
     }
 
     if (!allowedType.extensions.includes(ext)) {
-        return { valid: false, error: `Extension '${ext}' does not match MIME type '${file.mimetype}'` };
+        return { valid: false, errorKey: 'file_extension_not_allowed', errorData: { extension: ext, mimetype: file.mimetype } };
     }
 
     return { valid: true };
@@ -114,7 +115,7 @@ function createSizeTracker(maxSize: number): { tracker: Transform; getSize: () =
         transform(chunk, encoding, callback) {
             size += chunk.length;
             if (size > maxSize) {
-                callback(new Error(`File size exceeds limit of ${Math.round(maxSize / 1024 / 1024)}MB`));
+                callback(new ErrorResponse(400, 'file_size_exceeds_limit', { limit: Math.round(maxSize / 1024 / 1024) }));
                 return;
             }
             callback(null, chunk);
@@ -229,7 +230,7 @@ async function uploadPluginImpl(
 
             const validation = validateFile(data, allowedTypes);
             if (!validation.valid) {
-                throw new Error(validation.error);
+                throw new ErrorResponse(400, validation.errorKey!, validation.errorData);
             }
 
             const { tempPath, size } = await saveToTemp(data.file, tempDir, data.filename, maxFileSize);
@@ -260,7 +261,7 @@ async function uploadPluginImpl(
 
                 const validation = validateFile(part, allowedTypes);
                 if (!validation.valid) {
-                    throw new Error(validation.error);
+                    throw new ErrorResponse(400, validation.errorKey!, validation.errorData);
                 }
 
                 const { tempPath, size } = await saveToTemp(part.file, tempDir, part.filename, maxFileSize);

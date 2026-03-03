@@ -3,7 +3,7 @@ import { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Auth } from '../auth/Auth';
 import { ErrorResponse } from '../core/errors';
-import type { RapiddUser, AuthOptions, AuthMethod, RouteAuthConfig } from '../types';
+import type { RapiddUser, AuthOptions, AuthStrategy, RouteAuthConfig } from '../types';
 
 interface AuthPluginOptions {
     auth?: Auth;
@@ -36,42 +36,42 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         return;
     }
 
-    // Load endpointAuthMethod from config/app.json (prefix → method(s) mapping)
-    let endpointAuthMethod: Record<string, AuthMethod | AuthMethod[] | null> = {};
+    // Load endpointAuthStrategy from config/app.json (prefix → strategy mapping)
+    let endpointAuthStrategy: Record<string, AuthStrategy | AuthStrategy[] | null> = {};
     try {
         const appConfig = require(path.join(process.cwd(), 'config', 'app.json'));
-        if (appConfig.endpointAuthMethod) {
-            endpointAuthMethod = appConfig.endpointAuthMethod;
+        if (appConfig.endpointAuthStrategy) {
+            endpointAuthStrategy = appConfig.endpointAuthStrategy;
         }
     } catch {
-        // No app.json or no endpointAuthMethod — use global default
+        // No app.json or no endpointAuthStrategy — use global default
     }
 
     // Pre-sort prefixes by length (longest first) for correct matching
-    const sortedPrefixes = Object.keys(endpointAuthMethod)
+    const sortedPrefixes = Object.keys(endpointAuthStrategy)
         .sort((a, b) => b.length - a.length);
 
-    // Parse auth on every request using configured methods (checked in order).
-    // Priority: route config > endpointAuthMethod prefix match > global default
+    // Parse auth on every request using configured strategies (checked in order).
+    // Priority: route config > endpointAuthStrategy prefix match > global default
     fastify.addHook('onRequest', async (request) => {
         const routeAuth = (request.routeOptions?.config as any)?.auth as RouteAuthConfig | undefined;
 
-        let methods: AuthMethod[];
-        if (routeAuth?.methods) {
-            methods = routeAuth.methods;
+        let strategies: AuthStrategy[];
+        if (routeAuth?.strategies) {
+            strategies = routeAuth.strategies;
         } else {
             const matchedPrefix = sortedPrefixes.find(p => request.url.startsWith(p));
             if (matchedPrefix) {
-                const value = endpointAuthMethod[matchedPrefix];
+                const value = endpointAuthStrategy[matchedPrefix];
                 if (value === null) {
-                    methods = auth.options.methods;
+                    strategies = auth.options.strategies;
                 } else if (typeof value === 'string') {
-                    methods = [value];
+                    strategies = [value];
                 } else {
-                    methods = value;
+                    strategies = value;
                 }
             } else {
-                methods = auth.options.methods;
+                strategies = auth.options.strategies;
             }
         }
 
@@ -80,10 +80,10 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
 
         let user: RapiddUser | null = null;
 
-        for (const method of methods) {
+        for (const strategy of strategies) {
             if (user) break;
 
-            switch (method) {
+            switch (strategy) {
                 case 'bearer': {
                     const h = request.headers.authorization;
                     if (h?.startsWith('Bearer ')) {
@@ -125,7 +125,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     fastify.post('/auth/login', async (request, reply) => {
         const result = await auth.login(request.body as { user: string; password: string });
 
-        if (auth.options.methods.includes('cookie')) {
+        if (auth.options.strategies.includes('cookie')) {
             reply.setCookie(auth.options.cookieName, result.accessToken, {
                 path: '/',
                 httpOnly: true,
@@ -141,7 +141,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
     fastify.post('/auth/logout', async (request, reply) => {
         const result = await auth.logout(request.headers.authorization);
 
-        if (auth.options.methods.includes('cookie')) {
+        if (auth.options.strategies.includes('cookie')) {
             reply.clearCookie(auth.options.cookieName, { path: '/' });
         }
 

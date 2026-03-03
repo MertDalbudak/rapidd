@@ -70,7 +70,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         const err = error as Error;
         const message =
             Object.getPrototypeOf(err).constructor === Error && process.env.NODE_ENV === 'production'
-                ? 'Something went wrong'
+                ? LanguageDict.get('internal_server_error', null, language)
                 : err.message || String(error);
 
         Logger.error(error);

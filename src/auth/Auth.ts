@@ -6,7 +6,7 @@ import { ErrorResponse } from '../core/errors';
 import { createStore, SessionStoreManager } from './stores';
 import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField } from '../core/dmmf';
 import { Logger } from '../utils/Logger';
-import type { RapiddUser, AuthOptions, AuthMethod, ISessionStore } from '../types';
+import type { RapiddUser, AuthOptions, AuthStrategy, ISessionStore } from '../types';
 
 /**
  * Authentication class for user login, logout, and session management
@@ -27,7 +27,7 @@ import type { RapiddUser, AuthOptions, AuthMethod, ISessionStore } from '../type
 export class Auth {
     options: Required<Pick<AuthOptions, 'passwordField' | 'saltRounds'>> & AuthOptions & {
         identifierFields: string[];
-        methods: AuthMethod[];
+        strategies: AuthStrategy[];
         cookieName: string;
         customHeaderName: string;
         session: { ttl: number; store?: string };
@@ -69,8 +69,8 @@ export class Auth {
                 ...options.jwt,
             },
             saltRounds: options.saltRounds || parseInt(process.env.AUTH_SALT_ROUNDS || '10', 10),
-            methods: options.methods
-                || (process.env.AUTH_METHODS?.split(',').map(s => s.trim()) as AuthMethod[])
+            strategies: options.strategies
+                || (process.env.AUTH_STRATEGIES?.split(',').map(s => s.trim()) as AuthStrategy[])
                 || ['bearer'],
             cookieName: options.cookieName || process.env.AUTH_COOKIE_NAME || 'token',
             customHeaderName: options.customHeaderName || process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token',
