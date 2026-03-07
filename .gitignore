@@ -9,3 +9,8 @@ compose.yml
 /prisma/client
 /dist
 /wiki
+
+/prisma/schema.prisma
+/src/models
+/routes/api/v1
+/src/config/acl.ts
