@@ -285,16 +285,17 @@ export class Auth {
             if (!User) return null;
             let user: Record<string, unknown> | null = null;
 
-            for (const field of this.options.identifierFields) {
-                try {
-                    user = await User.findUnique({
-                        where: { [field]: identifier },
-                        ...this._buildUserQuery(true),
-                    });
-                    if (user) break;
-                } catch {
-                    // Field might not exist or not be unique
-                }
+            const userQuery = this._buildUserQuery(true);
+            if (this.options.identifierFields.length === 1) {
+                user = await User.findUnique({
+                    where: { [this.options.identifierFields[0]]: identifier },
+                    ...userQuery,
+                }).catch(() => null);
+            } else {
+                user = await User.findFirst({
+                    where: { OR: this.options.identifierFields.map((f: string) => ({ [f]: identifier })) },
+                    ...userQuery,
+                }).catch(() => null);
             }
 
             if (!user?.[this.options.passwordField]) return null;

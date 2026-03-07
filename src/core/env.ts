@@ -120,28 +120,36 @@ export function validateEnv(): void {
 }
 
 /**
- * Get an environment variable with type coercion
+ * Get an environment variable with type coercion.
+ * Parsed values are cached after first access.
  */
+const _envCache = new Map<string, unknown>();
+const _envSnapshot = new Map<string, string | undefined>();
+
 export function getEnv<K extends keyof EnvConfig>(key: K): EnvConfig[K] {
+    const envValue = process.env[key];
+    if (_envCache.has(key) && _envSnapshot.get(key) === envValue) {
+        return _envCache.get(key) as EnvConfig[K];
+    }
+
     const value = process.env[key];
     const defaultValue = DEFAULTS[key];
 
+    let result: unknown;
+
     if (value === undefined || value === '') {
-        if (defaultValue !== undefined) {
-            return defaultValue as EnvConfig[K];
-        }
-        return undefined as EnvConfig[K];
+        result = defaultValue !== undefined ? defaultValue : undefined;
+    } else if (typeof defaultValue === 'number') {
+        result = parseInt(value, 10);
+    } else if (typeof defaultValue === 'boolean') {
+        result = value.toLowerCase() === 'true';
+    } else {
+        result = value;
     }
 
-    // Type coercion based on default value type
-    if (typeof defaultValue === 'number') {
-        return parseInt(value, 10) as EnvConfig[K];
-    }
-    if (typeof defaultValue === 'boolean') {
-        return (value.toLowerCase() === 'true') as EnvConfig[K];
-    }
-
-    return value as EnvConfig[K];
+    _envCache.set(key, result);
+    _envSnapshot.set(key, envValue);
+    return result as EnvConfig[K];
 }
 
 /**

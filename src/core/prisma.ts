@@ -131,37 +131,37 @@ export async function resetRLSVariables(tx: any, variables: RLSVariables): Promi
 // EXTENDED PRISMA WITH AUTOMATIC RLS
 // =====================================================
 
-export const prisma = basePrisma.$extends({
-    query: {
-        async $allOperations({ operation, args, query, model }: any) {
-            if (!rlsEnabled) return query(args);
+export const prisma = rlsEnabled
+    ? basePrisma.$extends({
+        query: {
+            async $allOperations({ operation, args, query, model }: any) {
+                const context = requestContext.getStore();
+                const variables = context?.variables;
 
-            const context = requestContext.getStore();
-            const variables = context?.variables;
+                if (!variables || Object.keys(variables).length === 0) {
+                    return query(args);
+                }
 
-            if (!variables || Object.keys(variables).length === 0) {
-                return query(args);
-            }
+                if (operation === '$transaction') {
+                    return basePrisma.$transaction(async (tx: any) => {
+                        await setRLSVariables(tx, variables);
+                        return query(args);
+                    });
+                }
 
-            if (operation === '$transaction') {
                 return basePrisma.$transaction(async (tx: any) => {
                     await setRLSVariables(tx, variables);
-                    return query(args);
+
+                    if (model) {
+                        return tx[model][operation](args);
+                    } else {
+                        return tx[operation](args);
+                    }
                 });
-            }
-
-            return basePrisma.$transaction(async (tx: any) => {
-                await setRLSVariables(tx, variables);
-
-                if (model) {
-                    return tx[model][operation](args);
-                } else {
-                    return tx[operation](args);
-                }
-            });
+            },
         },
-    },
-});
+    })
+    : basePrisma;
 
 // =====================================================
 // TRANSACTION HELPERS

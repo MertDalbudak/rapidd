@@ -255,6 +255,18 @@ export interface ModelOptions {
     [key: string]: unknown;
 }
 
+export interface GetManyOptions {
+    q?: Record<string, any>;
+    include?: string | Record<string, any>;
+    limit?: number;
+    offset?: number;
+    sortBy?: string;
+    sortOrder?: string;
+    fields?: string | null;
+    pagination?: { page: number; pageSize: number };
+    totalResults?: boolean;
+}
+
 export interface GetManyResult<T = Record<string, unknown>> {
     data: T[];
     meta: { take: number; skip: number; total?: number; page?: number; pageSize?: number; hasMore?: boolean };

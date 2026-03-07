@@ -22,15 +22,21 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
 
 COPY prisma ./prisma
-RUN npx prisma generate --generator client
+RUN npx prisma generate --generator client && \
+    find node_modules/.prisma -name '*.node' ! -name 'libquery_engine*' -delete 2>/dev/null; \
+    find node_modules/@prisma/engines -type f -name '*.node' ! -name 'libquery_engine*' -delete 2>/dev/null; \
+    rm -rf node_modules/prisma node_modules/@types 2>/dev/null; \
+    true
 
-# Stage 3: Runtime
-FROM node:current-alpine
+# Stage 3: Runtime (minimal)
+FROM node:current-alpine AS runtime
 
-WORKDIR /app
+RUN apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
 RUN addgroup -g 1001 -S nodejs && \
     adduser -S rapidd -u 1001
+
+WORKDIR /app
 
 # Production node_modules with Prisma client
 COPY --from=deps --chown=rapidd:nodejs /app/node_modules ./node_modules
@@ -47,8 +53,6 @@ COPY --chown=rapidd:nodejs config ./config
 COPY --chown=rapidd:nodejs locales ./locales
 COPY --chown=rapidd:nodejs templates ./templates
 COPY --chown=rapidd:nodejs public ./public
-
-RUN apk update && apk upgrade --no-cache && rm -rf /var/cache/apk/*
 
 RUN mkdir -p /app/uploads /app/temp/uploads /app/logs && \
     chown -R rapidd:nodejs /app/uploads /app/temp /app/logs

@@ -226,7 +226,7 @@ function registerProductRoutes(app: FastifyInstance, user: any) {
         try {
             const { q = {}, include = '', limit = '25', offset = '0', sortBy = 'id', sortOrder = 'asc', fields = null } = request.query as Record<string, string>;
             const model = new Model('products', { user: (request as any).user });
-            const results = await model.getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder as 'asc' | 'desc', fields);
+            const results = await model.getMany({ q, include, limit: Number(limit), offset: Number(offset), sortBy, sortOrder, fields });
             return reply.sendList(results.data, results.meta);
         } catch (error: any) {
             const response = QueryBuilder.errorHandler(error);

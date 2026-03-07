@@ -91,6 +91,8 @@ class QueryBuilder {
     name: string;
     _relationshipsCache: RelationConfig[] | null;
     _relatedFieldsCache: Record<string, Record<string, DMMFField>>;
+    _relatedByName: Map<string, RelationConfig> | null;
+    _relatedByField: Map<string, RelationConfig> | null;
 
     /**
      * Initialize QueryBuilder with model name and configuration
@@ -100,6 +102,8 @@ class QueryBuilder {
         this.name = name;
         this._relationshipsCache = null;
         this._relatedFieldsCache = {};
+        this._relatedByName = null;
+        this._relatedByField = null;
     }
 
     /**
@@ -126,7 +130,33 @@ class QueryBuilder {
         }
 
         this._relationshipsCache = dmmf.buildRelationships(this.name);
+        this._relatedByName = null;
+        this._relatedByField = null;
         return this._relationshipsCache;
+    }
+
+    /** O(1) lookup of relation by name */
+    getRelationByName(name: string): RelationConfig | undefined {
+        if (!this._relatedByName) {
+            const map = new Map<string, RelationConfig>();
+            for (const rel of this.relatedObjects) {
+                map.set(rel.name, rel);
+            }
+            this._relatedByName = map;
+        }
+        return this._relatedByName.get(name);
+    }
+
+    /** O(1) lookup of relation by field (foreign key field name) */
+    getRelationByField(field: string): RelationConfig | undefined {
+        if (!this._relatedByField) {
+            const map = new Map<string, RelationConfig>();
+            for (const rel of this.relatedObjects) {
+                if (rel.field) map.set(rel.field, rel);
+            }
+            this._relatedByField = map;
+        }
+        return this._relatedByField.get(field);
     }
 
     /**
@@ -1015,7 +1045,7 @@ class QueryBuilder {
 
         // Add relations from the include param
         for (const relationName of availableRelations) {
-            const rel = this.relatedObjects.find(r => r.name === relationName);
+            const rel = this.getRelationByName(relationName);
             if (!rel) continue;
 
             // Get ACL content for this relation (where, omit)
@@ -1140,7 +1170,7 @@ class QueryBuilder {
         key: string,
         user: any = null
     ): Record<string, any> {
-        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.name === key);
+        const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
@@ -1199,9 +1229,18 @@ class QueryBuilder {
             return itemKeys.every((key: string) => pkFields.includes(key));
         };
 
-        const createItems = items.filter((e: Record<string, any>) => !hasCompletePK(e));
-        const connectOnlyItems = items.filter((e: Record<string, any>) => hasCompletePK(e) && hasOnlyPKFields(e));
-        const upsertItems = items.filter((e: Record<string, any>) => hasCompletePK(e) && !hasOnlyPKFields(e));
+        const createItems: Record<string, any>[] = [];
+        const connectOnlyItems: Record<string, any>[] = [];
+        const upsertItems: Record<string, any>[] = [];
+        for (const item of items) {
+            if (!hasCompletePK(item)) {
+                createItems.push(item);
+            } else if (hasOnlyPKFields(item)) {
+                connectOnlyItems.push(item);
+            } else {
+                upsertItems.push(item);
+            }
+        }
 
         // Get ACL for the related model
         const relatedAcl = acl.model[relatedObject.object];
@@ -1446,7 +1485,7 @@ class QueryBuilder {
         user: any = null
     ): Record<string, any> {
         const acl = getAcl();
-        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.field === key);
+        const relatedObject = this.getRelationByField(key);
         if (!relatedObject) return data;
 
         const result: Record<string, any> = { ...data };
@@ -1515,7 +1554,7 @@ class QueryBuilder {
         parentId: string | number,
         user: any
     ): Record<string, any> {
-        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.name === key);
+        const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
@@ -1548,7 +1587,7 @@ class QueryBuilder {
         user: any = null
     ): Record<string, any> {
         const acl = getAcl();
-        const relatedObject = this.relatedObjects.find((e: RelationConfig) => e.field === key);
+        const relatedObject = this.getRelationByField(key);
         if (!relatedObject) return data;
 
         const result: Record<string, any> = { ...data };

@@ -119,14 +119,14 @@ describe('Model - Field Selection', () => {
         });
 
         it('should pass fields=null by default (current behavior)', async () => {
-            await model.getMany({}, '', 10, 0, 'id', 'asc');
+            await model.getMany({ limit: 10, sortBy: 'id' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             // Should NOT have a select key (uses include+omit instead)
             expect(findManyCall).not.toHaveProperty('select');
         });
 
         it('should use select when fields is specified', async () => {
-            await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title');
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall).toHaveProperty('select');
             expect(findManyCall.select.id).toBe(true);
@@ -136,7 +136,7 @@ describe('Model - Field Selection', () => {
         });
 
         it('should handle fields with relation', async () => {
-            await model.getMany({}, 'author', 10, 0, 'id', 'asc', 'id,title,author.name');
+            await model.getMany({ include: 'author', limit: 10, sortBy: 'id', fields: 'id,title,author.name' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.select.id).toBe(true);
             expect(findManyCall.select.title).toBe(true);
@@ -145,20 +145,20 @@ describe('Model - Field Selection', () => {
         });
 
         it('should still apply filters when fields is specified', async () => {
-            await model.getMany({ title: 'test' }, '', 10, 0, 'id', 'asc', 'id,title');
+            await model.getMany({ q: { title: 'test' }, limit: 10, sortBy: 'id', fields: 'id,title' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.where).toBeDefined();
         });
 
         it('should still apply pagination when fields is specified', async () => {
-            await model.getMany({}, '', 5, 10, 'id', 'asc', 'id');
+            await model.getMany({ limit: 5, offset: 10, sortBy: 'id', fields: 'id' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.take).toBe(5);
             expect(findManyCall.skip).toBe(10);
         });
 
         it('should still apply sorting when fields is specified', async () => {
-            await model.getMany({}, '', 10, 0, 'title', 'desc', 'id,title');
+            await model.getMany({ limit: 10, sortBy: 'title', sortOrder: 'desc', fields: 'id,title' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.orderBy).toBeDefined();
         });
@@ -167,20 +167,20 @@ describe('Model - Field Selection', () => {
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1, title: 'Test' }]);
             mockPrismaModel.count.mockResolvedValue(1);
 
-            const result = await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title');
+            const result = await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title' });
             expect(result.data).toEqual([{ id: 1, title: 'Test' }]);
             expect(result.meta).toEqual({ take: 10, skip: 0, total: 1 });
         });
 
         it('should throw for relation not in include', async () => {
             await expect(
-                model.getMany({}, '', 10, 0, 'id', 'asc', 'id,author.name')
+                model.getMany({ limit: 10, sortBy: 'id', fields: 'id,author.name' })
             ).rejects.toThrow('relation_not_included');
         });
 
         it('should exclude ACL-omitted fields from select for non-admin', async () => {
             model = new Model('posts', { user: normalUser });
-            await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title,draft_notes');
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title,draft_notes' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.select.id).toBe(true);
             expect(findManyCall.select.title).toBe(true);
@@ -283,7 +283,7 @@ describe('Model - Field Selection', () => {
                 return ctx;
             });
 
-            await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title');
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title' });
             expect(capturedCtx.fields).toBe('id,title');
         });
 
@@ -294,7 +294,7 @@ describe('Model - Field Selection', () => {
                 return ctx;
             });
 
-            await model.getMany({}, '', 10, 0, 'id', 'asc');
+            await model.getMany({ limit: 10, sortBy: 'id' });
             expect(capturedCtx.fields).toBeNull();
         });
 
@@ -305,7 +305,7 @@ describe('Model - Field Selection', () => {
                 return ctx;
             });
 
-            await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title');
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.select.authorId).toBe(true);
         });
@@ -316,7 +316,7 @@ describe('Model - Field Selection', () => {
                 return ctx;
             });
 
-            await model.getMany({}, '', 10, 0, 'id', 'asc', 'id,title');
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,title' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             // Should fallback to include+omit mode
             expect(findManyCall).not.toHaveProperty('select');
@@ -363,7 +363,7 @@ describe('Model - Field Selection', () => {
         });
 
         it('getMany with no fields uses include+omit', async () => {
-            await model.getMany({}, 'author', 10, 0, 'id', 'asc');
+            await model.getMany({ include: 'author', limit: 10, sortBy: 'id' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall).not.toHaveProperty('select');
             // Should have include because we passed 'author'
@@ -371,7 +371,7 @@ describe('Model - Field Selection', () => {
         });
 
         it('getMany with null fields uses include+omit', async () => {
-            await model.getMany({}, 'author', 10, 0, 'id', 'asc', null);
+            await model.getMany({ include: 'author', limit: 10, sortBy: 'id', fields: null });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall).not.toHaveProperty('select');
         });
@@ -399,7 +399,7 @@ describe('Model - Field Selection', () => {
         });
 
         it('should allow any relation when include is ALL', async () => {
-            await model.getMany({}, 'ALL', 10, 0, 'id', 'asc', 'id,author.name,comments.text');
+            await model.getMany({ include: 'ALL', limit: 10, sortBy: 'id', fields: 'id,author.name,comments.text' });
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
             expect(findManyCall.select.id).toBe(true);
             expect(findManyCall.select.author).toBeDefined();

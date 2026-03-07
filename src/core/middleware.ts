@@ -1,6 +1,7 @@
 import type { MiddlewareHook, MiddlewareOperation, MiddlewareContext, MiddlewareFn } from '../types';
 
 const middlewareRegistry = new Map<string, MiddlewareFn[]>();
+const combinedCache = new Map<string, MiddlewareFn[]>();
 
 const OPERATIONS: MiddlewareOperation[] = ['create', 'update', 'upsert', 'upsertMany', 'delete', 'get', 'getMany', 'count'];
 const HOOKS: MiddlewareHook[] = ['before', 'after'];
@@ -28,6 +29,7 @@ function use(hook: MiddlewareHook, operation: MiddlewareOperation, fn: Middlewar
         middlewareRegistry.set(key, []);
     }
     middlewareRegistry.get(key)!.push(fn);
+    combinedCache.clear();
 }
 
 /**
@@ -41,6 +43,7 @@ function remove(hook: MiddlewareHook, operation: MiddlewareOperation, fn: Middle
     const index = middlewares.indexOf(fn);
     if (index > -1) {
         middlewares.splice(index, 1);
+        combinedCache.clear();
         return true;
     }
     return false;
@@ -52,10 +55,12 @@ function remove(hook: MiddlewareHook, operation: MiddlewareOperation, fn: Middle
 function clear(hook?: MiddlewareHook, operation?: MiddlewareOperation, model?: string): void {
     if (!hook && !operation && !model) {
         middlewareRegistry.clear();
+        combinedCache.clear();
         return;
     }
     const key = getKey(hook!, operation!, model);
     middlewareRegistry.delete(key);
+    combinedCache.clear();
 }
 
 /**
@@ -63,13 +68,26 @@ function clear(hook?: MiddlewareHook, operation?: MiddlewareOperation, model?: s
  * Returns both model-specific and global ('*') middleware.
  */
 function getMiddleware(hook: MiddlewareHook, operation: MiddlewareOperation, model: string): MiddlewareFn[] {
-    const globalKey = getKey(hook, operation, '*');
-    const modelKey = getKey(hook, operation, model);
+    const cacheKey = `${hook}:${operation}:${model}`;
+    const cached = combinedCache.get(cacheKey);
+    if (cached) return cached;
 
-    const globalMiddleware = middlewareRegistry.get(globalKey) || [];
-    const modelSpecific = middlewareRegistry.get(modelKey) || [];
+    const globalMiddleware = middlewareRegistry.get(getKey(hook, operation, '*'));
+    const modelSpecific = middlewareRegistry.get(getKey(hook, operation, model));
 
-    return [...globalMiddleware, ...modelSpecific];
+    let result: MiddlewareFn[];
+    if (!globalMiddleware?.length && !modelSpecific?.length) {
+        result = [];
+    } else if (!globalMiddleware?.length) {
+        result = modelSpecific!;
+    } else if (!modelSpecific?.length) {
+        result = globalMiddleware;
+    } else {
+        result = [...globalMiddleware, ...modelSpecific];
+    }
+
+    combinedCache.set(cacheKey, result);
+    return result;
 }
 
 /**

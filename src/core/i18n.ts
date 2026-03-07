@@ -9,6 +9,9 @@ const DEFAULT_STRINGS_PATH = ROOT ? path.join(ROOT, 'locales') : './locale';
  * Singleton LanguageDict class for efficient translation management.
  * All dictionaries are loaded once at initialization and cached in memory.
  */
+const RE_NESTED = /{{\w+}}/g;
+const RE_PARAMS = /\{(\w+)\}/g;
+
 export class LanguageDict {
     private static _dictionaries: Record<string, Record<string, string>> = {};
     private static _available: string[] = [];
@@ -72,14 +75,14 @@ export class LanguageDict {
         }
 
         // Handle nested translations ({{key}} syntax)
-        translated = translated.replace(/{{\w+}}/g, (match: string) => {
+        translated = translated.replace(RE_NESTED, (match: string) => {
             const nestedKey = match.slice(2, -2);
             return this.get(nestedKey, data, lang);
         });
 
         // Handle parameter interpolation ({key} syntax)
         if (data !== null && typeof data === 'object') {
-            translated = translated.replace(/\{(\w+)\}/g, (match: string, paramKey: string) => {
+            translated = translated.replace(RE_PARAMS, (match: string, paramKey: string) => {
                 return data[paramKey] !== undefined ? String(data[paramKey]) : match;
             });
         }

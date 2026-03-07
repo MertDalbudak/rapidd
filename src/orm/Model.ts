@@ -2,7 +2,7 @@ import { QueryBuilder } from './QueryBuilder';
 import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { modelMiddleware } from '../core/middleware';
 import { ErrorResponse } from '../core/errors';
-import type { RapiddUser, ModelOptions, GetManyResult, UpsertManyResult, UpsertManyOptions, ModelAcl, MiddlewareContext } from '../types';
+import type { RapiddUser, ModelOptions, GetManyOptions, GetManyResult, UpsertManyResult, UpsertManyOptions, ModelAcl, MiddlewareContext } from '../types';
 
 /**
  * Base Model class for Rapidd ORM operations
@@ -16,7 +16,7 @@ import type { RapiddUser, ModelOptions, GetManyResult, UpsertManyResult, UpsertM
  * }
  *
  * const users = new Users({ user: { id: '123', role: 'admin' } });
- * const result = await users.getMany({}, 'profile', 10, 0);
+ * const result = await users.getMany({ include: 'profile', limit: 10 });
  *
  * @example
  * // Register middleware to auto-add timestamps
@@ -224,22 +224,21 @@ class Model {
     /**
      * Internal method to fetch multiple records with filtering and pagination
      */
-    _getMany = async (
-        q: Record<string, any> = {},
-        include: string | Record<string, any> = "",
-        limit: number = 25,
-        offset: number = 0,
-        sortBy: string = this.defaultSortField,
-        sortOrder: string = "asc",
-        options: Record<string, any> = {},
-        fields: string | null = null,
-        totalResults: boolean = true,
-    ): Promise<GetManyResult> => {
+    _getMany = async (opts: GetManyOptions = {}): Promise<GetManyResult> => {
+        const {
+            q = {},
+            include = '',
+            limit = 25,
+            offset = 0,
+            fields = null,
+            totalResults = true,
+        } = opts;
+
+        let sortBy = (opts.sortBy ?? this.defaultSortField).trim();
+        let sortOrder = (opts.sortOrder ?? 'asc').trim();
+
         const take = this.take(Number(limit));
         const skip = this.skip(Number(offset));
-
-        sortBy = sortBy?.trim();
-        sortOrder = sortOrder?.trim();
 
         // Validate sort field - fall back to default for composite PK names or missing 'id'
         if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
@@ -255,7 +254,7 @@ class Model {
         }
 
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'getMany', { query: q, include, take, skip, sortBy, sortOrder, options, fields });
+        const beforeCtx = await this._executeMiddleware('before', 'getMany', { query: q, include, take, skip, sortBy, sortOrder, fields });
 
         if (beforeCtx.abort) {
             return (beforeCtx.result as GetManyResult) || { data: [], meta: { take, skip, total: 0 } };
@@ -273,7 +272,7 @@ class Model {
         const effectiveSkip = beforeCtx.skip || skip;
         const whereClause = this.filter(beforeCtx.query || q);
         const orderByClause = this.sort(beforeCtx.sortBy || sortBy, beforeCtx.sortOrder || sortOrder);
-        const extraOptions = beforeCtx.options || options;
+        const extraOptions = beforeCtx.options || {};
 
         let result: GetManyResult;
 
@@ -760,27 +759,17 @@ class Model {
      * Fetch multiple records with filtering, pagination, and sorting.
      * Supports both offset mode (limit/offset) and page mode (page/pageSize).
      */
-    async getMany(
-        q: Record<string, any> = {},
-        include: string | Record<string, any> = "",
-        limit: number = 25,
-        offset: number = 0,
-        sortBy: string = this.defaultSortField,
-        sortOrder: string = "asc",
-        fields: string | null = null,
-        pagination?: { page: number; pageSize: number },
-        totalResults: boolean = true,
-    ): Promise<GetManyResult> {
-        if (pagination) {
-            const pageSize = this.take(Number(pagination.pageSize));
-            const page = Math.max(1, Math.floor(Number(pagination.page) || 1));
+    async getMany(opts: GetManyOptions = {}): Promise<GetManyResult> {
+        if (opts.pagination) {
+            const pageSize = this.take(Number(opts.pagination.pageSize));
+            const page = Math.max(1, Math.floor(Number(opts.pagination.page) || 1));
             const skip = (page - 1) * pageSize;
-            const result = await this._getMany(q, include, pageSize, skip, sortBy, sortOrder, {}, fields, totalResults);
+            const result = await this._getMany({ ...opts, limit: pageSize, offset: skip });
             result.meta.page = page;
             result.meta.pageSize = pageSize;
             return result;
         }
-        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder, {}, fields, totalResults);
+        return await this._getMany(opts);
     }
 
     /**

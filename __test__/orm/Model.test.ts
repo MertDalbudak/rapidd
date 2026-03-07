@@ -364,7 +364,7 @@ describe('Model', () => {
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1, title: 'Test' }]);
             mockPrismaModel.count.mockResolvedValue(1);
 
-            const result = await model.getMany({}, '', 10, 0, 'id', 'asc');
+            const result = await model.getMany({ limit: 10, sortBy: 'id' });
             expect(result.data).toEqual([{ id: 1, title: 'Test' }]);
             expect(result.meta.total).toBe(1);
             expect(result.meta.take).toBe(10);
@@ -381,7 +381,7 @@ describe('Model', () => {
         });
 
         it('should throw for invalid sort field', async () => {
-            await expect(model.getMany({}, '', 10, 0, 'nonexistent', 'asc'))
+            await expect(model.getMany({ limit: 10, sortBy: 'nonexistent' }))
                 .rejects.toThrow(ErrorResponse);
         });
 
