@@ -99,6 +99,9 @@ export interface ListMeta {
     take: number;
     skip: number;
     total?: number;
+    page?: number;
+    pageSize?: number;
+    hasMore?: boolean;
 }
 
 export interface ListResponseBody<T = unknown> {
@@ -106,10 +109,10 @@ export interface ListResponseBody<T = unknown> {
     meta: {
         total?: number;
         count: number;
-        limit: number;
-        offset: number;
-        hasMore?: boolean;
-    };
+    } & (
+        | { limit: number; offset: number; hasMore?: boolean }
+        | { page: number; pageSize: number; totalPages?: number; hasNextPage: boolean }
+    );
 }
 
 export interface ErrorResponseBody {
@@ -254,7 +257,7 @@ export interface ModelOptions {
 
 export interface GetManyResult<T = Record<string, unknown>> {
     data: T[];
-    meta: { take: number; skip: number; total: number };
+    meta: { take: number; skip: number; total?: number; page?: number; pageSize?: number; hasMore?: boolean };
 }
 
 export interface UpsertManyResult {

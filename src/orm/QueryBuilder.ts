@@ -1654,12 +1654,12 @@ class QueryBuilder {
             return keys.length === 1 && (keys[0] === foreignKey || keys[0] === pkFields[0]);
         };
 
-        // Helper to merge ACL filter into where clause
+        // Helper to merge ACL filter into where clause safely using AND
         const mergeAclFilter = (where: Record<string, any>, aclFilter: any): Record<string, any> => {
-            if (aclFilter && typeof aclFilter === 'object' && Object.keys(aclFilter).length > 0) {
-                Object.assign(where, aclFilter);
+            if (!aclFilter || typeof aclFilter !== 'object' || Object.keys(aclFilter).length === 0) {
+                return where;
             }
-            return where;
+            return { AND: [where, aclFilter] };
         };
 
         // Logic:
@@ -1745,8 +1745,7 @@ class QueryBuilder {
                     where[pkFields[0]] = e[pkFields[0]];
                 }
                 // Apply update filter - user must have permission to update
-                mergeAclFilter(where, updateFilter);
-                return where;
+                return mergeAclFilter(where, updateFilter);
             };
 
             if (canCreate) {

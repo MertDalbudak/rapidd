@@ -1281,13 +1281,15 @@ describe('ACL integration with query parameters', () => {
         expect(call.where.ownerId).toBe(42);
     });
 
-    it('should combine access filter with user filter', async () => {
+    it('should combine access filter with user filter using AND', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?q=name%3D%25Widget%25' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        // Should have both user filter and ACL filter
-        expect(call.where.name).toBeDefined();
-        expect(call.where.ownerId).toBe(42);
+        // Should use AND to combine both filters so they don't overwrite each other
+        expect(call.where.AND).toBeDefined();
+        expect(call.where.AND).toHaveLength(2);
+        expect(call.where.AND[0].name).toBeDefined();
+        expect(call.where.AND[1].ownerId).toBe(42);
     });
 
     it('should omit internal_cost field for non-admin', async () => {

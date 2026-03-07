@@ -233,6 +233,7 @@ class Model {
         sortOrder: string = "asc",
         options: Record<string, any> = {},
         fields: string | null = null,
+        totalResults: boolean = true,
     ): Promise<GetManyResult> => {
         const take = this.take(Number(limit));
         const skip = this.skip(Number(offset));
@@ -268,22 +269,44 @@ class Model {
             this.user
         );
 
-        // Query the database using Prisma with filters, pagination, and limits
-        const [data, total] = await prismaTransaction([
-            (tx: any) => tx[this.name].findMany({
-                'where': this.filter(beforeCtx.query || q),
-                ...fieldSelection,
-                'take': beforeCtx.take || take,
-                'skip': beforeCtx.skip || skip,
-                'orderBy': this.sort(beforeCtx.sortBy || sortBy, beforeCtx.sortOrder || sortOrder),
-                ...(beforeCtx.options || options)
-            }),
-            (tx: any) => tx[this.name].count({
-                'where': this.filter(beforeCtx.query || q)
-            })
-        ]);
+        const effectiveTake = beforeCtx.take || take;
+        const effectiveSkip = beforeCtx.skip || skip;
+        const whereClause = this.filter(beforeCtx.query || q);
+        const orderByClause = this.sort(beforeCtx.sortBy || sortBy, beforeCtx.sortOrder || sortOrder);
+        const extraOptions = beforeCtx.options || options;
 
-        const result: GetManyResult = { data, meta: { take: Number(beforeCtx.take) || take, skip: Number(beforeCtx.skip) || skip, total } };
+        let result: GetManyResult;
+
+        if (totalResults) {
+            // Fetch data + count in a transaction
+            const [data, total] = await prismaTransaction([
+                (tx: any) => tx[this.name].findMany({
+                    'where': whereClause,
+                    ...fieldSelection,
+                    'take': effectiveTake,
+                    'skip': effectiveSkip,
+                    'orderBy': orderByClause,
+                    ...extraOptions
+                }),
+                (tx: any) => tx[this.name].count({
+                    'where': whereClause
+                })
+            ]);
+            result = { data, meta: { take: Number(effectiveTake), skip: Number(effectiveSkip), total } };
+        } else {
+            // Fetch take+1 rows to determine hasMore without a count query
+            const rows = await prisma[this.name].findMany({
+                'where': whereClause,
+                ...fieldSelection,
+                'take': effectiveTake + 1,
+                'skip': effectiveSkip,
+                'orderBy': orderByClause,
+                ...extraOptions
+            });
+            const hasMore = rows.length > effectiveTake;
+            const data = hasMore ? rows.slice(0, effectiveTake) : rows;
+            result = { data, meta: { take: Number(effectiveTake), skip: Number(effectiveSkip), hasMore } };
+        }
 
         // Execute after middleware
         const afterCtx = await this._executeMiddleware('after', 'getMany', { result });
@@ -439,6 +462,17 @@ class Model {
      * Supports both single and composite primary keys
      */
     async _upsert(data: Record<string, any>, unique_key: string | string[] = this.primaryKey, options: Record<string, any> = {}): Promise<any> {
+        // CHECK CREATE PERMISSION (upsert may create)
+        if (!this.canCreate(data)) {
+            throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
+        }
+
+        // CHECK UPDATE PERMISSION (upsert may update)
+        const updateFilter = this.getUpdateFilter();
+        if (updateFilter === false) {
+            throw new ErrorResponse(403, "no_permission_to_update");
+        }
+
         // Execute before middleware
         const beforeCtx = await this._executeMiddleware('before', 'upsert', { data: { ...data }, unique_key, options });
 
@@ -455,8 +489,10 @@ class Model {
         const updatePrimaryKey = Array.isArray(targetKey) ? targetKey[0] : this.primaryKey;
         const updateData = this.queryBuilder.update(updatePrimaryKey, upsertData, this.user);
 
-        // Build where clause that supports composite keys
-        const whereClause = this.buildWhereUniqueKey(targetKey, upsertData);
+        // Build where clause with ACL update filter
+        const whereId = this.buildWhereUniqueKey(targetKey, upsertData);
+        const hasUpdateFilter = updateFilter && Object.keys(updateFilter).length > 0;
+        const whereClause = hasUpdateFilter ? { AND: [whereId, updateFilter] } : whereId;
 
         const result = await this.prisma.upsert({
             'where': whereClause,
@@ -483,6 +519,17 @@ class Model {
     ): Promise<UpsertManyResult> {
         if (!Array.isArray(data) || data.length === 0) {
             return { created: 0, updated: 0, failed: [], totalSuccess: 0, totalFailed: 0 } as UpsertManyResult;
+        }
+
+        // CHECK CREATE PERMISSION (upsertMany may create)
+        if (!this.canCreate()) {
+            throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
+        }
+
+        // CHECK UPDATE PERMISSION (upsertMany may update)
+        const updateFilter = this.getUpdateFilter();
+        if (updateFilter === false) {
+            throw new ErrorResponse(403, "no_permission_to_update");
         }
 
         // Extract operation-specific options
@@ -595,13 +642,15 @@ class Model {
                     }
                 }
             }
-            // Batch update
+            // Batch update with ACL filter
+            const hasUpdateFilter = updateFilter && typeof updateFilter === 'object' && Object.keys(updateFilter).length > 0;
             if (updateRecords.length > 0) {
                 for (const { original, transformed } of updateRecords) {
                     try {
-                        const whereClause = Array.isArray(targetKey)
+                        const whereId = Array.isArray(targetKey)
                             ? this.buildWhereUniqueKey(targetKey, original)
                             : { [targetKey as string]: original[targetKey as string] };
+                        const whereClause = hasUpdateFilter ? { AND: [whereId, updateFilter] } : whereId;
                         await tx[this.name].update({
                             'where': whereClause,
                             'data': transformed,
@@ -708,7 +757,8 @@ class Model {
     }
 
     /**
-     * Fetch multiple records with filtering, pagination, and sorting
+     * Fetch multiple records with filtering, pagination, and sorting.
+     * Supports both offset mode (limit/offset) and page mode (page/pageSize).
      */
     async getMany(
         q: Record<string, any> = {},
@@ -717,9 +767,20 @@ class Model {
         offset: number = 0,
         sortBy: string = this.defaultSortField,
         sortOrder: string = "asc",
-        fields: string | null = null
+        fields: string | null = null,
+        pagination?: { page: number; pageSize: number },
+        totalResults: boolean = true,
     ): Promise<GetManyResult> {
-        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder, {}, fields);
+        if (pagination) {
+            const pageSize = this.take(Number(pagination.pageSize));
+            const page = Math.max(1, Math.floor(Number(pagination.page) || 1));
+            const skip = (page - 1) * pageSize;
+            const result = await this._getMany(q, include, pageSize, skip, sortBy, sortOrder, {}, fields, totalResults);
+            result.meta.page = page;
+            result.meta.pageSize = pageSize;
+            return result;
+        }
+        return await this._getMany(q, include, Number(limit), Number(offset), sortBy, sortOrder, {}, fields, totalResults);
     }
 
     /**
@@ -785,10 +846,20 @@ class Model {
     }
 
     /**
-     * Build a filter/where clause with ACL applied
+     * Build a filter/where clause with ACL applied.
+     * Uses AND to combine API filters with ACL filters so they never overwrite each other.
      */
     filter(include: string | Record<string, any>): Record<string, any> {
-        return { ...this._filter(include), ...this.getAccessFilter() };
+        const apiFilter = this._filter(include);
+        const aclFilter = this.getAccessFilter();
+
+        const hasApi = Object.keys(apiFilter).length > 0;
+        const hasAcl = Object.keys(aclFilter).length > 0;
+
+        if (!hasApi) return aclFilter;
+        if (!hasAcl) return apiFilter;
+
+        return { AND: [apiFilter, aclFilter] };
     }
 
     /**

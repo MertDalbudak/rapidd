@@ -52,6 +52,9 @@ export interface EnvConfig {
     // Proxy
     TRUST_PROXY?: boolean;
 
+    // Pagination
+    PAGINATION_MODE: 'offset' | 'page';
+
     // Logging
     LOG_LEVEL: 'essential' | 'fine' | 'finest';
     LOG_DIR: string;
@@ -81,6 +84,7 @@ const DEFAULTS: Partial<Record<keyof EnvConfig, string | number | boolean>> = {
     REDIS_DB_RATE_LIMIT: 0,
     REDIS_DB_AUTH: 1,
     RLS_NAMESPACE: 'app',
+    PAGINATION_MODE: 'offset',
     LOG_LEVEL: 'essential',
     LOG_DIR: 'logs',
 };

@@ -270,6 +270,93 @@ describe('Model', () => {
         });
     });
 
+    // ── filter() AND combination ────────────────────────────
+
+    describe('filter()', () => {
+        it('should return only ACL filter when no API filter', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: (user: any) => ({ authorId: user.id }) } }
+            });
+            const m = new Model('posts', { user: { id: 5, role: 'user' } });
+            const result = m.filter('');
+            expect(result).toEqual({ authorId: 5 });
+            expect(result.AND).toBeUndefined();
+        });
+
+        it('should return only API filter when no ACL filter', () => {
+            const m = new Model('posts', { user: { id: 1, role: 'admin' } });
+            // Mock _filter to return an API filter
+            m._filter = jest.fn(() => ({ status: 'active' }));
+            const result = m.filter('status=active');
+            expect(result).toEqual({ status: 'active' });
+            expect(result.AND).toBeUndefined();
+        });
+
+        it('should combine API and ACL filters with AND', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: (user: any) => ({ authorId: user.id }) } }
+            });
+            const m = new Model('posts', { user: { id: 5, role: 'user' } });
+            m._filter = jest.fn(() => ({ status: 'active' }));
+            const result = m.filter('status=active');
+            expect(result.AND).toBeDefined();
+            expect(result.AND).toHaveLength(2);
+            expect(result.AND[0]).toEqual({ status: 'active' });
+            expect(result.AND[1]).toEqual({ authorId: 5 });
+        });
+
+        it('should combine when ACL uses OR filter', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: () => ({ OR: [{ status: 'published' }, { status: 'draft' }] }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'editor' } });
+            m._filter = jest.fn(() => ({ title: { contains: 'Hello' } }));
+            const result = m.filter('title=%Hello%');
+            expect(result.AND).toBeDefined();
+            expect(result.AND).toHaveLength(2);
+            expect(result.AND[0]).toEqual({ title: { contains: 'Hello' } });
+            expect(result.AND[1]).toEqual({ OR: [{ status: 'published' }, { status: 'draft' }] });
+        });
+
+        it('should combine when ACL has nested relation filter', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: () => ({ author: { department: { id: 3 } } }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            m._filter = jest.fn(() => ({ status: 'active' }));
+            const result = m.filter('status=active');
+            expect(result.AND).toBeDefined();
+            expect(result.AND[1]).toEqual({ author: { department: { id: 3 } } });
+        });
+
+        it('should not overwrite overlapping keys between API and ACL filters', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: () => ({ status: { not: 'super_admin' } }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'admin' } });
+            m._filter = jest.fn(() => ({ status: 'active' }));
+            const result = m.filter('status=active');
+            expect(result.AND).toBeDefined();
+            expect(result.AND).toHaveLength(2);
+            // Both status conditions preserved independently
+            expect(result.AND[0]).toEqual({ status: 'active' });
+            expect(result.AND[1]).toEqual({ status: { not: 'super_admin' } });
+        });
+
+        it('should combine when ACL has AND filter', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getAccessFilter: () => ({ AND: [{ role: { not: 'super_admin' } }, { active: true }] }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'admin' } });
+            m._filter = jest.fn(() => ({ role: { not: 'student' } }));
+            const result = m.filter('role=not:student');
+            expect(result.AND).toBeDefined();
+            expect(result.AND).toHaveLength(2);
+            expect(result.AND[0]).toEqual({ role: { not: 'student' } });
+            expect(result.AND[1]).toEqual({ AND: [{ role: { not: 'super_admin' } }, { active: true }] });
+        });
+    });
+
     // ── CRUD Operations ──────────────────────────────────────
 
     describe('_getMany()', () => {
@@ -541,6 +628,75 @@ describe('Model', () => {
             await model.upsert({ id: 1, title: 'Test' });
             expect(spy).toHaveBeenCalled();
         });
+
+        it('should throw 403 when canCreate denies', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await expect(m.upsert({ id: 1, title: 'Test' }))
+                .rejects.toMatchObject({ status_code: 403 });
+            expect(mockPrismaModel.upsert).not.toHaveBeenCalled();
+        });
+
+        it('should throw 403 when getUpdateFilter returns false', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await expect(m.upsert({ id: 1, title: 'Test' }))
+                .rejects.toMatchObject({ status_code: 403 });
+            expect(mockPrismaModel.upsert).not.toHaveBeenCalled();
+        });
+
+        it('should merge update filter into where clause with AND', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: (user: any) => ({ authorId: user.id }) } }
+            });
+            const m = new Model('posts', { user: { id: 5, role: 'user' } });
+            mockPrismaModel.upsert.mockResolvedValue({ id: 1, title: 'Test' });
+            await m.upsert({ id: 1, title: 'Test' });
+            const callArgs = mockPrismaModel.upsert.mock.calls[0][0];
+            expect(callArgs.where.AND).toBeDefined();
+            expect(callArgs.where.AND).toHaveLength(2);
+            expect(callArgs.where.AND[0]).toEqual({ id: 1 });
+            expect(callArgs.where.AND[1]).toEqual({ authorId: 5 });
+        });
+
+        it('should merge update filter with OR condition using AND', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: () => ({ OR: [{ role: 'editor' }, { role: 'admin' }] }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'editor' } });
+            mockPrismaModel.upsert.mockResolvedValue({ id: 1, title: 'Test' });
+            await m.upsert({ id: 1, title: 'Test' });
+            const callArgs = mockPrismaModel.upsert.mock.calls[0][0];
+            expect(callArgs.where.AND).toBeDefined();
+            expect(callArgs.where.AND[0]).toEqual({ id: 1 });
+            expect(callArgs.where.AND[1]).toEqual({ OR: [{ role: 'editor' }, { role: 'admin' }] });
+        });
+
+        it('should not wrap where in AND when update filter is empty', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: () => ({}) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'admin' } });
+            mockPrismaModel.upsert.mockResolvedValue({ id: 1, title: 'Test' });
+            await m.upsert({ id: 1, title: 'Test' });
+            const callArgs = mockPrismaModel.upsert.mock.calls[0][0];
+            expect(callArgs.where.AND).toBeUndefined();
+            expect(callArgs.where.id).toBe(1);
+        });
+
+        it('should allow upsert for application role regardless of ACL', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false, getUpdateFilter: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+            mockPrismaModel.upsert.mockResolvedValue({ id: 1 });
+            const result = await m.upsert({ id: 1, title: 'Test' });
+            expect(result).toEqual({ id: 1 });
+        });
     });
 
     describe('_upsertMany()', () => {
@@ -591,6 +747,88 @@ describe('Model', () => {
             const spy = jest.fn(async (ctx: any) => ctx);
             modelMiddleware.use('before', 'upsertMany', spy);
             const result = await model.upsertMany([]);
+            expect(result.totalSuccess).toBe(0);
+        });
+
+        it('should throw 403 when canCreate denies', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await expect(m.upsertMany([{ id: 1, title: 'Test' }]))
+                .rejects.toMatchObject({ status_code: 403 });
+            expect(mockPrismaModel.findMany).not.toHaveBeenCalled();
+        });
+
+        it('should throw 403 when getUpdateFilter returns false', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await expect(m.upsertMany([{ id: 1, title: 'Test' }]))
+                .rejects.toMatchObject({ status_code: 403 });
+            expect(mockPrismaModel.findMany).not.toHaveBeenCalled();
+        });
+
+        it('should merge update filter into batch update where clause with AND', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: (user: any) => ({ authorId: user.id }) } }
+            });
+            const m = new Model('posts', { user: { id: 7, role: 'user' } });
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
+            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+
+            await m.upsertMany([{ id: 1, title: 'Updated' }]);
+            const updateCall = mockPrismaModel.update.mock.calls[0][0];
+            expect(updateCall.where.AND).toBeDefined();
+            expect(updateCall.where.AND).toHaveLength(2);
+            expect(updateCall.where.AND[0]).toEqual({ id: 1 });
+            expect(updateCall.where.AND[1]).toEqual({ authorId: 7 });
+        });
+
+        it('should merge update filter with OR into batch update using AND', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: () => ({ OR: [{ status: 'draft' }, { status: 'review' }] }) } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'editor' } });
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 3 }]);
+            mockPrismaModel.update.mockResolvedValue({ id: 3 });
+
+            await m.upsertMany([{ id: 3, title: 'Updated' }]);
+            const updateCall = mockPrismaModel.update.mock.calls[0][0];
+            expect(updateCall.where.AND).toHaveLength(2);
+            expect(updateCall.where.AND[0]).toEqual({ id: 3 });
+            expect(updateCall.where.AND[1]).toEqual({ OR: [{ status: 'draft' }, { status: 'review' }] });
+        });
+
+        it('should not wrap where in AND when update filter is empty', async () => {
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
+            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+
+            await model.upsertMany([{ id: 1, title: 'Updated' }]);
+            const updateCall = mockPrismaModel.update.mock.calls[0][0];
+            expect(updateCall.where.AND).toBeUndefined();
+            expect(updateCall.where.id).toBe(1);
+        });
+
+        it('should allow upsertMany for application role regardless of ACL', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false, getUpdateFilter: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+            mockPrismaModel.findMany.mockResolvedValue([]);
+            mockPrismaModel.createMany.mockResolvedValue({ count: 1 });
+            const result = await m.upsertMany([{ id: 1, title: 'Test' }]);
+            expect(result.created).toBe(1);
+        });
+
+        it('should skip ACL on empty array (no permission check needed)', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false, getUpdateFilter: () => false } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            const result = await m.upsertMany([]);
+            // Empty array returns early before ACL checks
             expect(result.totalSuccess).toBe(0);
         });
     });

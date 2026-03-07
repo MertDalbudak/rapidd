@@ -3,6 +3,7 @@ import fp from 'fastify-plugin';
 import { ErrorResponse, ErrorBasicResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
+import { getEnv } from '../core/env';
 import type { ListMeta } from '../types';
 
 /**
@@ -21,17 +22,34 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     // Decorate reply
     fastify.decorateReply('sendList', function (this: FastifyReply, data: unknown[], meta: ListMeta) {
-        const body = {
-            data,
-            meta: {
-                ...(meta.total != null ? { total: meta.total } : {}),
-                count: (data as unknown[]).length,
+        const count = (data as unknown[]).length;
+        const hasTotal = meta.total != null;
+
+        let responseMeta: Record<string, unknown>;
+
+        if (meta.page != null && meta.pageSize != null) {
+            // Page-based pagination
+            const totalPages = hasTotal ? Math.ceil(meta.total! / meta.pageSize) : undefined;
+            responseMeta = {
+                ...(hasTotal ? { total: meta.total } : {}),
+                count,
+                page: meta.page,
+                pageSize: meta.pageSize,
+                ...(totalPages != null ? { totalPages } : {}),
+                hasNextPage: hasTotal ? meta.page < totalPages! : meta.hasMore ?? count >= meta.pageSize,
+            };
+        } else {
+            // Offset-based pagination (default)
+            responseMeta = {
+                ...(hasTotal ? { total: meta.total } : {}),
+                count,
                 limit: meta.take,
                 offset: meta.skip,
-                ...(meta.total != null ? { hasMore: meta.skip + meta.take < meta.total } : {}),
-            },
-        };
-        return this.send(body);
+                hasMore: hasTotal ? meta.skip + meta.take < meta.total! : meta.hasMore ?? count >= meta.take,
+            };
+        }
+
+        return this.send({ data, meta: responseMeta });
     });
 
     fastify.decorateReply('sendError', function (this: FastifyReply, statusCode: number, message: string, data?: unknown) {

@@ -57,7 +57,7 @@ describe('Response Plugin', () => {
             expect(body.meta.hasMore).toBe(false);
         });
 
-        it('should omit total and hasMore when total is undefined', async () => {
+        it('should omit total but include hasMore when total is undefined', async () => {
             const app = await buildApp();
             app.get('/items', async (_req, reply) => {
                 return reply.sendList(
@@ -69,7 +69,7 @@ describe('Response Plugin', () => {
             const res = await app.inject({ method: 'GET', url: '/items' });
             const body = JSON.parse(res.payload);
             expect(body.meta.total).toBeUndefined();
-            expect(body.meta.hasMore).toBeUndefined();
+            expect(body.meta.hasMore).toBe(false);
             expect(body.meta.count).toBe(1);
         });
     });
