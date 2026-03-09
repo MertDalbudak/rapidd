@@ -89,8 +89,15 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     // ── CORS ────────────────────────────────────────
     const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((e: string) => e.trim());
 
+    const sharedCorsOptions = {
+        methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+        allowedHeaders: ['Content-Type', 'Authorization', process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token'],
+        credentials: true,
+    };
+
     const corsOptions = NODE_ENV === 'production'
         ? {
+            ...sharedCorsOptions,
             origin: (origin: string, cb: (err: Error | null, origin: boolean) => void) => {
                 if (!origin || allowedOrigins.includes('*')) return cb(null, true);
                 let originHost: string;
@@ -107,7 +114,7 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
                 return cb(new ErrorResponse(403, 'cors_blocked', { origin }), false);
             },
         }
-        : { origin: '*' as const };
+        : { ...sharedCorsOptions, origin: true };
 
     await app.register(fastifyCors, corsOptions as any);
 
