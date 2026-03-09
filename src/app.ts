@@ -92,7 +92,7 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     const corsOptions = NODE_ENV === 'production'
         ? {
             origin: (origin: string, cb: (err: Error | null, origin: boolean) => void) => {
-                if (!origin) return cb(null, true);
+                if (!origin || allowedOrigins.includes('*')) return cb(null, true);
                 let originHost: string;
                 try {
                     originHost = new URL(origin).hostname;
