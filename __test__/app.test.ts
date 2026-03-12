@@ -119,19 +119,21 @@ describe('buildApp()', () => {
         await app.close();
     });
 
-    it('should register reply decorators (sendList, sendError, sendResponse)', async () => {
+    it('should register reply decorators (sendList, sendError, handleError, sendResponse)', async () => {
         const app = await buildApp({ routesPath: TEMP_ROUTES, rateLimit: false });
         expect(app.hasReplyDecorator('sendList')).toBe(true);
         expect(app.hasReplyDecorator('sendError')).toBe(true);
+        expect(app.hasReplyDecorator('handleError')).toBe(true);
         expect(app.hasReplyDecorator('sendResponse')).toBe(true);
         await app.close();
     });
 
-    it('should register request decorators (user, language, remoteAddress)', async () => {
+    it('should register request decorators (user, language, remoteAddress, parseListQuery)', async () => {
         const app = await buildApp({ routesPath: TEMP_ROUTES, rateLimit: false });
         expect(app.hasRequestDecorator('user')).toBe(true);
         expect(app.hasRequestDecorator('language')).toBe(true);
         expect(app.hasRequestDecorator('remoteAddress')).toBe(true);
+        expect(app.hasRequestDecorator('parseListQuery')).toBe(true);
         await app.close();
     });
 

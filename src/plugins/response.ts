@@ -3,7 +3,7 @@ import fp from 'fastify-plugin';
 import { ErrorResponse, ErrorBasicResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
-import { getEnv } from '../core/env';
+import { QueryBuilder } from '../orm/QueryBuilder';
 import type { ListMeta } from '../types';
 
 /**
@@ -58,6 +58,11 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         const error = new ErrorResponse(statusCode, message, data as Record<string, unknown> | null);
         Logger.error(message, { statusCode });
         return this.code(statusCode).send(error.toJSON(language));
+    });
+
+    fastify.decorateReply('handleError', function (this: FastifyReply, error: any, data: Record<string, unknown> = {}) {
+        const response = QueryBuilder.errorHandler(error, data);
+        return this.code(response.status_code).send(response);
     });
 
     fastify.decorateReply('sendResponse', function (this: FastifyReply, statusCode: number, message: string, params?: unknown) {

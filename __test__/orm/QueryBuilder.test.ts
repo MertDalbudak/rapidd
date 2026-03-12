@@ -41,6 +41,8 @@ jest.mock('../../src/core/dmmf', () => ({
                     { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true, isUnique: true },
                     { name: 'name', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false, isUnique: false },
                     { name: 'email', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false, isUnique: true },
+                    // 1:n — parent side has relationFromFields: [] (FK lives on messages.userId)
+                    { name: 'messages', kind: 'object', type: 'messages', isList: true, isRequired: false, isId: false, isUnique: false, relationFromFields: [], relationToFields: [], relationName: 'MessagesToUsers' },
                 ],
                 primaryKey: null,
             },
@@ -50,6 +52,7 @@ jest.mock('../../src/core/dmmf', () => ({
                     { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true, isUnique: true },
                     { name: 'url', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false, isUnique: false },
                     { name: 'messageId', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: false, isUnique: false },
+                    { name: 'message', kind: 'object', type: 'messages', isList: false, isRequired: false, isId: false, isUnique: false, relationFromFields: ['messageId'], relationToFields: ['id'], relationName: 'MessagesToAttachments' },
                 ],
                 primaryKey: null,
             },
@@ -71,6 +74,13 @@ jest.mock('../../src/core/dmmf', () => ({
                 id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
                 name: { name: 'name', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false },
                 email: { name: 'email', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false },
+                messages: { name: 'messages', kind: 'object', type: 'messages', isList: true, isRequired: false, isId: false, relationFromFields: [], relationToFields: [], relationName: 'MessagesToUsers' },
+            },
+            message_attachments: {
+                id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
+                url: { name: 'url', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false },
+                messageId: { name: 'messageId', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: false },
+                message: { name: 'message', kind: 'object', type: 'messages', isList: false, isRequired: false, isId: false, relationFromFields: ['messageId'], relationToFields: ['id'], relationName: 'MessagesToAttachments' },
             },
         };
         return fields[name] || {};
@@ -84,6 +94,16 @@ jest.mock('../../src/core/dmmf', () => ({
                 createdAt: { name: 'createdAt', kind: 'scalar', type: 'DateTime' },
                 internal_notes: { name: 'internal_notes', kind: 'scalar', type: 'String' },
             },
+            users: {
+                id: { name: 'id', kind: 'scalar', type: 'Int' },
+                name: { name: 'name', kind: 'scalar', type: 'String' },
+                email: { name: 'email', kind: 'scalar', type: 'String' },
+            },
+            message_attachments: {
+                id: { name: 'id', kind: 'scalar', type: 'Int' },
+                url: { name: 'url', kind: 'scalar', type: 'String' },
+                messageId: { name: 'messageId', kind: 'scalar', type: 'Int' },
+            },
         };
         return fields[name] || {};
     }),
@@ -92,13 +112,34 @@ jest.mock('../../src/core/dmmf', () => ({
         return 'id';
     }),
     getRelations: jest.fn(() => []),
-    isListRelation: jest.fn((_parent: string, _rel: string) => false),
+    isListRelation: jest.fn((parent: string, rel: string) => {
+        // Match real DMMF: return true for 1:n parent-side relations
+        const listRelations: Record<string, string[]> = {
+            messages: ['attachments'],
+            users: ['messages'],
+        };
+        return listRelations[parent]?.includes(rel) ?? false;
+    }),
     getRelationInfo: jest.fn(),
     buildRelationships: jest.fn((name: string) => {
         if (name === 'messages') {
             return [
+                // n:1 — child side: field is the FK column on this model
                 { name: 'user', object: 'users', isList: false, field: 'userId', foreignKey: 'id' },
-                { name: 'attachments', object: 'message_attachments', isList: true, field: 'messageId', foreignKey: 'id' },
+                // 1:n — parent side: field is undefined (FK lives on message_attachments.messageId)
+                { name: 'attachments', object: 'message_attachments', isList: true, field: undefined, foreignKey: 'id' },
+            ];
+        }
+        if (name === 'users') {
+            return [
+                // 1:n — parent side: field is undefined (FK lives on messages.userId)
+                { name: 'messages', object: 'messages', isList: true, field: undefined, foreignKey: 'id' },
+            ];
+        }
+        if (name === 'message_attachments') {
+            return [
+                // n:1 — child side: field is the FK column on this model
+                { name: 'message', object: 'messages', isList: false, field: 'messageId', foreignKey: 'id' },
             ];
         }
         return [];
@@ -240,6 +281,53 @@ describe('QueryBuilder (TypeScript)', () => {
         it('should skip empty filter value (no null filter applied)', () => {
             const result: any = qb.filter('content=');
             expect(result.content).toBeUndefined();
+        });
+
+        // ── 1:n relation filtering (some wrapper) ──────────────
+        it('should wrap 1:n list relation filter with { some: {} } (parent side, field=undefined)', () => {
+            const result: any = qb.filter('attachments.url=%test%');
+            expect(result.attachments).toBeDefined();
+            expect(result.attachments.some).toBeDefined();
+            expect(result.attachments.some.url).toEqual({ contains: 'test' });
+        });
+
+        it('should wrap 1:n list relation filter with { some: {} } using isListRelation fallback', () => {
+            // users→messages is isList:true with field:undefined — tests isListRelation mock
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.filter('messages.content=%hello%');
+            expect(result.messages).toBeDefined();
+            expect(result.messages.some).toBeDefined();
+            expect(result.messages.some.content).toEqual({ contains: 'hello' });
+        });
+
+        it('should NOT wrap n:1 relation filter with some', () => {
+            const result: any = qb.filter('user.name=John');
+            expect(result.user).toBeDefined();
+            expect(result.user.some).toBeUndefined();
+            expect(result.user.name).toEqual({ equals: 'John' });
+        });
+
+        it('should handle not: operator inside 1:n relation filter', () => {
+            const result: any = qb.filter('attachments.url=not:deleted');
+            expect(result.attachments).toBeDefined();
+            expect(result.attachments.some).toBeDefined();
+            expect(result.attachments.some.url).toEqual({ not: { equals: 'deleted' } });
+        });
+
+        it('should handle numeric operator inside 1:n relation filter', () => {
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.filter('messages.userId=gt:5');
+            expect(result.messages).toBeDefined();
+            expect(result.messages.some).toBeDefined();
+            expect(result.messages.some.userId).toEqual({ gt: 5 });
+        });
+
+        it('should combine multiple filters on the same 1:n relation into one some block', () => {
+            const result: any = qb.filter('attachments.url=%test%,attachments.messageId=gt:10');
+            expect(result.attachments).toBeDefined();
+            expect(result.attachments.some).toBeDefined();
+            expect(result.attachments.some.url).toEqual({ contains: 'test' });
+            expect(result.attachments.some.messageId).toEqual({ gt: 10 });
         });
     });
 
@@ -408,6 +496,48 @@ describe('QueryBuilder (TypeScript)', () => {
             const err = { code: 'P2025' };
             const result = QueryBuilder.errorHandler(err);
             expect(result.status_code).toBe(404);
+        });
+
+        it('should handle PrismaClientValidationError and extract argument message', () => {
+            const err = {
+                name: 'PrismaClientValidationError',
+                message: `\nInvalid \`prisma.findMany()\` invocation:\n\n→ 343     const rows = await prisma[this.name].findMany({\n            where: {\n              id: {\n                not: {\n                  equals: "test"\n                          ~~~~~~\n                }\n              }\n            }\n          })\n\nArgument \`equals\`: Invalid value provided. Expected Int or IntFieldRefInput, provided String.`,
+            };
+            const result = QueryBuilder.errorHandler(err);
+            expect(result.status_code).toBe(400);
+            expect(result.message).toMatch(/Argument `equals`: Invalid value provided/);
+            // Must NOT contain file paths or stack traces
+            expect(result.message).not.toContain('/Users/');
+            expect(result.message).not.toContain('.ts:');
+        });
+
+        it('should handle PrismaClientValidationError without argument match', () => {
+            const err = {
+                name: 'PrismaClientValidationError',
+                message: 'Some unknown validation error',
+            };
+            const result = QueryBuilder.errorHandler(err);
+            expect(result.status_code).toBe(400);
+        });
+
+        it('should handle PrismaClientInitializationError', () => {
+            const err = {
+                name: 'PrismaClientInitializationError',
+                message: 'Can\'t reach database server at `localhost:5432`',
+            };
+            const result = QueryBuilder.errorHandler(err);
+            expect(result.status_code).toBe(500);
+            expect(result.message).not.toContain('localhost:5432');
+        });
+
+        it('should handle PrismaClientRustPanicError', () => {
+            const err = {
+                name: 'PrismaClientRustPanicError',
+                message: 'Internal engine panic',
+            };
+            const result = QueryBuilder.errorHandler(err);
+            expect(result.status_code).toBe(500);
+            expect(result.message).not.toContain('panic');
         });
     });
 

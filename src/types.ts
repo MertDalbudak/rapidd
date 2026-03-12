@@ -295,12 +295,15 @@ declare module 'fastify' {
         user: RapiddUser | null;
         language: string;
         remoteAddress: string;
+        model: import('./orm/Model').Model | null;
         getTranslation(key: string, data?: Record<string, unknown> | null, language?: string): string;
+        parseListQuery(): GetManyOptions;
     }
 
     interface FastifyReply {
         sendList(data: unknown[], meta: ListMeta): FastifyReply;
         sendError(statusCode: number, message: string, data?: unknown): FastifyReply;
+        handleError(error: any, data?: Record<string, unknown>): FastifyReply;
         sendResponse(statusCode: number, message: string, params?: unknown): FastifyReply;
     }
 }

@@ -10,6 +10,28 @@ jest.mock('../../src/core/i18n', () => ({
     },
 }));
 
+// Mock prisma (required because response.ts now imports QueryBuilder which imports prisma)
+jest.mock('../../src/core/prisma', () => ({
+    prisma: {},
+    prismaTransaction: jest.fn(),
+    requestContext: { run: jest.fn((store: any, fn: any) => fn()) },
+    getAcl: () => ({ model: {} }),
+    disconnectAll: jest.fn(),
+    rlsEnabled: false,
+}));
+
+jest.mock('../../src/core/dmmf', () => ({
+    getDMMFSync: jest.fn(() => ({ datamodel: { models: [] } })),
+    getModel: jest.fn(),
+    getFields: jest.fn(() => ({})),
+    getScalarFields: jest.fn(() => ({})),
+    getPrimaryKey: jest.fn(() => 'id'),
+    getRelations: jest.fn(() => []),
+    isListRelation: jest.fn(() => false),
+    getRelationInfo: jest.fn(),
+    buildRelationships: jest.fn(() => []),
+}));
+
 import Fastify from 'fastify';
 import responsePlugin from '../../src/plugins/response';
 import { ErrorResponse, ErrorBasicResponse } from '../../src/core/errors';
@@ -167,6 +189,65 @@ describe('Response Plugin', () => {
 
             const res = await app.inject({ method: 'GET', url: '/err' });
             expect(res.statusCode).toBe(422);
+        });
+    });
+
+    // ── handleError ──────────────────────────────────────────
+
+    describe('handleError()', () => {
+        it('should handle Prisma known errors', async () => {
+            const app = await buildApp();
+            app.get('/err', async (_req, reply) => {
+                const error = new Error('Record not found') as any;
+                error.code = 'P2025';
+                error.name = 'PrismaClientKnownRequestError';
+                return reply.handleError(error);
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/err' });
+            expect(res.statusCode).toBe(404);
+            const body = JSON.parse(res.payload);
+            expect(body.status_code).toBe(404);
+        });
+
+        it('should handle Prisma validation errors', async () => {
+            const app = await buildApp();
+            app.get('/err', async (_req, reply) => {
+                const error = new Error('Argument `email`: Invalid value provided') as any;
+                error.name = 'PrismaClientValidationError';
+                return reply.handleError(error);
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/err' });
+            expect(res.statusCode).toBe(400);
+            const body = JSON.parse(res.payload);
+            expect(body.status_code).toBe(400);
+        });
+
+        it('should handle generic errors with 500', async () => {
+            const app = await buildApp();
+            app.get('/err', async (_req, reply) => {
+                return reply.handleError(new Error('something broke'));
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/err' });
+            expect(res.statusCode).toBe(500);
+        });
+
+        it('should pass data to errorHandler', async () => {
+            const app = await buildApp();
+            app.get('/err', async (_req, reply) => {
+                const error = new Error('Unique constraint failed') as any;
+                error.code = 'P2002';
+                error.name = 'PrismaClientKnownRequestError';
+                error.meta = { target: ['email'] };
+                return reply.handleError(error, { email: 'test@test.com' });
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/err' });
+            expect(res.statusCode).toBe(409);
+            const body = JSON.parse(res.payload);
+            expect(body.status_code).toBe(409);
         });
     });
 

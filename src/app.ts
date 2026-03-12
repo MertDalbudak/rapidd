@@ -17,6 +17,7 @@ import { Logger } from './utils/Logger';
 // Plugins
 import securityPlugin from './plugins/security';
 import languagePlugin from './plugins/language';
+import requestPlugin from './plugins/request';
 import responsePlugin from './plugins/response';
 import authPlugin from './plugins/auth';
 import rlsPlugin from './plugins/rls';
@@ -123,6 +124,9 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
 
     // ── Language Resolution ──────────────────────────
     await app.register(languagePlugin);
+
+    // ── Request Utilities ─────────────────────────────
+    await app.register(requestPlugin);
 
     // ── API Decorators & Error Handler ───────────────
     await app.register(responsePlugin);

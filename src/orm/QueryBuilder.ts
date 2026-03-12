@@ -297,7 +297,7 @@ class QueryBuilder {
                 const parentModelName = Array.isArray(currentRelations) ? this.name : (currentRelations as RelationConfig).object;
                 const isListRel = rel.isList || dmmf.isListRelation(parentModelName, rel.name);
 
-                if (isListRel && rel.field) {
+                if (isListRel) {
                     filter[rel.name] = { some: {} };
                     filter = filter[rel.name].some;
                 } else {
@@ -2113,7 +2113,7 @@ class QueryBuilder {
             ? error.message
             : (process.env.NODE_ENV === 'production' ? LanguageDict.get('internal_server_error') : (error.message || String(error)));
 
-        // Handle Prisma error codes
+        // Handle Prisma error codes (PrismaClientKnownRequestError)
         if (error?.code && PRISMA_ERROR_MAP[error.code]) {
             const errorInfo = PRISMA_ERROR_MAP[error.code];
             statusCode = errorInfo.status;
@@ -2126,6 +2126,24 @@ class QueryBuilder {
             } else {
                 message = LanguageDict.get(errorInfo.message!);
             }
+        }
+        // Handle PrismaClientValidationError — invalid arguments, type mismatches
+        else if (error?.name === 'PrismaClientValidationError' || error?.constructor?.name === 'PrismaClientValidationError') {
+            statusCode = 400;
+            // Extract the useful part: "Argument `equals`: Invalid value provided. Expected Int, provided String."
+            const rawMessage = error.message || '';
+            const argMatch = rawMessage.match(/Argument\s+`[^`]+`:\s*.+$/m);
+            message = argMatch ? argMatch[0] : LanguageDict.get('data_validation_error');
+        }
+        // Handle PrismaClientInitializationError — connection/config issues
+        else if (error?.name === 'PrismaClientInitializationError' || error?.constructor?.name === 'PrismaClientInitializationError') {
+            statusCode = 500;
+            message = LanguageDict.get('db_connection_failed');
+        }
+        // Handle PrismaClientRustPanicError — internal Prisma engine crash
+        else if (error?.name === 'PrismaClientRustPanicError' || error?.constructor?.name === 'PrismaClientRustPanicError') {
+            statusCode = 500;
+            message = LanguageDict.get('internal_server_error');
         }
 
         return { status_code: statusCode, message };
