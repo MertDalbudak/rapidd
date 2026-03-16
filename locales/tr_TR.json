@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "{provider} kullanıcısı e-posta izni vermemiş",
     "internal_server_error": "Bir şeyler ters gitti",
     "duplicate_entry": "{model} için yinelenen kayıt. {field}: '{value}' değerine sahip kayıt zaten mevcut",
+    "duplicate_entry_no_value": "{model} için yinelenen kayıt. Bu {field} değerine sahip bir kayıt zaten mevcut",
     "authentication_not_available": "Kimlik doğrulama kullanılamıyor",
     "authentication_required": "Kimlik doğrulama gerekli",
     "user_and_password_required": "Kullanıcı ve şifre gerekli",

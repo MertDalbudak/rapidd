@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "L'utente {provider} non ha concesso il permesso e-mail",
     "internal_server_error": "Qualcosa è andato storto",
     "duplicate_entry": "Voce duplicata per {model}. Il record con {field}: '{value}' esiste già",
+    "duplicate_entry_no_value": "Voce duplicata per {model}. Un record con questo {field} esiste già",
     "authentication_not_available": "L'autenticazione non è disponibile",
     "authentication_required": "Autenticazione richiesta",
     "user_and_password_required": "Utente e password sono obbligatori",

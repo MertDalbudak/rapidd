@@ -2121,8 +2121,16 @@ class QueryBuilder {
             // Handle dynamic messages (e.g., P2002 duplicate)
             if (error.code === 'P2002') {
                 const target = error.meta?.target;
-                const modelName = error.meta?.modelName;
-                message = LanguageDict.get('duplicate_entry', { model: modelName, field: target, value: data[target as string] });
+                const modelName = error.meta?.modelName || '';
+                // target can be string (MySQL constraint name) or string[] (field names)
+                const fields = Array.isArray(target) ? target : (target ? [target] : []);
+                const field = fields.join(', ');
+                // Try to find the value from the data passed to errorHandler
+                const value = fields.length === 1 && data[fields[0]] !== undefined
+                    ? String(data[fields[0]])
+                    : '';
+                const key = value ? 'duplicate_entry' : 'duplicate_entry_no_value';
+                message = LanguageDict.get(key, { model: modelName, field, value });
             } else {
                 message = LanguageDict.get(errorInfo.message!);
             }

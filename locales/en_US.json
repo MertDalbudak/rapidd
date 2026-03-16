@@ -140,6 +140,7 @@
     "oauth_email_permission_missing": "{provider} user does not have email permission granted",
     "internal_server_error": "Something went wrong",
     "duplicate_entry": "Duplicate entry for {model}. Record with {field}: '{value}' already exists",
+    "duplicate_entry_no_value": "Duplicate entry for {model}. A record with this {field} already exists",
     "authentication_not_available": "Authentication is not available",
     "authentication_required": "Authentication required",
     "user_and_password_required": "User and password are required",

@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "{provider}-Benutzer hat keine E-Mail-Berechtigung erteilt",
     "internal_server_error": "Etwas ist schiefgelaufen",
     "duplicate_entry": "Doppelter Eintrag für {model}. Datensatz mit {field}: '{value}' existiert bereits",
+    "duplicate_entry_no_value": "Doppelter Eintrag für {model}. Ein Datensatz mit diesem {field} existiert bereits",
     "authentication_not_available": "Authentifizierung ist nicht verfügbar",
     "authentication_required": "Authentifizierung erforderlich",
     "user_and_password_required": "Benutzer und Passwort sind erforderlich",

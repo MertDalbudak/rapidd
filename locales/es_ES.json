@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "El usuario de {provider} no ha otorgado permiso de correo electrónico",
     "internal_server_error": "Algo salió mal",
     "duplicate_entry": "Entrada duplicada para {model}. El registro con {field}: '{value}' ya existe",
+    "duplicate_entry_no_value": "Entrada duplicada para {model}. Ya existe un registro con este {field}",
     "authentication_not_available": "La autenticación no está disponible",
     "authentication_required": "Autenticación requerida",
     "user_and_password_required": "Usuario y contraseña son requeridos",

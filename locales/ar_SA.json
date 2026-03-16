@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "مستخدم {provider} لم يمنح إذن البريد الإلكتروني",
     "internal_server_error": "حدث خطأ ما",
     "duplicate_entry": "إدخال مكرر لـ {model}. السجل ذو {field}: '{value}' موجود بالفعل",
+    "duplicate_entry_no_value": "إدخال مكرر لـ {model}. يوجد سجل بهذا {field} بالفعل",
     "authentication_not_available": "المصادقة غير متاحة",
     "authentication_required": "المصادقة مطلوبة",
     "user_and_password_required": "المستخدم وكلمة المرور مطلوبان",

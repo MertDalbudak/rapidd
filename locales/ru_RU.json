@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "Пользователь {provider} не предоставил разрешение на доступ к электронной почте",
     "internal_server_error": "Что-то пошло не так",
     "duplicate_entry": "Дублирующая запись для {model}. Запись с {field}: '{value}' уже существует",
+    "duplicate_entry_no_value": "Дублирующая запись для {model}. Запись с таким {field} уже существует",
     "authentication_not_available": "Аутентификация недоступна",
     "authentication_required": "Требуется аутентификация",
     "user_and_password_required": "Пользователь и пароль обязательны",

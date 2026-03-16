@@ -139,6 +139,7 @@
     "oauth_email_permission_missing": "L'utilisateur {provider} n'a pas accordé la permission d'accès à l'e-mail",
     "internal_server_error": "Une erreur est survenue",
     "duplicate_entry": "Entrée en double pour {model}. L'enregistrement avec {field} : '{value}' existe déjà",
+    "duplicate_entry_no_value": "Entrée en double pour {model}. Un enregistrement avec ce {field} existe déjà",
     "authentication_not_available": "L'authentification n'est pas disponible",
     "authentication_required": "Authentification requise",
     "user_and_password_required": "Utilisateur et mot de passe sont requis",
