@@ -20,6 +20,7 @@ class RateLimiter {
     private rateLimits: Record<string, RateLimitPathConfig>;
     private redis: Redis | null = null;
     private requests: Map<string, { count: number; resetTime: number }> | null = null;
+    private lastCleanup = 0;
 
     constructor() {
         this.useRedis = !!process.env.REDIS_HOST;
@@ -146,7 +147,13 @@ class RateLimiter {
     private checkRateLimitMemory(
         key: string, windowMs: number, maxRequests: number, now: number
     ): RateLimitResult {
-        this.cleanup(now);
+        // Sweep expired entries at most once per window — per-key expiry is handled
+        // lazily below, so the full-map sweep is purely memory reclamation and must
+        // not run on every request (it is O(active clients) per call)
+        if (now - this.lastCleanup >= this.defaultWindowMs) {
+            this.cleanup(now);
+            this.lastCleanup = now;
+        }
         const userData = this.requests!.get(key);
 
         if (!userData) {

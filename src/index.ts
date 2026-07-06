@@ -13,7 +13,7 @@
 
 // ── ORM ──────────────────────────────────────────────────────────────────────
 export { Model } from './orm/Model';
-export { QueryBuilder } from './orm/QueryBuilder';
+export { QueryBuilder, PRISMA_WRITE_OPS, PRISMA_ERROR_MAP } from './orm/QueryBuilder';
 
 // ── Database ─────────────────────────────────────────────────────────────────
 export {
@@ -36,7 +36,10 @@ export { SessionStoreManager, createStore } from './auth/stores';
 export type { ISessionStore } from './auth/stores/ISessionStore';
 
 // ── Errors & Responses ───────────────────────────────────────────────────────
-export { ErrorResponse, Response } from './core/errors';
+export { ErrorResponse, ErrorBasicResponse, Response } from './core/errors';
+
+// ── Internationalization ─────────────────────────────────────────────────────
+export { LanguageDict } from './core/i18n';
 
 // ── Middleware ───────────────────────────────────────────────────────────────
 export { modelMiddleware } from './core/middleware';
@@ -59,6 +62,7 @@ export {
 
 // ── Plugins ──────────────────────────────────────────────────────────────────
 export { uploadPlugin } from './plugins/upload';
+export { default as requestPlugin } from './plugins/request';
 export { default as responsePlugin } from './plugins/response';
 export { default as apiPlugin } from './plugins/response'; // backward compat alias
 export { default as authPlugin } from './plugins/auth';
@@ -75,8 +79,10 @@ export { buildApp } from './app';
 export type {
     RapiddUser,
     AuthStrategy,
+    AuthOptions,
     RouteAuthConfig,
     ModelOptions,
+    GetManyOptions,
     GetManyResult,
     UpsertManyResult,
     UpsertManyOptions,
@@ -85,6 +91,8 @@ export type {
     MiddlewareContext,
     MiddlewareHook,
     MiddlewareOperation,
+    RapiddOptions,
+    ListMeta,
     RLSVariables,
     RlsContextFn
 } from './types';

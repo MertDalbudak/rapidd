@@ -13,8 +13,12 @@ jest.mock('../../src/core/prisma', () => ({
             messages: {
                 getAccessFilter: (user: any) => user?.role === 'admin' ? {} : { userId: user?.id },
                 getOmitFields: (user: any) => user?.role === 'admin' ? [] : ['internal_notes'],
+                getWritableFields: (user: any) => user?.role === 'restricted' ? ['content'] : null,
                 canCreate: () => true,
-            }
+            },
+            secret_docs: {
+                getAccessFilter: () => false,
+            },
         },
     }),
 }));
@@ -69,6 +73,11 @@ jest.mock('../../src/core/dmmf', () => ({
                 internal_notes: { name: 'internal_notes', kind: 'scalar', type: 'String', isList: false, isRequired: false, isId: false },
                 user: { name: 'user', kind: 'object', type: 'users', isList: false, isRequired: false, isId: false, relationFromFields: ['userId'], relationToFields: ['id'], relationName: 'MessagesToUsers' },
                 attachments: { name: 'attachments', kind: 'object', type: 'message_attachments', isList: true, isRequired: false, isId: false, relationFromFields: [], relationToFields: [], relationName: 'MessagesToAttachments' },
+                secret: { name: 'secret', kind: 'object', type: 'secret_docs', isList: false, isRequired: false, isId: false, relationFromFields: ['secretId'], relationToFields: ['id'], relationName: 'MessagesToSecretDocs' },
+            },
+            secret_docs: {
+                id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
+                data: { name: 'data', kind: 'scalar', type: 'String', isList: false, isRequired: true, isId: false },
             },
             users: {
                 id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
@@ -128,6 +137,8 @@ jest.mock('../../src/core/dmmf', () => ({
                 { name: 'user', object: 'users', isList: false, field: 'userId', foreignKey: 'id' },
                 // 1:n — parent side: field is undefined (FK lives on message_attachments.messageId)
                 { name: 'attachments', object: 'message_attachments', isList: true, field: undefined, foreignKey: 'id' },
+                // n:1 to a model whose ACL denies access entirely
+                { name: 'secret', object: 'secret_docs', isList: false, field: 'secretId', foreignKey: 'id' },
             ];
         }
         if (name === 'users') {
@@ -215,9 +226,14 @@ describe('QueryBuilder (TypeScript)', () => {
             expect(result.internal_notes).toBeDefined();
         });
 
-        it('should handle negation prefix (!)', () => {
-            const result: any = qb.filter('userId=!5');
-            expect(result).toBeDefined();
+        it('should handle not: negation on numeric fields', () => {
+            const result: any = qb.filter('userId=not:5');
+            expect(result.userId).toEqual({ not: { equals: 5 } });
+        });
+
+        it('should reject non-numeric values on numeric fields', () => {
+            expect(() => qb.filter('userId=!5')).toThrow();
+            expect(() => qb.filter('userId=abc')).toThrow();
         });
 
         it('should handle wildcard string filters', () => {
@@ -268,14 +284,15 @@ describe('QueryBuilder (TypeScript)', () => {
             expect(result.user).toEqual({ isNot: null });
         });
 
-        it('should use { is: null } for #NULL on list relation field', () => {
+        it('should use { none: {} } for #NULL on list relation field', () => {
+            // List relations can't be null — "no related rows" is { none: {} } in Prisma
             const result: any = qb.filter('attachments=#NULL');
-            expect(result.attachments).toEqual({ is: null });
+            expect(result.attachments).toEqual({ none: {} });
         });
 
-        it('should use { isNot: null } for not:#NULL on list relation field', () => {
+        it('should use { some: {} } for not:#NULL on list relation field', () => {
             const result: any = qb.filter('attachments=not:#NULL');
-            expect(result.attachments).toEqual({ isNot: null });
+            expect(result.attachments).toEqual({ some: {} });
         });
 
         it('should skip empty filter value (no null filter applied)', () => {
@@ -329,6 +346,77 @@ describe('QueryBuilder (TypeScript)', () => {
             expect(result.attachments.some.url).toEqual({ contains: 'test' });
             expect(result.attachments.some.messageId).toEqual({ gt: 10 });
         });
+
+        // ── Type-aware filtering ────────────────────────────────
+        it('should keep numeric-looking values as strings on String fields', () => {
+            const result: any = qb.filter('content=12345');
+            expect(result.content).toEqual({ equals: '12345' });
+        });
+
+        it('should keep boolean literals as strings on String fields', () => {
+            const result: any = qb.filter('content=true');
+            expect(result.content).toEqual({ equals: 'true' });
+        });
+
+        it('should keep date-looking values as strings on String fields', () => {
+            const result: any = qb.filter('content=2024-01-01');
+            expect(result.content).toEqual({ equals: '2024-01-01' });
+        });
+
+        it('should coerce array values to numbers on numeric fields', () => {
+            const result: any = qb.filter('userId=[1,2,3]');
+            expect(result.userId).toEqual({ in: [1, 2, 3] });
+        });
+
+        it('should reject non-numeric array values on numeric fields', () => {
+            expect(() => qb.filter('userId=[1,abc]')).toThrow();
+        });
+
+        it('should keep array values as strings on String fields', () => {
+            const result: any = qb.filter('content=[hello,world]');
+            expect(result.content).toEqual({ in: ['hello', 'world'] });
+        });
+
+        it('should match the whole day for date-only values on DateTime fields', () => {
+            const result: any = qb.filter('createdAt=2024-03-15');
+            expect(result.createdAt.gte).toBeInstanceOf(Date);
+            expect(result.createdAt.lt).toBeInstanceOf(Date);
+            expect(result.createdAt.lt.getTime() - result.createdAt.gte.getTime()).toBe(24 * 60 * 60 * 1000);
+        });
+
+        it('should use exact equals for datetime values on DateTime fields', () => {
+            const result: any = qb.filter('createdAt=2024-03-15T10:30:00');
+            expect(result.createdAt.equals).toBeInstanceOf(Date);
+        });
+
+        it('should reject non-date values on DateTime fields', () => {
+            expect(() => qb.filter('createdAt=hello')).toThrow();
+        });
+
+        it('should not crash on literal % characters in string values', () => {
+            const result: any = qb.filter('content=50%done');
+            expect(result.content).toEqual({ equals: '50%done' });
+        });
+
+        // ── Relation filtering by scalar value ─────────────────
+        it('should rewrite a to-one relation filter to its FK column', () => {
+            const result: any = qb.filter('user=5');
+            expect(result.user).toBeUndefined();
+            expect(result.userId).toEqual({ equals: 5 });
+        });
+
+        it('should reject direct scalar filters on list relations', () => {
+            expect(() => qb.filter('attachments=5')).toThrow();
+        });
+
+        // ── Field validation ────────────────────────────────────
+        it('should throw for unknown top-level filter fields', () => {
+            expect(() => qb.filter('bogus=1')).toThrow();
+        });
+
+        it('should throw for unknown fields on nested relation paths', () => {
+            expect(() => qb.filter('user.bogus=1')).toThrow();
+        });
     });
 
     describe('take()', () => {
@@ -362,6 +450,36 @@ describe('QueryBuilder (TypeScript)', () => {
             const result = qb.sort('user.name', 'asc');
             expect(result).toEqual({ user: { name: 'asc' } });
         });
+
+        it('should throw for non-existent sort fields', () => {
+            expect(() => qb.sort('bogus', 'asc')).toThrow();
+        });
+
+        it('should throw for non-existent relations in sort paths', () => {
+            expect(() => qb.sort('bogus.name', 'asc')).toThrow();
+        });
+
+        it('should throw for non-existent fields on the related model', () => {
+            expect(() => qb.sort('user.bogus', 'asc')).toThrow();
+        });
+
+        it('should throw when sorting directly by a relation', () => {
+            expect(() => qb.sort('user', 'asc')).toThrow();
+        });
+
+        it('should allow _count sorting on to-many relations', () => {
+            const result = qb.sort('attachments._count', 'desc');
+            expect(result).toEqual({ attachments: { _count: 'desc' } });
+        });
+
+        it('should throw when sorting a to-many relation by a scalar field', () => {
+            expect(() => qb.sort('attachments.url', 'asc')).toThrow();
+        });
+
+        it('should throw for _count on non-list paths', () => {
+            expect(() => qb.sort('_count', 'asc')).toThrow();
+            expect(() => qb.sort('user._count', 'asc')).toThrow();
+        });
     });
 
     describe('include()', () => {
@@ -375,6 +493,24 @@ describe('QueryBuilder (TypeScript)', () => {
             const result = qb.include('ALL', testUser);
             expect(result).toBeDefined();
             expect(typeof result).toBe('object');
+        });
+
+        it('should apply ACL access filter as where on optional to-one includes (non-admin)', () => {
+            // message_attachments.message is an optional to-one whose target (messages) has an ACL filter.
+            // Prisma supports where on optional to-one includes — the relation returns null when it doesn't match.
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            const result: any = attachmentsQb.include('ALL', { id: 7, role: 'user' });
+            expect(result.message).toBeDefined();
+            expect(result.message.where).toEqual({ userId: 7 });
+        });
+
+        it('should not apply a where on optional to-one includes for admin (empty filter)', () => {
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            const result: any = attachmentsQb.include('ALL', { id: 1, role: 'admin' });
+            expect(result.message).toBeDefined();
+            if (typeof result.message === 'object') {
+                expect(result.message.where).toBeUndefined();
+            }
         });
 
         it('should handle comma-separated relations', () => {
@@ -431,6 +567,129 @@ describe('QueryBuilder (TypeScript)', () => {
         });
     });
 
+    describe('buildFieldSelection() - deep ACL enforcement', () => {
+        it('should drop ACL-omitted fields of a related model (depth 1)', () => {
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            const result: any = attachmentsQb.buildFieldSelection('id,message.content,message.internal_notes', 'message', { id: 7, role: 'user' });
+            expect(result.select.message.select.content).toBe(true);
+            expect(result.select.message.select.internal_notes).toBeUndefined();
+        });
+
+        it('should apply the ACL where on an optional to-one relation in select mode', () => {
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            const result: any = attachmentsQb.buildFieldSelection('id,message.content', 'message', { id: 7, role: 'user' });
+            expect(result.select.message.where).toEqual({ userId: 7 });
+        });
+
+        it('should enforce ACL omit at depth 2 (fields path can no longer bypass it)', () => {
+            const result: any = qb.buildFieldSelection(
+                'id,attachments.message.content,attachments.message.internal_notes',
+                'attachments',
+                { id: 7, role: 'user' }
+            );
+            const messageSelect = result.select.attachments.select.message;
+            expect(messageSelect.select.content).toBe(true);
+            expect(messageSelect.select.internal_notes).toBeUndefined();
+            // Access filter enforced at depth 2 as well (optional to-one)
+            expect(messageSelect.where).toEqual({ userId: 7 });
+        });
+
+        it('should skip relations whose ACL denies access (getAccessFilter -> false)', () => {
+            const result: any = qb.buildFieldSelection('id,secret.data', 'secret', { id: 7, role: 'user' });
+            expect(result.select.id).toBe(true);
+            expect(result.select.secret).toBeUndefined();
+        });
+
+        it('should reject using a known scalar as a relation path', () => {
+            expect(() => qb.buildFieldSelection('id,user.name.x', 'user', { id: 1, role: 'admin' }))
+                .toThrow();
+        });
+
+        it('should accept the object form of include ({ query })', () => {
+            const result: any = qb.buildFieldSelection('id,user.name', { query: 'user' }, { id: 1, role: 'admin' });
+            expect(result.select.user.select.name).toBe(true);
+        });
+    });
+
+    describe('include list-relation row cap', () => {
+        it('should cap included list relations with take', () => {
+            const result: any = qb.include('ALL', { id: 1, role: 'admin' });
+            expect(result.attachments.take).toBe(QueryBuilder.API_RESULT_LIMIT);
+        });
+
+        it('should not add take to to-one includes', () => {
+            const result: any = qb.include('ALL', { id: 1, role: 'admin' });
+            // user is a to-one relation without ACL content -> plain true
+            expect(result.user).toBe(true);
+        });
+
+        it('should carry the take cap into select mode for list relations', () => {
+            const result: any = qb.buildFieldSelection('id,attachments.url', 'attachments', { id: 1, role: 'admin' });
+            expect(result.select.attachments.take).toBe(QueryBuilder.API_RESULT_LIMIT);
+        });
+    });
+
+    describe('writable-fields whitelist (getWritableFields)', () => {
+        it('should strip non-whitelisted fields on create()', () => {
+            const result: any = qb.create({ content: 'hello', userId: 9 }, { id: 1, role: 'restricted' });
+            expect(result.content).toBe('hello');
+            expect(result.userId).toBeUndefined();
+            expect(result.user).toBeUndefined();
+        });
+
+        it('should strip non-whitelisted fields on update()', () => {
+            const result: any = qb.update(1, { content: 'hello', userId: 9 }, { id: 1, role: 'restricted' });
+            expect(result.content).toBe('hello');
+            expect(result.userId).toBeUndefined();
+            expect(result.user).toBeUndefined();
+        });
+
+        it('should not strip anything when the whitelist is null (unrestricted role)', () => {
+            const result: any = qb.update(1, { content: 'hello', userId: 9 }, { id: 1, role: 'user' });
+            expect(result.content).toBe('hello');
+            // userId is an FK — transformed into a relation connect, not stripped
+            expect(result.user).toEqual({ connect: expect.objectContaining({ id: 9 }) });
+        });
+
+        it('should strip non-whitelisted fields from nested relation items but keep identifiers', () => {
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.update(1, { messages: [{ id: 5, content: 'hi', createdAt: '2024-01-01' }] }, { id: 7, role: 'restricted' });
+            expect(result.messages.upsert).toHaveLength(1);
+            // id kept (identifier), content kept (whitelisted), createdAt stripped
+            expect(result.messages.upsert[0].create).toEqual({ id: 5, content: 'hi' });
+        });
+
+        it('should bypass the whitelist for the application role', () => {
+            const result: any = qb.update(1, { content: 'x', createdAt: '2024-01-01' }, { id: 'system', role: 'application' });
+            expect(result.content).toBe('x');
+            expect(result.createdAt).toBe('2024-01-01');
+        });
+    });
+
+    describe('update() - ACL merge into unique where', () => {
+        it('should nest ACL access filter under AND with the unique key at top level (connect)', () => {
+            // Prisma WhereUniqueInput requires a unique field at the TOP level;
+            // { AND: [{id}, filter] } is rejected, { id, AND: [filter] } is valid.
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.update(1, { messages: [{ id: 5 }] }, { id: 7, role: 'user' });
+            expect(result.messages.connect).toEqual([{ id: 5, AND: [{ userId: 7 }] }]);
+        });
+
+        it('should not add AND when ACL filter is empty (admin)', () => {
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.update(1, { messages: [{ id: 5 }] }, { id: 1, role: 'admin' });
+            expect(result.messages.connect).toEqual([{ id: 5 }]);
+        });
+
+        it('should build per-item upsert entries for PK+data items', () => {
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.update(1, { messages: [{ id: 5, content: 'hi' }] }, { id: 7, role: 'user' });
+            expect(result.messages.upsert).toHaveLength(1);
+            expect(result.messages.upsert[0].where).toEqual({ id: 5 });
+            expect(result.messages.upsert[0].create).toEqual({ id: 5, content: 'hi' });
+        });
+    });
+
     describe('cleanFilter()', () => {
         it('should remove undefined values', () => {
             const result = qb.cleanFilter({ a: 1, b: undefined, c: 'test' });
@@ -480,6 +739,26 @@ describe('QueryBuilder (TypeScript)', () => {
             const result = QueryBuilder.errorHandler(err);
             expect(result.status_code).toBe(404);
             expect(result.message).toBe('not_found');
+        });
+
+        it('should translate ErrorResponse keys with placeholder interpolation', () => {
+            // Real locales load from ./locales — errorHandler must return the translated
+            // message (with data interpolated), not the raw i18n key
+            const { ErrorResponse } = require('../../src/core/errors');
+            const err = new ErrorResponse(400, 'invalid_filter_field', { field: 'zip' });
+            const result = QueryBuilder.errorHandler(err);
+            expect(result.status_code).toBe(400);
+            expect(result.message).toBe('Invalid filter field: zip');
+        });
+
+        it('should translate into the requested language', () => {
+            const { ErrorResponse } = require('../../src/core/errors');
+            const err = new ErrorResponse(403, 'no_permission');
+            const english = QueryBuilder.errorHandler(err, {}, 'en_US');
+            const german = QueryBuilder.errorHandler(err, {}, 'de_DE');
+            expect(english.message).not.toBe('no_permission');
+            expect(german.message).not.toBe('no_permission');
+            expect(german.message).not.toBe(english.message);
         });
 
         it('should handle Prisma P2002 duplicate error', () => {

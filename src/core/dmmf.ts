@@ -5,6 +5,23 @@ import type { DMMF, DMMFModel, DMMFField, RelationConfig } from '../types';
 let _dmmf: DMMF | null = null;
 let _dmmfPromise: Promise<DMMF> | null = null;
 
+// Per-model memoization — the schema is immutable for the process lifetime and these
+// helpers run many times per request (filter navigation, include building, sort
+// validation, write transforms). Cleared when the DMMF is (re)loaded.
+const _modelCache = new Map<string, DMMFModel | undefined>();
+const _fieldsCache = new Map<string, Record<string, DMMFField>>();
+const _scalarFieldsCache = new Map<string, Record<string, DMMFField>>();
+const _primaryKeyCache = new Map<string, string | string[]>();
+const _relationshipsCache = new Map<string, RelationConfig[]>();
+
+function clearModelCaches(): void {
+    _modelCache.clear();
+    _fieldsCache.clear();
+    _scalarFieldsCache.clear();
+    _primaryKeyCache.clear();
+    _relationshipsCache.clear();
+}
+
 /**
  * Load and cache the full DMMF from the Prisma schema.
  * Uses @prisma/internals for complete DMMF including:
@@ -20,6 +37,7 @@ export async function loadDMMF(): Promise<DMMF> {
         const schemaPath = path.join(process.cwd(), 'prisma', 'schema.prisma');
         const schema = fs.readFileSync(schemaPath, 'utf8');
         _dmmf = await getDMMF({ datamodel: schema });
+        clearModelCaches();
         return _dmmf!;
     })();
 
@@ -40,50 +58,71 @@ export function getModel(modelName: string): DMMFModel | undefined {
     if (!_dmmf) {
         throw new Error('DMMF not loaded. Call loadDMMF() first.');
     }
-    return _dmmf.datamodel.models.find((m: DMMFModel) => m.name === modelName);
+    if (_modelCache.has(modelName)) {
+        return _modelCache.get(modelName);
+    }
+    const model = _dmmf.datamodel.models.find((m: DMMFModel) => m.name === modelName);
+    _modelCache.set(modelName, model);
+    return model;
 }
 
 /**
  * Get all fields for a model (including relation fields)
  */
 export function getFields(modelName: string): Record<string, DMMFField> {
+    const cached = _fieldsCache.get(modelName);
+    if (cached) return cached;
+
     const model = getModel(modelName);
     if (!model) return {};
-    return model.fields.reduce((acc: Record<string, DMMFField>, field: DMMFField) => {
+    const fields = model.fields.reduce((acc: Record<string, DMMFField>, field: DMMFField) => {
         acc[field.name] = field;
         return acc;
     }, {});
+    _fieldsCache.set(modelName, fields);
+    return fields;
 }
 
 /**
  * Get only scalar fields for a model (excludes relation fields)
  */
 export function getScalarFields(modelName: string): Record<string, DMMFField> {
+    const cached = _scalarFieldsCache.get(modelName);
+    if (cached) return cached;
+
     const model = getModel(modelName);
     if (!model) return {};
-    return model.fields
+    const fields = model.fields
         .filter((field: DMMFField) => field.kind !== 'object')
         .reduce((acc: Record<string, DMMFField>, field: DMMFField) => {
             acc[field.name] = field;
             return acc;
         }, {});
+    _scalarFieldsCache.set(modelName, fields);
+    return fields;
 }
 
 /**
  * Get the primary key field(s) for a model
  */
 export function getPrimaryKey(modelName: string): string | string[] {
+    const cached = _primaryKeyCache.get(modelName);
+    if (cached) return cached;
+
     const model = getModel(modelName);
     if (!model) return 'id';
 
+    let pk: string | string[];
     if (model.primaryKey?.fields && model.primaryKey.fields.length > 0) {
-        return model.primaryKey.fields.length === 1
+        pk = model.primaryKey.fields.length === 1
             ? model.primaryKey.fields[0]
             : model.primaryKey.fields;
+    } else {
+        const idField = model.fields.find((f: DMMFField) => f.isId);
+        pk = idField ? idField.name : 'id';
     }
-
-    const idField = model.fields.find((f: DMMFField) => f.isId);
-    return idField ? idField.name : 'id';
+    _primaryKeyCache.set(modelName, pk);
+    return pk;
 }
 
 /**
@@ -188,12 +227,17 @@ export function findPasswordField(modelName: string): string | null {
 // =====================================================
 
 /**
- * Build relationships configuration for a model (replaces relationships.json)
+ * Build relationships configuration for a model (replaces relationships.json).
+ * Memoized — callers must treat the returned configs as read-only schema data
+ * (QueryBuilder's #ensureRelations only adds idempotent schema-derived enrichment).
  */
 export function buildRelationships(modelName: string): RelationConfig[] {
+    const cached = _relationshipsCache.get(modelName);
+    if (cached) return cached;
+
     const relations = getRelations(modelName);
 
-    return relations.map((rel: DMMFField) => {
+    const configs = relations.map((rel: DMMFField) => {
         const config: RelationConfig = {
             name: rel.name,
             object: rel.type,
@@ -223,4 +267,7 @@ export function buildRelationships(modelName: string): RelationConfig[] {
 
         return config;
     });
+
+    _relationshipsCache.set(modelName, configs);
+    return configs;
 }

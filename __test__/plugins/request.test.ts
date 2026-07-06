@@ -48,6 +48,28 @@ describe('Request Plugin', () => {
             expect(body.totalResults).toBe(true);
         });
 
+        it('should accept ?filter= as a documented alias for ?q=', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => {
+                return req.parseListQuery();
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/items?filter=name%3DWidget' });
+            const body = JSON.parse(res.payload);
+            expect(body.q).toBe('name=Widget');
+        });
+
+        it('should prefer ?q= over ?filter= when both are given', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => {
+                return req.parseListQuery();
+            });
+
+            const res = await app.inject({ method: 'GET', url: '/items?q=a%3D1&filter=b%3D2' });
+            const body = JSON.parse(res.payload);
+            expect(body.q).toBe('a=1');
+        });
+
         it('should include pagination when PAGINATION_MODE=page', async () => {
             const original = process.env.PAGINATION_MODE;
             process.env.PAGINATION_MODE = 'page';

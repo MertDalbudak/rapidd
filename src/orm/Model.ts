@@ -1,7 +1,8 @@
-import { QueryBuilder } from './QueryBuilder';
+import { QueryBuilder, PRISMA_WRITE_OPS } from './QueryBuilder';
 import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { modelMiddleware } from '../core/middleware';
 import { ErrorResponse } from '../core/errors';
+import * as dmmf from '../core/dmmf';
 import type { RapiddUser, ModelOptions, GetManyOptions, GetManyResult, UpsertManyResult, UpsertManyOptions, ModelAcl, MiddlewareContext } from '../types';
 
 /**
@@ -158,6 +159,19 @@ class Model {
             return { [pkFields]: true };
         }
         return pkFields.reduce((acc: Record<string, true>, f: string) => { acc[f] = true; return acc; }, {});
+    }
+
+    /**
+     * Merge an ACL filter into a unique where clause (update / upsert / delete / permission checks).
+     * Prisma's WhereUniqueInput requires a unique field at the TOP level, so the ACL filter is
+     * nested under AND — `{ AND: [whereId, filter] }` is rejected by Prisma, and spreading the
+     * filter at top level would let colliding keys overwrite the target id.
+     */
+    #mergeAclIntoUniqueWhere(whereId: Record<string, any>, aclFilter: any): Record<string, any> {
+        if (!aclFilter || typeof aclFilter !== 'object' || Object.keys(aclFilter).length === 0) {
+            return whereId;
+        }
+        return { ...whereId, AND: [aclFilter] };
     }
 
     /**
@@ -350,10 +364,7 @@ class Model {
         const _response = this.prisma.findUnique(dataQuery);
 
         const _checkPermission = this.prisma.findUnique({
-            'where': {
-                ...whereId,
-                ...this.getAccessFilter()
-            },
+            'where': this.#mergeAclIntoUniqueWhere(whereId, this.getAccessFilter()),
             'select': this.#buildPrimaryKeySelect()
         });
 
@@ -379,6 +390,11 @@ class Model {
      * Internal method to create a new record
      */
     _create = async (data: Record<string, any>, options: Record<string, any> = {}): Promise<any> => {
+        // STRICT MODE (REST edge): reject payloads containing non-writable fields
+        if (this.options.strictWrites) {
+            this.assertWritable(data);
+        }
+
         // CHECK CREATE PERMISSION
         if (!this.canCreate(data)) {
             throw new ErrorResponse(403, "no_permission_to_create");
@@ -410,13 +426,15 @@ class Model {
 
     /**
      * Internal method to update an existing record
-     * Automatically removes createdAt/createdBy from update data
      */
     _update = async (id: string | number | Record<string, any>, data: Record<string, any>, options: Record<string, any> = {}): Promise<any> => {
         // Create a copy to avoid mutating the caller's data
         const inputData: Record<string, any> = { ...data };
-        delete inputData.createdAt;
-        delete inputData.createdBy;
+
+        // STRICT MODE (REST edge): reject payloads containing non-writable fields
+        if (this.options.strictWrites) {
+            this.assertWritable(inputData);
+        }
 
         // CHECK UPDATE PERMISSION
         const updateFilter = this.getUpdateFilter();
@@ -438,10 +456,7 @@ class Model {
         const transformedData = this._queryUpdate(targetId as string | number, updateData);
 
         const result = await this.prisma.update({
-            'where': {
-                ...this.buildWhereId(targetId),
-                ...updateFilter
-            },
+            'where': this.#mergeAclIntoUniqueWhere(this.buildWhereId(targetId), updateFilter),
             'data': transformedData,
             'include': this.include('ALL'),
             ...(beforeCtx.options || options)
@@ -461,6 +476,11 @@ class Model {
      * Supports both single and composite primary keys
      */
     async _upsert(data: Record<string, any>, unique_key: string | string[] = this.primaryKey, options: Record<string, any> = {}): Promise<any> {
+        // STRICT MODE (REST edge): reject payloads containing non-writable fields
+        if (this.options.strictWrites) {
+            this.assertWritable(data);
+        }
+
         // CHECK CREATE PERMISSION (upsert may create)
         if (!this.canCreate(data)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
@@ -490,8 +510,7 @@ class Model {
 
         // Build where clause with ACL update filter
         const whereId = this.buildWhereUniqueKey(targetKey, upsertData);
-        const hasUpdateFilter = updateFilter && Object.keys(updateFilter).length > 0;
-        const whereClause = hasUpdateFilter ? { AND: [whereId, updateFilter] } : whereId;
+        const whereClause = this.#mergeAclIntoUniqueWhere(whereId, updateFilter);
 
         const result = await this.prisma.upsert({
             'where': whereClause,
@@ -520,10 +539,15 @@ class Model {
             return { created: 0, updated: 0, failed: [], totalSuccess: 0, totalFailed: 0 } as UpsertManyResult;
         }
 
-        // CHECK CREATE PERMISSION (upsertMany may create)
-        if (!this.canCreate()) {
-            throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
+        // STRICT MODE (REST edge): reject payloads containing non-writable fields
+        if (this.options.strictWrites) {
+            for (const record of data) {
+                this.assertWritable(record);
+            }
         }
+
+        // CREATE PERMISSION is checked per record below — only records that don't exist yet create,
+        // and canCreate implementations may depend on the record data
 
         // CHECK UPDATE PERMISSION (upsertMany may update)
         const updateFilter = this.getUpdateFilter();
@@ -600,7 +624,10 @@ class Model {
                     const transformedRecord = this.queryBuilder.update(record[updatePrimaryKey] || record[targetKey as string], record, this.user);
                     updateRecords.push({ original: record, transformed: transformedRecord });
                 } else {
-                    // Record doesn't exist, prepare for create
+                    // Record doesn't exist, prepare for create — check per-record create permission
+                    if (!this.canCreate(record)) {
+                        throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
+                    }
                     if (validateRelation) {
                         const transformedRecord = this.queryBuilder.create(record, this.user);
                         createRecords.push({ original: record, transformed: transformedRecord });
@@ -642,14 +669,13 @@ class Model {
                 }
             }
             // Batch update with ACL filter
-            const hasUpdateFilter = updateFilter && typeof updateFilter === 'object' && Object.keys(updateFilter).length > 0;
             if (updateRecords.length > 0) {
                 for (const { original, transformed } of updateRecords) {
                     try {
                         const whereId = Array.isArray(targetKey)
                             ? this.buildWhereUniqueKey(targetKey, original)
                             : { [targetKey as string]: original[targetKey as string] };
-                        const whereClause = hasUpdateFilter ? { AND: [whereId, updateFilter] } : whereId;
+                        const whereClause = this.#mergeAclIntoUniqueWhere(whereId, updateFilter);
                         await tx[this.name].update({
                             'where': whereClause,
                             'data': transformed,
@@ -724,10 +750,7 @@ class Model {
         // Support soft delete via middleware
         if (beforeCtx.softDelete && beforeCtx.data) {
             const result = await this.prisma.update({
-                'where': {
-                    ...whereId,
-                    ...deleteFilter
-                },
+                'where': this.#mergeAclIntoUniqueWhere(whereId, deleteFilter),
                 'data': beforeCtx.data,
                 'select': this.select(),
                 ...(beforeCtx.options || options)
@@ -738,10 +761,7 @@ class Model {
         }
 
         const result = await this.prisma.delete({
-            'where': {
-                ...whereId,
-                ...deleteFilter
-            },
+            'where': this.#mergeAclIntoUniqueWhere(whereId, deleteFilter),
             'select': this.select(),
             ...(beforeCtx.options || options)
         });
@@ -907,6 +927,90 @@ class Model {
     canCreate(data?: Record<string, any>): boolean {
         if (this.user.role == "application") return true;
         return this._canCreate(data);
+    }
+
+    /**
+     * Get the writable-fields whitelist for this user, or null when unrestricted
+     */
+    getWritableFields(): string[] | null {
+        if (this.user.role == "application") return null;
+        const list = this.acl.getWritableFields?.(this.user);
+        return Array.isArray(list) ? list : null;
+    }
+
+    /**
+     * Assert that a write payload only contains fields the user may write.
+     * Validates against getWritableFields (whitelist) and getOmitFields (blacklist),
+     * recursing into nested relation payloads against the related models' ACLs.
+     * Throws 403 `fields_not_writable` listing the offending field paths.
+     *
+     * Runs automatically on create/update/upsert when the model was constructed with
+     * `strictWrites: true` (the REST edge). Models without the flag silently strip
+     * these fields instead, so internal backend logic can still write them.
+     */
+    assertWritable(data: Record<string, any>): void {
+        if (this.user.role == "application") return;
+        if (!data || typeof data !== 'object') return;
+        const violations: string[] = [];
+        this.#collectWriteViolations(this.name, data, violations, '', 0, false);
+        if (violations.length > 0) {
+            throw new ErrorResponse(403, "fields_not_writable", { model: this.name, fields: violations });
+        }
+    }
+
+    /**
+     * Recursively collect payload fields the user may not write.
+     * Identifier fields (the model's PK) are allowed in nested payloads — they address
+     * records rather than write data. Prisma-operation passthrough objects
+     * ({ connect: ... }, { set: ... }, ...) are skipped, mirroring QueryBuilder.
+     */
+    #collectWriteViolations(
+        modelName: string,
+        data: Record<string, any>,
+        violations: string[],
+        path: string,
+        depth: number,
+        isNested: boolean,
+        extraIdentifiers: string[] = []
+    ): void {
+        if (depth > 10 || !data || typeof data !== 'object' || Array.isArray(data)) return;
+
+        if (Object.keys(data).some((k: string) => (PRISMA_WRITE_OPS as readonly string[]).includes(k))) return;
+
+        const modelAcl = getAcl().model[modelName] || {};
+        const omit = new Set<string>(modelAcl.getOmitFields?.(this.user) ?? []);
+        const writableList = modelAcl.getWritableFields?.(this.user);
+        const writable = Array.isArray(writableList) ? new Set<string>(writableList) : null;
+
+        const pk = dmmf.getPrimaryKey(modelName);
+        const identifierFields = new Set<string>([...(Array.isArray(pk) ? pk : [pk]), ...extraIdentifiers]);
+        const relations = dmmf.buildRelationships(modelName);
+
+        for (const key of Object.keys(data)) {
+            const rel = relations.find((r) => r.name === key);
+
+            if (rel && data[key] && typeof data[key] === 'object') {
+                // Writing a relation — the relation name itself must be writable
+                if (omit.has(key) || (writable && !writable.has(key))) {
+                    violations.push(path + key);
+                    continue;
+                }
+                const items = Array.isArray(data[key]) ? data[key] : [data[key]];
+                // Composite n:m FK fields address the join record — identifiers, not data
+                const relIdentifiers = Array.isArray(rel.fields) ? rel.fields : [];
+                for (const item of items) {
+                    this.#collectWriteViolations(rel.object, item, violations, `${path}${key}.`, depth + 1, true, relIdentifiers);
+                }
+                continue;
+            }
+
+            // PK fields in nested payloads address the record (connect/upsert targets)
+            if (isNested && identifierFields.has(key)) continue;
+
+            if (omit.has(key) || (writable && !writable.has(key))) {
+                violations.push(path + key);
+            }
+        }
     }
 
     /**

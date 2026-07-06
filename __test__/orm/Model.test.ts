@@ -520,9 +520,20 @@ describe('Model', () => {
             expect(result).toEqual(updated);
         });
 
-        it('should strip createdAt and createdBy', async () => {
+        it('should reject unknown fields like createdAt (no longer silently stripped)', async () => {
+            // The hardcoded createdAt/createdBy stripping was removed — protected fields
+            // are now governed by ACL (getOmitFields / getWritableFields) instead
+            await expect(model.update(1, { title: 'Updated', createdAt: '2024-01-01' }))
+                .rejects.toMatchObject({ status_code: 400 });
+        });
+
+        it('should strip protected fields via ACL omit (replaces createdAt/createdBy hack)', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getOmitFields: () => ['createdAt', 'createdBy'] } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
             mockPrismaModel.update.mockResolvedValue({ id: 1, title: 'Updated' });
-            await model.update(1, { title: 'Updated', createdAt: '2024-01-01', createdBy: 99 });
+            await m.update(1, { title: 'Updated', createdAt: '2024-01-01', createdBy: 99 });
             const callArgs = mockPrismaModel.update.mock.calls[0][0];
             expect(callArgs.data.createdAt).toBeUndefined();
             expect(callArgs.data.createdBy).toBeUndefined();
@@ -649,7 +660,9 @@ describe('Model', () => {
             expect(mockPrismaModel.upsert).not.toHaveBeenCalled();
         });
 
-        it('should merge update filter into where clause with AND', async () => {
+        it('should merge update filter into where clause with unique key at top level', async () => {
+            // Prisma WhereUniqueInput requires a unique field at the TOP level;
+            // the ACL filter is nested under AND
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { getUpdateFilter: (user: any) => ({ authorId: user.id }) } }
             });
@@ -657,13 +670,11 @@ describe('Model', () => {
             mockPrismaModel.upsert.mockResolvedValue({ id: 1, title: 'Test' });
             await m.upsert({ id: 1, title: 'Test' });
             const callArgs = mockPrismaModel.upsert.mock.calls[0][0];
-            expect(callArgs.where.AND).toBeDefined();
-            expect(callArgs.where.AND).toHaveLength(2);
-            expect(callArgs.where.AND[0]).toEqual({ id: 1 });
-            expect(callArgs.where.AND[1]).toEqual({ authorId: 5 });
+            expect(callArgs.where.id).toBe(1);
+            expect(callArgs.where.AND).toEqual([{ authorId: 5 }]);
         });
 
-        it('should merge update filter with OR condition using AND', async () => {
+        it('should merge update filter with OR condition using nested AND', async () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { getUpdateFilter: () => ({ OR: [{ role: 'editor' }, { role: 'admin' }] }) } }
             });
@@ -671,9 +682,8 @@ describe('Model', () => {
             mockPrismaModel.upsert.mockResolvedValue({ id: 1, title: 'Test' });
             await m.upsert({ id: 1, title: 'Test' });
             const callArgs = mockPrismaModel.upsert.mock.calls[0][0];
-            expect(callArgs.where.AND).toBeDefined();
-            expect(callArgs.where.AND[0]).toEqual({ id: 1 });
-            expect(callArgs.where.AND[1]).toEqual({ OR: [{ role: 'editor' }, { role: 'admin' }] });
+            expect(callArgs.where.id).toBe(1);
+            expect(callArgs.where.AND).toEqual([{ OR: [{ role: 'editor' }, { role: 'admin' }] }]);
         });
 
         it('should not wrap where in AND when update filter is empty', async () => {
@@ -750,14 +760,28 @@ describe('Model', () => {
             expect(result.totalSuccess).toBe(0);
         });
 
-        it('should throw 403 when canCreate denies', async () => {
+        it('should throw 403 when canCreate denies and a record would be created', async () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { canCreate: () => false } }
             });
+            // Record does not exist -> upsertMany would create it -> 403
+            mockPrismaModel.findMany.mockResolvedValue([]);
             const m = new Model('posts', { user: { id: 1, role: 'user' } });
-            await expect(m.upsertMany([{ id: 1, title: 'Test' }]))
+            await expect(m.upsertMany([{ id: 99, title: 'Test' }]))
                 .rejects.toMatchObject({ status_code: 403 });
-            expect(mockPrismaModel.findMany).not.toHaveBeenCalled();
+        });
+
+        it('should allow update-only upsertMany when canCreate denies but records exist', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { canCreate: () => false } }
+            });
+            // Record exists -> upsertMany only updates -> no create permission needed
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
+            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            const result = await m.upsertMany([{ id: 1, title: 'Test' }]);
+            expect(result.updated).toBe(1);
+            expect(result.created).toBe(0);
         });
 
         it('should throw 403 when getUpdateFilter returns false', async () => {
@@ -780,13 +804,12 @@ describe('Model', () => {
 
             await m.upsertMany([{ id: 1, title: 'Updated' }]);
             const updateCall = mockPrismaModel.update.mock.calls[0][0];
-            expect(updateCall.where.AND).toBeDefined();
-            expect(updateCall.where.AND).toHaveLength(2);
-            expect(updateCall.where.AND[0]).toEqual({ id: 1 });
-            expect(updateCall.where.AND[1]).toEqual({ authorId: 7 });
+            // Unique key stays at top level; ACL filter nested under AND (WhereUniqueInput requirement)
+            expect(updateCall.where.id).toBe(1);
+            expect(updateCall.where.AND).toEqual([{ authorId: 7 }]);
         });
 
-        it('should merge update filter with OR into batch update using AND', async () => {
+        it('should merge update filter with OR into batch update using nested AND', async () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { getUpdateFilter: () => ({ OR: [{ status: 'draft' }, { status: 'review' }] }) } }
             });
@@ -796,9 +819,8 @@ describe('Model', () => {
 
             await m.upsertMany([{ id: 3, title: 'Updated' }]);
             const updateCall = mockPrismaModel.update.mock.calls[0][0];
-            expect(updateCall.where.AND).toHaveLength(2);
-            expect(updateCall.where.AND[0]).toEqual({ id: 3 });
-            expect(updateCall.where.AND[1]).toEqual({ OR: [{ status: 'draft' }, { status: 'review' }] });
+            expect(updateCall.where.id).toBe(3);
+            expect(updateCall.where.AND).toEqual([{ OR: [{ status: 'draft' }, { status: 'review' }] }]);
         });
 
         it('should not wrap where in AND when update filter is empty', async () => {
@@ -834,6 +856,73 @@ describe('Model', () => {
     });
 
     // ── Model Name Setter ────────────────────────────────────
+
+    describe('strictWrites / assertWritable', () => {
+        it('should reject non-writable fields on create when strictWrites is on', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getWritableFields: () => ['title'] } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' }, strictWrites: true });
+            await expect(m.create({ title: 'a', status: 'x' }))
+                .rejects.toMatchObject({ status_code: 403, data: { fields: ['status'] } });
+        });
+
+        it('should reject omitted fields on update when strictWrites is on', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getOmitFields: () => ['status'] } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' }, strictWrites: true });
+            await expect(m.update(1, { title: 'a', status: 'x' }))
+                .rejects.toMatchObject({ status_code: 403, data: { fields: ['status'] } });
+        });
+
+        it('should silently strip non-writable fields when strictWrites is off', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getWritableFields: () => ['title'] } }
+            });
+            mockPrismaModel.create.mockResolvedValue({ id: 1, title: 'a' });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await m.create({ title: 'a', status: 'x' });
+            const callArgs = mockPrismaModel.create.mock.calls[0][0];
+            expect(callArgs.data.title).toBe('a');
+            expect(callArgs.data.status).toBeUndefined();
+        });
+
+        it('should bypass strict checks and stripping for the application role', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getWritableFields: () => ['title'] } }
+            });
+            mockPrismaModel.create.mockResolvedValue({ id: 1 });
+            const m = new Model('posts', { strictWrites: true }); // no user -> application role
+            await expect(m.create({ title: 'a', status: 'x' })).resolves.toBeDefined();
+            const callArgs = mockPrismaModel.create.mock.calls[0][0];
+            expect(callArgs.data.status).toBe('x');
+        });
+
+        it('assertWritable should list all offending fields', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getWritableFields: () => ['title'], getOmitFields: () => ['authorId'] } }
+            });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            let err: any;
+            try {
+                m.assertWritable({ title: 'ok', status: 'x', authorId: 9 });
+            } catch (e) {
+                err = e;
+            }
+            expect(err).toBeDefined();
+            expect(err.status_code).toBe(403);
+            expect(err.data.fields).toEqual(['status', 'authorId']);
+        });
+
+        it('getWritableFields should return null for the application role', () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getWritableFields: () => ['title'] } }
+            });
+            const m = new Model('posts', {});
+            expect(m.getWritableFields()).toBeNull();
+        });
+    });
 
     describe('modelName setter', () => {
         it('should update model name and prisma delegate', () => {

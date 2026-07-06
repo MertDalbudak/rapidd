@@ -3,7 +3,8 @@ import path from 'path';
 import { Logger } from '../utils/Logger';
 
 const ROOT = process.env.ROOT || '';
-const DEFAULT_STRINGS_PATH = ROOT ? path.join(ROOT, 'locales') : './locale';
+// Resolved to an absolute path — require() would treat a bare relative path as a package name
+const DEFAULT_STRINGS_PATH = process.env.STRINGS_PATH || path.resolve(ROOT || process.cwd(), 'locales');
 
 /**
  * Singleton LanguageDict class for efficient translation management.
@@ -39,7 +40,8 @@ export class LanguageDict {
                 if (path.extname(fileName) === '.json') {
                     const langCode = path.parse(fileName).name;
                     try {
-                        const dictPath = path.join(dictionaryPath, fileName);
+                        // Resolve to absolute so relative dictionary paths work regardless of cwd
+                        const dictPath = path.resolve(dictionaryPath, fileName);
                         // eslint-disable-next-line @typescript-eslint/no-require-imports
                         this._dictionaries[langCode] = require(dictPath);
                         this._available.push(langCode);
@@ -68,9 +70,14 @@ export class LanguageDict {
         const lang = language || this._defaultLanguage;
         const dictionary = this._dictionaries[lang] || this._dictionaries[this._defaultLanguage] || {};
 
-        let translated: string | undefined = dictionary[key];
+        // Per-key fallback: a partially translated locale falls back to the default
+        // language for missing keys instead of leaking the raw key to clients
+        let translated: string | undefined = dictionary[key] ?? this._dictionaries[this._defaultLanguage]?.[key];
 
         if (translated === undefined) {
+            if (process.env.NODE_ENV !== 'production') {
+                Logger.warn(`Missing i18n key: '${key}' (language: ${lang})`);
+            }
             return key;
         }
 

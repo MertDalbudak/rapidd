@@ -31,10 +31,15 @@ export class ErrorResponse extends ErrorBasicResponse {
         this.data = data;
     }
 
-    toJSON(language: string = 'en_US'): { status_code: number; message: string } {
+    toJSON(language: string = 'en_US'): { status_code: number; message: string; key: string; data?: Record<string, unknown> } {
         return {
             status_code: this.status_code,
             message: LanguageDict.get(this.message, this.data, language),
+            // Machine-readable contract: clients switch on `key` + `data` instead of
+            // parsing localized prose (data is already client-facing — it is what
+            // gets interpolated into the message)
+            key: this.message,
+            ...(this.data ? { data: this.data } : {}),
         };
     }
 

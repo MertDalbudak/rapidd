@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, existsSync } from 'fs';
+import { mkdirSync, existsSync, createWriteStream, WriteStream } from 'fs';
 import path from 'path';
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -35,12 +35,26 @@ function ensureLogDir(): void {
     _dirChecked = true;
 }
 
+// Lazily-created append streams — writes are buffered and flushed off the event
+// loop instead of blocking every request with a synchronous open+write+close.
+// fs.WriteStream does not keep the process alive between writes.
+const _streams = new Map<string, WriteStream>();
+
 function writeToFile(filename: string, line: string): void {
     if (!_logDir) return;
     try {
         ensureLogDir();
-        const dir = path.isAbsolute(_logDir) ? _logDir : path.join(process.cwd(), _logDir);
-        appendFileSync(path.join(dir, filename), line + '\n');
+        let stream = _streams.get(filename);
+        if (!stream || stream.destroyed) {
+            const dir = path.isAbsolute(_logDir) ? _logDir : path.join(process.cwd(), _logDir);
+            stream = createWriteStream(path.join(dir, filename), { flags: 'a' });
+            stream.on('error', () => {
+                // Silently ignore file write failures — don't crash the app for logging
+                _streams.delete(filename);
+            });
+            _streams.set(filename, stream);
+        }
+        stream.write(line + '\n');
     } catch {
         // Silently ignore file write failures — don't crash the app for logging
     }
@@ -117,6 +131,24 @@ function formatError(error: Error | string | unknown): { message: string; toStri
 // ── Logger ───────────────────────────────────────────────────────────────────
 
 export const Logger = {
+    /** Active log level (from LOG_LEVEL env) — lets callers skip expensive capture work */
+    get level(): LogLevel {
+        return _level;
+    },
+
+    /**
+     * Flush all buffered log writes to disk. Writes are buffered through append
+     * streams for performance — call this on graceful shutdown (buildApp wires it
+     * into the Fastify onClose hook) or in tests before reading log files.
+     */
+    async flush(): Promise<void> {
+        const streams = [..._streams.values()];
+        _streams.clear();
+        await Promise.all(streams.map((stream) => new Promise<void>((resolve) => {
+            stream.end(() => resolve());
+        })));
+    },
+
     log(message: string, ...data: unknown[]): void {
         if (_silent) return;
 

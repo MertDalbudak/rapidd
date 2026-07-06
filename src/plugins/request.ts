@@ -10,7 +10,9 @@ const requestPlugin: FastifyPluginAsync = async (fastify) => {
 
     fastify.decorateRequest('parseListQuery', function (this: FastifyRequest) {
         const query = this.query as Record<string, string>;
-        const { q = {}, include = '', sortBy = 'id', sortOrder = 'asc', fields = null } = query;
+        const { include = '', sortBy = 'id', sortOrder = 'asc', fields = null } = query;
+        // ?q= is canonical; ?filter= is the documented alias
+        const q: string | Record<string, any> = query.q ?? query.filter ?? {};
         return {
             q,
             include,

@@ -53,8 +53,15 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     // Validate required environment variables
     validateEnv();
 
+    // Re-initialize translations when a custom dictionary path is provided
+    if (options.stringsPath) {
+        LanguageDict.initialize(options.stringsPath, 'en_US');
+    }
+
     const app = Fastify({
-        logger: NODE_ENV !== 'test',
+        // Rapidd has its own request/access logger (Logger.request) — Fastify's pino
+        // would log every request a second time. Opt back in with FASTIFY_LOGGER=true.
+        logger: process.env.FASTIFY_LOGGER === 'true',
         trustProxy: process.env.TRUST_PROXY !== undefined
             ? process.env.TRUST_PROXY === 'true'
             : NODE_ENV === 'production',
@@ -67,7 +74,9 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     await app.register(fastifyFormbody);
 
     // ── Static Files ────────────────────────────────
-    const staticPath = process.env.PUBLIC_STATIC!;
+    const staticPath = options.publicPath
+        ? path.join(options.publicPath, 'static')
+        : process.env.PUBLIC_STATIC!;
     if (fs.existsSync(staticPath)) {
         await app.register(fastifyStatic, {
             root: staticPath,
@@ -117,7 +126,8 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
         }
         : { ...sharedCorsOptions, origin: true };
 
-    await app.register(fastifyCors, corsOptions as any);
+    // options.cors overrides individual CORS settings (merged over env-derived defaults)
+    await app.register(fastifyCors, { ...corsOptions, ...(options.cors || {}) } as any);
 
     // ── Security Headers ────────────────────────────
     await app.register(securityPlugin);
@@ -149,13 +159,21 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
         await loadRoutes(app, routesPath);
     }
 
-    // ── Request Logging ─────────────────────────────
-    app.addHook('onSend', async (request, _reply, payload) => {
-        if (typeof payload === 'string') {
-            (request as any)._responsePayload = payload;
-        }
-        return payload;
+    // Flush buffered log writes on graceful shutdown
+    app.addHook('onClose', async () => {
+        await Logger.flush();
     });
+
+    // ── Request Logging ─────────────────────────────
+    // Response payloads are only printed at LOG_LEVEL=finest — don't retain them otherwise
+    if (Logger.level === 'finest') {
+        app.addHook('onSend', async (request, _reply, payload) => {
+            if (typeof payload === 'string') {
+                (request as any)._responsePayload = payload;
+            }
+            return payload;
+        });
+    }
 
     app.addHook('onResponse', async (request, reply) => {
         Logger.request({

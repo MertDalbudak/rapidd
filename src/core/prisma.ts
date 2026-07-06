@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import path from 'path';
 import type { RLSVariables, DatabaseProvider, AdapterResult, AclConfig } from '../types';
 import * as dmmf from './dmmf';
+import { Logger } from '../utils/Logger';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'client'));
@@ -99,28 +100,35 @@ function sanitizeRLSValue(value: string | number | null | undefined): string {
 }
 
 export async function setRLSVariables(tx: any, variables: RLSVariables): Promise<void> {
-    for (const [name, value] of Object.entries(variables)) {
-        if (value === null || value === undefined) continue;
-        const safeName = validateIdentifier(name, name);
-        const safeValue = sanitizeRLSValue(value);
+    const entries = Object.entries(variables).filter(([, value]) => value !== null && value !== undefined);
+    if (entries.length === 0) return;
 
-        if (dbProvider === 'mysql') {
-            await tx.$executeRawUnsafe(`SET @${RLS_NAMESPACE}_${safeName} = '${safeValue}'`);
-        } else {
-            await tx.$executeRawUnsafe(`SET LOCAL ${RLS_NAMESPACE}.${safeName} = '${safeValue}'`);
-        }
+    // Batch all variables into ONE statement — RLS wraps every Prisma operation in a
+    // transaction, so each extra round trip here is paid on every single query.
+    if (dbProvider === 'mysql') {
+        const assignments = entries.map(([name, value]) =>
+            `@${RLS_NAMESPACE}_${validateIdentifier(name, name)} = '${sanitizeRLSValue(value)}'`);
+        await tx.$executeRawUnsafe(`SET ${assignments.join(', ')}`);
+    } else {
+        // set_config(..., true) is transaction-local — equivalent to SET LOCAL, but batchable
+        const calls = entries.map(([name, value]) =>
+            `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '${sanitizeRLSValue(value)}', true)`);
+        await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
     }
 }
 
 export async function resetRLSVariables(tx: any, variables: RLSVariables): Promise<void> {
+    const names = Object.keys(variables);
+    if (names.length === 0) return;
+
     try {
-        for (const name of Object.keys(variables)) {
-            const safeName = validateIdentifier(name, name);
-            if (dbProvider === 'mysql') {
-                await tx.$executeRawUnsafe(`SET @${RLS_NAMESPACE}_${safeName} = NULL`);
-            } else {
-                await tx.$executeRawUnsafe(`RESET ${RLS_NAMESPACE}.${safeName}`);
-            }
+        if (dbProvider === 'mysql') {
+            const assignments = names.map((name) => `@${RLS_NAMESPACE}_${validateIdentifier(name, name)} = NULL`);
+            await tx.$executeRawUnsafe(`SET ${assignments.join(', ')}`);
+        } else {
+            // Custom GUCs default to '' — set_config(..., '', false) matches RESET, batchable
+            const calls = names.map((name) => `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '', false)`);
+            await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
         }
     } catch {
         // Ignore errors on reset
@@ -226,8 +234,17 @@ export function getAcl(): AclConfig {
         try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
             _acl = require('../config/acl').default || require('../config/acl');
-        } catch {
+        } catch (error: any) {
+            // ACL is FAIL-OPEN: an empty config grants unrestricted access to every model.
+            // A missing config may be intentional (internal services), but a broken one
+            // (syntax error, bad import) must be loud — otherwise a typo silently
+            // disables all access control.
             _acl = { model: {} };
+            if (error?.code === 'MODULE_NOT_FOUND') {
+                Logger.warn('No ACL config found (src/config/acl) — ALL models are unrestricted. Add an acl.ts to enable access control.');
+            } else {
+                Logger.error(`ACL config failed to load — falling back to UNRESTRICTED access for all models: ${error?.message || error}`);
+            }
         }
     }
     return _acl!;

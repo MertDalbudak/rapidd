@@ -1308,7 +1308,9 @@ describe('ACL integration with query parameters', () => {
         await app.inject({ method: 'GET', url: '/api/v1/products/1' });
 
         // Second findUnique call is the permission check
+        // Unique key stays at top level; ACL filter nested under AND (WhereUniqueInput requirement)
         const permCall = mockPrismaModel.findUnique.mock.calls[1][0];
-        expect(permCall.where.ownerId).toBe(42);
+        expect(permCall.where.id).toBe(1);
+        expect(permCall.where.AND).toEqual([{ ownerId: 42 }]);
     });
 });

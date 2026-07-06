@@ -50,6 +50,14 @@ export interface ModelAcl {
     getUpdateFilter?: (user: RapiddUser) => Record<string, unknown> | boolean | false;
     getDeleteFilter?: (user: RapiddUser) => Record<string, unknown> | boolean | false;
     getOmitFields?: (user: RapiddUser) => string[];
+    /**
+     * Whitelist of fields the user may WRITE in create/update payloads.
+     * Return null/undefined for no restriction. Non-writable fields are silently
+     * stripped in the model layer (so backend logic keeps working); models constructed
+     * with `strictWrites: true` (the REST edge) reject such payloads with 403 instead.
+     * getOmitFields is always applied additionally — omitted fields are never writable.
+     */
+    getWritableFields?: (user: RapiddUser) => string[] | null;
 }
 
 export interface AclConfig {
@@ -117,7 +125,12 @@ export interface ListResponseBody<T = unknown> {
 
 export interface ErrorResponseBody {
     status_code: number;
+    /** Localized human-readable message */
     message: string;
+    /** Machine-readable i18n key — stable across languages, switch on this */
+    key?: string;
+    /** Interpolation data for the message (field names, values, hints) */
+    data?: Record<string, unknown>;
 }
 
 // =====================================================
@@ -214,7 +227,12 @@ export interface PrismaErrorInfo {
 
 export interface QueryErrorResponse {
     status_code: number;
+    /** Localized human-readable message */
     message: string;
+    /** Machine-readable i18n key (absent for unclassified errors in development) */
+    key?: string;
+    /** Interpolation data for the message */
+    data?: Record<string, unknown>;
 }
 
 // =====================================================
@@ -252,11 +270,18 @@ export interface ISessionStore {
 
 export interface ModelOptions {
     user?: RapiddUser;
+    /**
+     * Reject write payloads containing non-writable fields (403) instead of silently
+     * stripping them. Intended for models constructed at the REST edge — internal
+     * models keep the default (false) so backend logic can pass protected fields.
+     */
+    strictWrites?: boolean;
     [key: string]: unknown;
 }
 
 export interface GetManyOptions {
-    q?: Record<string, any>;
+    /** Filter — the raw query string (?q=...) or a pre-built filter object */
+    q?: string | Record<string, any>;
     include?: string | Record<string, any>;
     limit?: number;
     offset?: number;
@@ -312,18 +337,20 @@ declare module 'fastify' {
 // APP CONFIG
 // =====================================================
 
-export interface AppConfig {
-    languages: string[];
-    database?: Record<string, unknown>;
-    services?: Record<string, unknown>;
-    emails?: Record<string, unknown>;
-}
-
+/**
+ * Programmatic overrides for buildApp — intended for tests and embedded use.
+ * Deployed apps configure via env vars (ROUTES_PATH, STRINGS_PATH, PUBLIC_PATH,
+ * ALLOWED_ORIGINS, RATE_LIMIT_*); every option here overrides its env counterpart.
+ */
 export interface RapiddOptions {
+    /** Directory of route plugins to autoload (default: env ROUTES_PATH) */
     routesPath?: string;
+    /** Locale dictionary directory (default: env STRINGS_PATH -> ROOT/locales) */
     stringsPath?: string;
+    /** Public assets root — static files are served from `<publicPath>/static` (default: env PUBLIC_PATH) */
     publicPath?: string;
-    config?: AppConfig;
+    /** Overrides merged over the env-derived @fastify/cors options */
     cors?: Record<string, unknown>;
+    /** Set false to disable rate limiting (default: enabled in production) */
     rateLimit?: boolean;
 }

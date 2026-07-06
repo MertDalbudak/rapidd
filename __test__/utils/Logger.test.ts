@@ -238,21 +238,23 @@ describe('Logger', () => {
             }
         });
 
-        it('log/warn append to app.log', () => {
+        it('log/warn append to app.log', async () => {
             const { Logger } = loadLogger({ LOG_LEVEL: 'essential', LOG_DIR: tmpDir });
 
             Logger.log('info message');
             Logger.warn('warn message');
+            await Logger.flush(); // writes are buffered — flush before reading
 
             const appLog = fs.readFileSync(path.join(tmpDir, 'app.log'), 'utf-8');
             expect(appLog).toContain('[LOG] info message');
             expect(appLog).toContain('[WARN] warn message');
         });
 
-        it('error appends to error.log', () => {
+        it('error appends to error.log', async () => {
             const { Logger } = loadLogger({ LOG_LEVEL: 'essential', LOG_DIR: tmpDir });
 
             Logger.error('critical failure');
+            await Logger.flush();
 
             const errorLog = fs.readFileSync(path.join(tmpDir, 'error.log'), 'utf-8');
             expect(errorLog).toContain('[ERROR] critical failure');
@@ -268,11 +270,12 @@ describe('Logger', () => {
             expect(fs.existsSync(tmpDir)).toBe(false);
         });
 
-        it('creates log directory if it does not exist', () => {
+        it('creates log directory if it does not exist', async () => {
             const nestedDir = path.join(tmpDir, 'nested', 'logs');
             const { Logger } = loadLogger({ LOG_LEVEL: 'essential', LOG_DIR: nestedDir });
 
             Logger.log('test');
+            await Logger.flush();
 
             expect(fs.existsSync(nestedDir)).toBe(true);
             expect(fs.existsSync(path.join(nestedDir, 'app.log'))).toBe(true);

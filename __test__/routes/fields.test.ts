@@ -777,7 +777,9 @@ describe('Fields parameter - ACL field exclusion', () => {
 
         const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
         expect(findManyCall.select.id).toBe(true);
-        expect(findManyCall.select.category.select.internal_code).toBeUndefined();
+        // Every requested category field is ACL-omitted -> the relation is skipped entirely
+        // (an empty { select: {} } would be rejected by Prisma)
+        expect(findManyCall.select.category).toBeUndefined();
     });
 
     it('should apply access filter for non-admin on list query', async () => {

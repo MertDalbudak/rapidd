@@ -61,7 +61,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
     });
 
     fastify.decorateReply('handleError', function (this: FastifyReply, error: any, data: Record<string, unknown> = {}) {
-        const response = QueryBuilder.errorHandler(error, data);
+        const response = QueryBuilder.errorHandler(error, data, this.request?.language || null);
         return this.code(response.status_code).send(response);
     });
 
@@ -77,27 +77,33 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         request.remoteAddress = request.ip;
     });
 
-    // Global error handler
+    // Global error handler — the single sink for ALL route errors. Routes do not need
+    // their own try/catch: thrown ErrorResponses are translated, Prisma errors are
+    // classified via QueryBuilder.errorHandler, and unexpected 5xx are masked in
+    // production. All responses carry the machine-readable `key` (+ `data`) contract.
     fastify.setErrorHandler((error, request, reply) => {
         const language = request.language || 'en_US';
-        const status = (error as any).status_code || (error as any).statusCode || 500;
 
         if (error instanceof ErrorResponse) {
-            return reply.code(status).send(error.toJSON(language));
+            return reply.code(error.status_code).send(error.toJSON(language));
         }
 
         if (error instanceof ErrorBasicResponse) {
-            return reply.code(status).send(error.toJSON());
+            return reply.code(error.status_code).send(error.toJSON());
         }
 
-        const err = error as Error;
-        const message =
-            Object.getPrototypeOf(err).constructor === Error && process.env.NODE_ENV === 'production'
-                ? LanguageDict.get('internal_server_error', null, language)
-                : err.message || String(error);
+        // Fastify-generated 4xx (validation, body parsing, ...) carry client-safe
+        // messages and their own status codes — pass them through
+        const fastifyStatus = (error as any).statusCode;
+        if (fastifyStatus && fastifyStatus < 500) {
+            Logger.error(error);
+            return reply.code(fastifyStatus).send({ status_code: fastifyStatus, message: (error as Error).message });
+        }
 
-        Logger.error(error);
-        return reply.code(status).send({ status_code: status, message });
+        // Everything else (Prisma errors, TypeErrors, ...): classify, translate,
+        // and mask in production. request.body feeds P2002 duplicate-value extraction.
+        const response = QueryBuilder.errorHandler(error, (request.body as Record<string, unknown>) || {}, language);
+        return reply.code(response.status_code).send(response);
     });
 };
 
