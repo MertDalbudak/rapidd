@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "La relación '{field}' no se puede filtrar con un valor escalar. {hint}",
     "invalid_relation_field": "El campo '{field}' de {modelName} no es una relación y no puede usarse como ruta",
     "incomplete_composite_key": "Clave compuesta incompleta para la relación '{relation}' — faltan: {missing}",
-    "fields_not_writable": "Los siguientes campos de {model} no se pueden escribir: {fields}"
+    "fields_not_writable": "Los siguientes campos de {model} no se pueden escribir: {fields}",
+    "field_not_filterable": "El campo '{field}' de {modelName} está restringido y no puede usarse para filtrar u ordenar"
 }

@@ -85,13 +85,23 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     }
 
     // ── Cookies ─────────────────────────────────────
+    // COOKIE_SAME_SITE: strict (default) | lax | none — invalid values fall back to strict.
+    // Note: auth cookies have their own setting (AUTH_COOKIE_SAME_SITE).
+    const cookieSameSite = (['strict', 'lax', 'none'].includes(process.env.COOKIE_SAME_SITE as string)
+        ? process.env.COOKIE_SAME_SITE
+        : 'strict') as 'strict' | 'lax' | 'none';
+    const cookieSecure = NODE_ENV === 'production';
+    if (cookieSameSite === 'none' && !cookieSecure) {
+        Logger.warn('COOKIE_SAME_SITE=none requires Secure cookies — browsers will reject these cookies outside production');
+    }
+
     await app.register(fastifyCookie, {
         secret: process.env.COOKIE_SECRET,
         parseOptions: {
             path: '/',
             httpOnly: true,
-            secure: NODE_ENV === 'production',
-            sameSite: 'strict' as const,
+            secure: cookieSecure,
+            sameSite: cookieSameSite,
             signed: true,
         },
     });

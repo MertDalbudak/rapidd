@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "لا يمكن تصفية العلاقة '{field}' بقيمة عددية. {hint}",
     "invalid_relation_field": "الحقل '{field}' في {modelName} ليس علاقة ولا يمكن استخدامه كمسار",
     "incomplete_composite_key": "مفتاح مركب غير مكتمل للعلاقة '{relation}' — الناقص: {missing}",
-    "fields_not_writable": "الحقول التالية في {model} غير قابلة للكتابة: {fields}"
+    "fields_not_writable": "الحقول التالية في {model} غير قابلة للكتابة: {fields}",
+    "field_not_filterable": "الحقل '{field}' في {modelName} مقيد ولا يمكن استخدامه للتصفية أو الفرز"
 }

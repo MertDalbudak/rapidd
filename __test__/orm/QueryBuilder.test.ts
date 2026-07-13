@@ -567,6 +567,53 @@ describe('QueryBuilder (TypeScript)', () => {
         });
     });
 
+    describe('filter()/sort() - ACL omit enforcement', () => {
+        const restricted = { id: 7, role: 'user' };   // messages ACL omits internal_notes
+        const admin = { id: 1, role: 'admin' };
+
+        it('should reject filtering on an ACL-omitted field', () => {
+            expect(() => qb.filter('internal_notes=%secret%', restricted))
+                .toThrow('field_not_filterable');
+        });
+
+        it('should allow the same filter for a role that sees the field', () => {
+            const result: any = qb.filter('internal_notes=%secret%', admin);
+            expect(result.internal_notes).toEqual({ contains: 'secret' });
+        });
+
+        it('should enforce omit on nested relation filter paths', () => {
+            // message_attachments -> message (messages) — internal_notes hidden for non-admin
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            expect(() => attachmentsQb.filter('message.internal_notes=x', restricted))
+                .toThrow('field_not_filterable');
+        });
+
+        it('should not enforce when no user is provided (backward compatible)', () => {
+            const result: any = qb.filter('internal_notes=x');
+            expect(result.internal_notes).toBeDefined();
+        });
+
+        it('should bypass enforcement for the application role', () => {
+            const result: any = qb.filter('internal_notes=x', { id: 'system', role: 'application' });
+            expect(result.internal_notes).toBeDefined();
+        });
+
+        it('should reject sorting by an ACL-omitted field', () => {
+            expect(() => qb.sort('internal_notes', 'asc', restricted))
+                .toThrow('field_not_filterable');
+        });
+
+        it('should allow sorting by the same field for admin', () => {
+            expect(qb.sort('internal_notes', 'asc', admin)).toEqual({ internal_notes: 'asc' });
+        });
+
+        it('should enforce omit on nested sort paths', () => {
+            const attachmentsQb = new QueryBuilder('message_attachments');
+            expect(() => attachmentsQb.sort('message.internal_notes', 'asc', restricted))
+                .toThrow('field_not_filterable');
+        });
+    });
+
     describe('buildFieldSelection() - deep ACL enforcement', () => {
         it('should drop ACL-omitted fields of a related model (depth 1)', () => {
             const attachmentsQb = new QueryBuilder('message_attachments');

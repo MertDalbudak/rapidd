@@ -206,8 +206,8 @@ class Model {
 
     /** Build select clause */
     _select = (fields?: string[] | Record<string, any> | null): Record<string, any> => this.queryBuilder.select(fields as any);
-    /** Build filter/where clause */
-    _filter = (q: any): Record<string, any> => this.queryBuilder.filter(q);
+    /** Build filter/where clause (user enables ACL omit enforcement on filter fields) */
+    _filter = (q: any): Record<string, any> => this.queryBuilder.filter(q, this.user);
     /** Build include clause for relations */
     _include = (include: string | Record<string, any>): Record<string, any> => this.queryBuilder.include(include, this.user);
     /** Transform data for create operation */
@@ -248,23 +248,17 @@ class Model {
             totalResults = true,
         } = opts;
 
-        let sortBy = (opts.sortBy ?? this.defaultSortField).trim();
-        let sortOrder = (opts.sortOrder ?? 'asc').trim();
+        // No default sort — without an explicit sort the DB decides the order
+        // (a forced id:asc breaks models without an 'id' column)
+        const sortBy = typeof opts.sortBy === 'string' && opts.sortBy.trim() !== '' ? opts.sortBy.trim() : null;
+        const sortOrder = (opts.sortOrder ?? 'asc').trim();
 
         const take = this.take(Number(limit));
         const skip = this.skip(Number(offset));
 
-        // Validate sort field - fall back to default for composite PK names or missing 'id'
-        if (!sortBy.includes('.') && this.fields[sortBy] == undefined) {
-            if (sortBy === this.primaryKey && this.isCompositePK) {
-                // Composite key name (e.g., "email_companyId") → use first PK field
-                sortBy = this.defaultSortField;
-            } else if (sortBy === 'id') {
-                // Model doesn't have an 'id' field → fall back to actual primary key
-                sortBy = this.defaultSortField;
-            } else {
-                throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
-            }
+        // Validate an explicitly provided sort field
+        if (sortBy && !sortBy.includes('.') && this.fields[sortBy] == undefined) {
+            throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
         }
 
         // Execute before middleware
@@ -285,7 +279,8 @@ class Model {
         const effectiveTake = beforeCtx.take || take;
         const effectiveSkip = beforeCtx.skip || skip;
         const whereClause = this.filter(beforeCtx.query || q);
-        const orderByClause = this.sort(beforeCtx.sortBy || sortBy, beforeCtx.sortOrder || sortOrder);
+        const effectiveSortBy = beforeCtx.sortBy || sortBy;
+        const orderByClause = effectiveSortBy ? this.sort(effectiveSortBy, beforeCtx.sortOrder || sortOrder) : undefined;
         const extraOptions = beforeCtx.options || {};
 
         let result: GetManyResult;
@@ -298,7 +293,7 @@ class Model {
                     ...fieldSelection,
                     'take': effectiveTake,
                     'skip': effectiveSkip,
-                    'orderBy': orderByClause,
+                    ...(orderByClause ? { 'orderBy': orderByClause } : {}),
                     ...extraOptions
                 }),
                 (tx: any) => tx[this.name].count({
@@ -313,7 +308,7 @@ class Model {
                 ...fieldSelection,
                 'take': effectiveTake + 1,
                 'skip': effectiveSkip,
-                'orderBy': orderByClause,
+                ...(orderByClause ? { 'orderBy': orderByClause } : {}),
                 ...extraOptions
             });
             const hasMore = rows.length > effectiveTake;
@@ -879,10 +874,10 @@ class Model {
     }
 
     /**
-     * Build an orderBy clause
+     * Build an orderBy clause (user enables ACL omit enforcement on sort fields)
      */
     sort(sortBy: string, sortOrder: string): Record<string, any> {
-        return this.queryBuilder.sort(sortBy, sortOrder);
+        return this.queryBuilder.sort(sortBy, sortOrder, this.user);
     }
 
     /**

@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "'{field}' ilişkisi skaler bir değerle filtrelenemez. {hint}",
     "invalid_relation_field": "{modelName} modelinin '{field}' alanı bir ilişki değildir ve yol olarak kullanılamaz",
     "incomplete_composite_key": "'{relation}' ilişkisi için eksik bileşik anahtar — eksik: {missing}",
-    "fields_not_writable": "{model} modelinin şu alanları yazılabilir değil: {fields}"
+    "fields_not_writable": "{model} modelinin şu alanları yazılabilir değil: {fields}",
+    "field_not_filterable": "{modelName} modelinin '{field}' alanı kısıtlıdır ve filtreleme veya sıralama için kullanılamaz"
 }

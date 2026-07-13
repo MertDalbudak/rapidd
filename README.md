@@ -74,7 +74,7 @@ All generated endpoints support filtering, relations, field selection, sorting, 
 GET /api/v1/posts?filter=status=active,title=%typescript%
 GET /api/v1/posts?filter=createdAt=after:2025-01-01,views=gte:100
 GET /api/v1/posts?include=author,comments.user&fields=id,title,author.name
-GET /api/v1/posts?sortBy=createdAt&sortOrder=desc&limit=10&offset=20
+GET /api/v1/posts?sort=createdAt:desc&limit=10&offset=20
 ```
 
 20+ filter operators for strings, numbers, dates, arrays, nulls, and nested relation fields. Responses include pagination metadata with `total`, `count`, `limit`, `offset`, and `hasMore`.

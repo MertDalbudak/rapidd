@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "A relação '{field}' não pode ser filtrada por um valor escalar. {hint}",
     "invalid_relation_field": "O campo '{field}' de {modelName} não é uma relação e não pode ser usado como caminho",
     "incomplete_composite_key": "Chave composta incompleta para a relação '{relation}' — faltando: {missing}",
-    "fields_not_writable": "Os seguintes campos de {model} não são graváveis: {fields}"
+    "fields_not_writable": "Os seguintes campos de {model} não são graváveis: {fields}",
+    "field_not_filterable": "O campo '{field}' de {modelName} é restrito e não pode ser usado para filtrar ou ordenar"
 }

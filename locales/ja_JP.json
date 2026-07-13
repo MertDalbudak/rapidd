@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "リレーション '{field}' はスカラー値でフィルターできません。{hint}",
     "invalid_relation_field": "{modelName} のフィールド '{field}' はリレーションではないため、パスとして使用できません",
     "incomplete_composite_key": "リレーション '{relation}' の複合キーが不完全です — 不足: {missing}",
-    "fields_not_writable": "{model} の次のフィールドは書き込みできません: {fields}"
+    "fields_not_writable": "{model} の次のフィールドは書き込みできません: {fields}",
+    "field_not_filterable": "{modelName} のフィールド '{field}' は制限されており、フィルターや並べ替えに使用できません"
 }

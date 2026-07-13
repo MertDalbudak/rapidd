@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "Связь '{field}' нельзя фильтровать скалярным значением. {hint}",
     "invalid_relation_field": "Поле '{field}' модели {modelName} не является связью и не может использоваться как путь",
     "incomplete_composite_key": "Неполный составной ключ для связи '{relation}' — отсутствует: {missing}",
-    "fields_not_writable": "Следующие поля {model} недоступны для записи: {fields}"
+    "fields_not_writable": "Следующие поля {model} недоступны для записи: {fields}",
+    "field_not_filterable": "Поле '{field}' модели {modelName} ограничено и не может использоваться для фильтрации или сортировки"
 }

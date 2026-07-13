@@ -265,8 +265,12 @@ class QueryBuilder {
     /**
      * Parse filter string into Prisma where conditions
      * Supports: numeric/date/string operators, not:, #NULL, not:#NULL
+     *
+     * When a user is provided, fields hidden by the ACL (getOmitFields) are rejected
+     * with 403 — otherwise a client could infer restricted values through filter
+     * probing (e.g. salary=gt:100000) even though the field never renders.
      */
-    filter(q: string): Record<string, unknown> {
+    filter(q: string, user: any = null): Record<string, unknown> {
         if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
@@ -285,23 +289,38 @@ class QueryBuilder {
             const trimmedValue = value?.trim() ?? null;
 
             // Navigate to the correct filter context for nested relations
-            const { filter: filterContext, modelName } = this.#navigateToFilterContext(result, relationPath);
+            const { filter: filterContext, modelName } = this.#navigateToFilterContext(result, relationPath, user);
 
             // Apply the filter value (validates the field against the resolved model)
-            this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName);
+            this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName, user);
         }
 
         return result;
     }
 
     /**
+     * Reject querying (filter/sort) through fields the ACL hides from this user.
+     * The 'application' role bypasses, matching the write-control convention.
+     */
+    #assertQueryableField(fieldName: string, modelName: string, user: any): void {
+        if (!user || user.role === 'application') return;
+        const omit = this.getRelatedOmit(modelName, user);
+        if (omit[fieldName]) {
+            throw new ErrorResponse(403, "field_not_filterable", { field: fieldName, modelName });
+        }
+    }
+
+    /**
      * Navigate through relation path and return the filter context object and current model name
      */
-    #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[]): { filter: Record<string, any>; modelName: string } {
+    #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[], user: any = null): { filter: Record<string, any>; modelName: string } {
         let filter: Record<string, any> = rootFilter;
         let currentModelName = this.name;
 
         for (const relationName of relationPath) {
+            // Omitted relations must not be traversable either
+            this.#assertQueryableField(relationName, currentModelName, user);
+
             // Resolve relations for the model at this depth (supports paths beyond 2 levels)
             const relations: RelationConfig[] = currentModelName === this.name
                 ? this.relatedObjects
@@ -339,7 +358,7 @@ class QueryBuilder {
     /**
      * Apply a filter value to a field in the filter context
      */
-    #applyFilterValue(filter: Record<string, any>, fieldName: string, value: string | null, modelName: string = this.name): void {
+    #applyFilterValue(filter: Record<string, any>, fieldName: string, value: string | null, modelName: string = this.name, user: any = null): void {
         // Resolve field metadata from the correct model
         const fields = modelName === this.name ? this.fields : this.#getRelatedModelFields(modelName);
         let field = fields[fieldName];
@@ -348,6 +367,9 @@ class QueryBuilder {
         if (!field) {
             throw new ErrorResponse(400, "invalid_filter_field", { field: fieldName, modelName });
         }
+
+        // Reject filters on fields the ACL hides from this user (value inference)
+        this.#assertQueryableField(fieldName, modelName, user);
 
         const isRelation = field.kind === 'object';
 
@@ -392,6 +414,8 @@ class QueryBuilder {
             }
             fieldName = fkField;
             field = fields[fkField];
+            // The rewritten FK column must be queryable too
+            this.#assertQueryableField(fieldName, modelName, user);
         }
 
         // Handle not: prefix (negation)
@@ -1403,7 +1427,7 @@ class QueryBuilder {
      * - to-many relations can only be ordered by '_count' (as the terminal segment)
      * - the terminal field must be a scalar on the resolved model
      */
-    sort(sortBy: string, sortOrder: string): Record<string, unknown> {
+    sort(sortBy: string, sortOrder: string, user: any = null): Record<string, unknown> {
         if (typeof sortBy !== 'string') {
             throw new ErrorResponse(400, "sortby_must_be_string", { type: typeof sortBy });
         }
@@ -1418,6 +1442,10 @@ class QueryBuilder {
         let lastRelationIsList = false;
         for (let i = 0; i < relation_chain.length; i++) {
             const relationName = relation_chain[i];
+
+            // Omitted relations must not be traversable for sorting either
+            this.#assertQueryableField(relationName, currentModel, user);
+
             const relations: RelationConfig[] = currentModel === this.name
                 ? this.relatedObjects
                 : dmmf.buildRelationships(currentModel);
@@ -1453,6 +1481,9 @@ class QueryBuilder {
             if (!field || field.kind === 'object') {
                 throw new ErrorResponse(400, "invalid_sort_field", { sortBy, field: field_name, modelName: currentModel });
             }
+
+            // Sorting by an ACL-hidden field leaks value ordering — reject
+            this.#assertQueryableField(field_name, currentModel, user);
         }
 
         const sort: Record<string, any> = {};

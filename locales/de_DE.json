@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "Relation '{field}' kann nicht mit einem Skalarwert gefiltert werden. {hint}",
     "invalid_relation_field": "Feld '{field}' von {modelName} ist keine Relation und kann nicht als Pfad verwendet werden",
     "incomplete_composite_key": "Unvollständiger zusammengesetzter Schlüssel für Relation '{relation}' — fehlend: {missing}",
-    "fields_not_writable": "Die folgenden Felder von {model} sind nicht beschreibbar: {fields}"
+    "fields_not_writable": "Die folgenden Felder von {model} sind nicht beschreibbar: {fields}",
+    "field_not_filterable": "Das Feld '{field}' von {modelName} ist eingeschränkt und kann nicht zum Filtern oder Sortieren verwendet werden"
 }

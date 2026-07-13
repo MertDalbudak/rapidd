@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "La relation '{field}' ne peut pas être filtrée par une valeur scalaire. {hint}",
     "invalid_relation_field": "Le champ '{field}' de {modelName} n'est pas une relation et ne peut pas servir de chemin",
     "incomplete_composite_key": "Clé composite incomplète pour la relation '{relation}' — manquant : {missing}",
-    "fields_not_writable": "Les champs suivants de {model} ne sont pas modifiables : {fields}"
+    "fields_not_writable": "Les champs suivants de {model} ne sont pas modifiables : {fields}",
+    "field_not_filterable": "Le champ '{field}' de {modelName} est restreint et ne peut pas être utilisé pour filtrer ou trier"
 }

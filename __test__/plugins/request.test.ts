@@ -21,8 +21,9 @@ describe('Request Plugin', () => {
             const res = await app.inject({ method: 'GET', url: '/items' });
             const body = JSON.parse(res.payload);
             expect(body.include).toBe('');
-            expect(body.sortBy).toBe('id');
-            expect(body.sortOrder).toBe('asc');
+            // No default sort — null means "let the DB decide"
+            expect(body.sortBy).toBeNull();
+            expect(body.sortOrder).toBeNull();
             expect(body.fields).toBeNull();
             expect(body.limit).toBe(25);
             expect(body.offset).toBe(0);
@@ -37,7 +38,7 @@ describe('Request Plugin', () => {
 
             const res = await app.inject({
                 method: 'GET',
-                url: '/items?include=tags&sortBy=name&sortOrder=desc&limit=10&offset=20&totalResults=true',
+                url: '/items?include=tags&sort=name:desc&limit=10&offset=20&totalResults=true',
             });
             const body = JSON.parse(res.payload);
             expect(body.include).toBe('tags');
@@ -46,6 +47,46 @@ describe('Request Plugin', () => {
             expect(body.limit).toBe(10);
             expect(body.offset).toBe(20);
             expect(body.totalResults).toBe(true);
+        });
+
+        it('should default the order to asc when sort has no colon', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => req.parseListQuery());
+
+            const res = await app.inject({ method: 'GET', url: '/items?sort=name' });
+            const body = JSON.parse(res.payload);
+            expect(body.sortBy).toBe('name');
+            expect(body.sortOrder).toBe('asc');
+        });
+
+        it('should keep relation paths intact (last colon separates the order)', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => req.parseListQuery());
+
+            const res = await app.inject({ method: 'GET', url: '/items?sort=user.name:desc' });
+            const body = JSON.parse(res.payload);
+            expect(body.sortBy).toBe('user.name');
+            expect(body.sortOrder).toBe('desc');
+        });
+
+        it('should ignore legacy sortBy/sortOrder params', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => req.parseListQuery());
+
+            const res = await app.inject({ method: 'GET', url: '/items?sortBy=name&sortOrder=desc' });
+            const body = JSON.parse(res.payload);
+            expect(body.sortBy).toBeNull();
+            expect(body.sortOrder).toBeNull();
+        });
+
+        it('should pass an invalid order through for downstream rejection', async () => {
+            const app = await buildApp();
+            app.get('/items', async (req) => req.parseListQuery());
+
+            const res = await app.inject({ method: 'GET', url: '/items?sort=name:bogus' });
+            const body = JSON.parse(res.payload);
+            expect(body.sortBy).toBe('name');
+            expect(body.sortOrder).toBe('bogus');
         });
 
         it('should accept ?filter= as a documented alias for ?q=', async () => {

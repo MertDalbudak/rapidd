@@ -90,5 +90,6 @@
     "cannot_filter_relation_directly": "La relazione '{field}' non può essere filtrata con un valore scalare. {hint}",
     "invalid_relation_field": "Il campo '{field}' di {modelName} non è una relazione e non può essere usato come percorso",
     "incomplete_composite_key": "Chiave composita incompleta per la relazione '{relation}' — mancante: {missing}",
-    "fields_not_writable": "I seguenti campi di {model} non sono scrivibili: {fields}"
+    "fields_not_writable": "I seguenti campi di {model} non sono scrivibili: {fields}",
+    "field_not_filterable": "Il campo '{field}' di {modelName} è riservato e non può essere usato per filtrare o ordinare"
 }

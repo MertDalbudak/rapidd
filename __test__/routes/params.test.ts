@@ -224,9 +224,9 @@ function registerProductRoutes(app: FastifyInstance, user: any) {
 
     app.get('/api/v1/products', async (request: FastifyRequest, reply: FastifyReply) => {
         try {
-            const { q = {}, include = '', limit = '25', offset = '0', sortBy = 'id', sortOrder = 'asc', fields = null } = request.query as Record<string, string>;
+            // Mirror generated routes: parse the list query via the request plugin
             const model = new Model('products', { user: (request as any).user });
-            const results = await model.getMany({ q, include, limit: Number(limit), offset: Number(offset), sortBy, sortOrder, fields });
+            const results = await model.getMany(request.parseListQuery());
             return reply.sendList(results.data, results.meta);
         } catch (error: any) {
             const response = QueryBuilder.errorHandler(error);
@@ -288,35 +288,35 @@ describe('limit parameter', () => {
     });
 
     it('should default to 25 when not provided', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(25);
     });
 
     it('should use the provided limit value', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?limit=10' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?limit=10&totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(10);
     });
 
     it('should accept limit=1 (minimum)', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?limit=1' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?limit=1&totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(1);
     });
 
     it('should cap limit at API_RESULT_LIMIT (500)', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?limit=1000' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?limit=1000&totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(500);
     });
 
     it('should cap limit=500 exactly at the limit', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?limit=500' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?limit=500&totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(500);
@@ -428,7 +428,7 @@ describe('offset parameter', () => {
         mockPrismaModel.findMany.mockResolvedValue([{ id: 11 }]);
         mockPrismaModel.count.mockResolvedValue(50);
 
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?limit=10&offset=10' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?limit=10&offset=10&totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(10);
@@ -462,48 +462,48 @@ describe('sortBy parameter', () => {
         mockPrismaModel.count.mockResolvedValue(0);
     });
 
-    it('should default to id when not provided', async () => {
+    it('should apply no ordering when sort is not provided (no default sort)', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ id: 'asc' });
+        expect(call.orderBy).toBeUndefined();
     });
 
     it('should sort by a scalar field', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=name' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=name' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ name: 'asc' });
     });
 
     it('should sort by price field', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=price' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=price' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ price: 'asc' });
     });
 
     it('should sort by createdAt field', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=createdAt' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=createdAt' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ createdAt: 'asc' });
     });
 
     it('should sort by relation field (dot notation)', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=category.name' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=category.name' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ category: { name: 'asc' } });
     });
 
     it('should return 400 for non-existent sortBy field', async () => {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=nonexistent' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sort=nonexistent' });
         expect(response.statusCode).toBe(400);
     });
 
     it('should handle sortBy with whitespace', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=%20name%20' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=%20name%20' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ name: 'asc' });
@@ -531,51 +531,59 @@ describe('sortOrder parameter', () => {
         mockPrismaModel.count.mockResolvedValue(0);
     });
 
-    it('should default to asc when not provided', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products' });
+    it('should default the order to asc when sort names only a field', async () => {
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=name' });
+
+        const call = mockPrismaModel.findMany.mock.calls[0][0];
+        expect(call.orderBy).toEqual({ name: 'asc' });
+    });
+
+    it('should sort ascending when sort=id:asc', async () => {
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=id:asc' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ id: 'asc' });
     });
 
-    it('should sort ascending when sortOrder=asc', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=asc' });
-
-        const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ id: 'asc' });
-    });
-
-    it('should sort descending when sortOrder=desc', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=desc' });
+    it('should sort descending when sort=id:desc', async () => {
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=id:desc' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ id: 'desc' });
     });
 
-    it('should work with sortBy + sortOrder=desc', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=price&sortOrder=desc' });
+    it('should combine field and order in one param (sort=price:desc)', async () => {
+        await app.inject({ method: 'GET', url: '/api/v1/products?sort=price:desc' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.orderBy).toEqual({ price: 'desc' });
     });
 
+    it('should ignore legacy sortBy/sortOrder params', async () => {
+        await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=price&sortOrder=desc' });
+
+        const call = mockPrismaModel.findMany.mock.calls[0][0];
+        // Legacy params are not supported — no ordering is applied
+        expect(call.orderBy).toBeUndefined();
+    });
+
     it('should return 400 for invalid sortOrder value', async () => {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=random' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sort=id:random' });
         expect(response.statusCode).toBe(400);
     });
 
     it('should return 400 for uppercase ASC', async () => {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=ASC' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sort=id:ASC' });
         expect(response.statusCode).toBe(400);
     });
 
     it('should return 400 for uppercase DESC', async () => {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=DESC' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sort=id:DESC' });
         expect(response.statusCode).toBe(400);
     });
 
-    it('should return 400 for empty sortOrder', async () => {
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sortOrder=' });
+    it('should return 400 for an empty order after the colon (sort=name:)', async () => {
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?sort=name:' });
         expect(response.statusCode).toBe(400);
     });
 });
@@ -1094,7 +1102,7 @@ describe('Combined query parameters', () => {
 
         const response = await app.inject({
             method: 'GET',
-            url: '/api/v1/products?q=name%3D%25Widget%25&include=category&fields=id,name,category.name&limit=10&offset=5&sortBy=price&sortOrder=desc',
+            url: '/api/v1/products?q=name%3D%25Widget%25&include=category&fields=id,name,category.name&limit=10&offset=5&sort=price:desc&totalResults=true',
         });
 
         expect(response.statusCode).toBe(200);
@@ -1126,7 +1134,7 @@ describe('Combined query parameters', () => {
 
         await app.inject({
             method: 'GET',
-            url: '/api/v1/products?q=price%3Dgt:10&include=tags&sortBy=name&sortOrder=asc',
+            url: '/api/v1/products?q=price%3Dgt:10&include=tags&sort=name:asc',
         });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
@@ -1139,7 +1147,7 @@ describe('Combined query parameters', () => {
     it('should handle pagination + sorting only', async () => {
         await app.inject({
             method: 'GET',
-            url: '/api/v1/products?limit=3&offset=9&sortBy=createdAt&sortOrder=desc',
+            url: '/api/v1/products?limit=3&offset=9&sort=createdAt:desc&totalResults=true',
         });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
@@ -1186,7 +1194,7 @@ describe('Response format and meta', () => {
         ]);
         mockPrismaModel.count.mockResolvedValue(2);
 
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?totalResults=true' });
 
         expect(response.statusCode).toBe(200);
         const body = JSON.parse(response.payload);
@@ -1204,7 +1212,7 @@ describe('Response format and meta', () => {
         mockPrismaModel.findMany.mockResolvedValue([]);
         mockPrismaModel.count.mockResolvedValue(0);
 
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?totalResults=true' });
         const body = JSON.parse(response.payload);
         expect(body.data).toEqual([]);
         expect(body.meta.total).toBe(0);
@@ -1215,7 +1223,7 @@ describe('Response format and meta', () => {
         mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }]);
         mockPrismaModel.count.mockResolvedValue(100);
 
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products?limit=3' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products?limit=3&totalResults=true' });
         const body = JSON.parse(response.payload);
         expect(body.meta.count).toBe(3);
         expect(body.meta.total).toBe(100);
@@ -1273,7 +1281,7 @@ describe('ACL integration with query parameters', () => {
     });
 
     it('should apply access filter for non-admin on list query', async () => {
-        await app.inject({ method: 'GET', url: '/api/v1/products' });
+        await app.inject({ method: 'GET', url: '/api/v1/products?totalResults=true' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.where).toBeDefined();

@@ -285,8 +285,9 @@ export interface GetManyOptions {
     include?: string | Record<string, any>;
     limit?: number;
     offset?: number;
-    sortBy?: string;
-    sortOrder?: string;
+    /** null/undefined = no ordering (there is deliberately no default sort) */
+    sortBy?: string | null;
+    sortOrder?: string | null;
     fields?: string | null;
     pagination?: { page: number; pageSize: number };
     totalResults?: boolean;

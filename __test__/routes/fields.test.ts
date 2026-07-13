@@ -393,7 +393,7 @@ describe('Fields parameter - Positive tests', () => {
 
             await app.inject({
                 method: 'GET',
-                url: '/api/v1/items?fields=id,name&sortBy=name&sortOrder=desc',
+                url: '/api/v1/items?fields=id,name&sort=name:desc',
             });
 
             const findManyCall = mockPrismaModel.findMany.mock.calls[0][0];
@@ -474,7 +474,7 @@ describe('Fields parameter - Positive tests', () => {
 
             const response = await app.inject({
                 method: 'GET',
-                url: '/api/v1/items?fields=id,name&include=category&limit=5&offset=10&sortBy=name&sortOrder=desc',
+                url: '/api/v1/items?fields=id,name&include=category&limit=5&offset=10&sort=name:desc',
             });
 
             expect(response.statusCode).toBe(200);
