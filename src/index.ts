@@ -30,6 +30,9 @@ export {
 
 export * as dmmf from './core/dmmf';
 
+// ── System / default user ────────────────────────────────────────────────────
+export { createSystemUser, isSystemUser, getDefaultUser } from './core/user';
+
 // ── Authentication ───────────────────────────────────────────────────────────
 export { Auth } from './auth/Auth';
 export { SessionStoreManager, createStore } from './auth/stores';

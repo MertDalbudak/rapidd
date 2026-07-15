@@ -94,12 +94,13 @@ jest.mock('../../src/core/errors', () => {
 });
 
 import { QueryBuilder } from '../../src/orm/QueryBuilder';
+import { createSystemUser } from '../../src/core/user';
 
 describe('QueryBuilder boolean groups — OR()/AND()', () => {
     let qb: QueryBuilder;
     const admin = { id: 1, role: 'admin' };
     const user = { id: 42, role: 'user' };
-    const system = { id: 'sys', role: 'application' };
+    const system = createSystemUser({ id: 'sys' });
 
     beforeEach(() => {
         qb = new QueryBuilder('students');

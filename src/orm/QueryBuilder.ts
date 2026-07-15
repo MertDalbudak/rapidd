@@ -2,6 +2,7 @@ import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
+import { isSystemUser } from '../core/user';
 import * as dmmf from '../core/dmmf';
 import type {
     RelationConfig,
@@ -435,10 +436,10 @@ class QueryBuilder {
 
     /**
      * Reject querying (filter/sort) through fields the ACL hides from this user.
-     * The 'application' role bypasses, matching the write-control convention.
+     * System users bypass, matching the write-control convention.
      */
     #assertQueryableField(fieldName: string, modelName: string, user: any): void {
-        if (!user || user.role === 'application') return;
+        if (!user || isSystemUser(user)) return;
         const omit = this.getRelatedOmit(modelName, user);
         if (omit[fieldName]) {
             throw new ErrorResponse(403, "field_not_filterable", { field: fieldName, modelName });
@@ -927,6 +928,10 @@ class QueryBuilder {
                 case 'between:': {
                     const parts = numValue.split(';').map((v: string) => v.trim());
                     const [startStr, endStr] = parts;
+                    // Require exactly two values — a clean 400, mirroring not:between: (was a 500 crash)
+                    if (!startStr || !endStr) {
+                        throw new ErrorResponse(400, "between_requires_two_values");
+                    }
                     const start = this.#parseNumericValue(startStr);
                     const end = this.#parseNumericValue(endStr);
                     if (start == null || end == null) return null;
@@ -945,6 +950,7 @@ class QueryBuilder {
      * Parse a numeric string, returning BigInt for integers beyond safe range
      */
     #parseNumericValue(value: string): number | bigint | null {
+        if (value == null) return null;
         if (value.includes('.')) {
             const num = parseFloat(value);
             return isNaN(num) ? null : num;
@@ -1086,8 +1092,9 @@ class QueryBuilder {
             hasContent = true;
         }
 
-        // Check ACL access for the related model
-        if (relation.object && acl.model[relation.object]?.getAccessFilter) {
+        // Check ACL access for the related model (system users bypass — never run the
+        // app's access-filter builder with the null-id system identity)
+        if (!isSystemUser(user) && relation.object && acl.model[relation.object]?.getAccessFilter) {
             const accessFilter = acl.model[relation.object].getAccessFilter!(user);
 
             // ACL explicitly denies access — skip this relation entirely
@@ -1316,6 +1323,9 @@ class QueryBuilder {
      * Get omit fields for a related object based on user role
      */
     getRelatedOmit(relatedModelName: string, user: any): Record<string, boolean> {
+        // System users bypass ACL — including read-side field hiding, consistent with every
+        // other ACL surface (access/update/delete filters, canCreate, writable, filter/sort omit).
+        if (isSystemUser(user)) return {};
         const acl = getAcl();
         if (acl.model[relatedModelName]?.getOmitFields) {
             const omit_fields = acl.model[relatedModelName].getOmitFields!(user);
@@ -1661,10 +1671,10 @@ class QueryBuilder {
      * Transforms nested relation data into Prisma create/connect syntax
      * Does NOT mutate the input data - returns a new transformed object
      *
-     * SECURITY NOTE: when `user` is null, ALL ACL checks (canCreate, omit, writable
-     * whitelist, connect access filters) are skipped. Model always passes a user
-     * (defaulting to the application role) — only pass null deliberately for trusted
-     * internal transformations.
+     * SECURITY NOTE: when `user` is null or a system user, ALL ACL checks (canCreate,
+     * omit, writable whitelist, connect access filters) are skipped. Model always passes a
+     * user (defaulting to the framework system user, which bypasses ACL) — only pass null
+     * deliberately for trusted internal transformations.
      */
     create(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
         let result: Record<string, any> = { ...data };
@@ -2111,10 +2121,10 @@ class QueryBuilder {
 
     /**
      * Resolve the ACL writable-fields whitelist for a user.
-     * Returns null when unrestricted (no hook, no user, application role, or hook returned null).
+     * Returns null when unrestricted (no hook, no user, system user, or hook returned null).
      */
     #getWritableFieldsSet(modelAcl: any, user: any): Set<string> | null {
-        if (!user || user.role === 'application' || !modelAcl?.getWritableFields) {
+        if (!user || isSystemUser(user) || !modelAcl?.getWritableFields) {
             return null;
         }
         const list = modelAcl.getWritableFields(user);
@@ -2155,7 +2165,8 @@ class QueryBuilder {
      * Assert the user may create every item (per-item canCreate check)
      */
     #assertCanCreateAll(items: Record<string, any>[], relatedAcl: any, user: any, modelName: string): void {
-        if (!user || !relatedAcl?.canCreate) return;
+        // System users bypass ACL — consistent with Model.canCreate and every other bypass site.
+        if (!user || isSystemUser(user) || !relatedAcl?.canCreate) return;
         for (const item of items) {
             if (!relatedAcl.canCreate(user, item)) {
                 throw new ErrorResponse(403, "no_permission_to_create", { model: modelName });
@@ -2175,20 +2186,39 @@ class QueryBuilder {
         omitFields: string[];
     } {
         const modelAcl = getAcl().model[modelName];
+        // System users bypass ACL — never invoke the app hooks with the null-id identity.
+        const active = user && !isSystemUser(user);
         // eslint-disable-next-line @typescript-eslint/no-this-alias
         const self = this;
         return {
             modelAcl,
             get accessFilter() {
-                return user && modelAcl?.getAccessFilter ? self.cleanFilter(modelAcl.getAccessFilter(user)) : null;
+                return active && modelAcl?.getAccessFilter ? self.cleanFilter(modelAcl.getAccessFilter(user)) : null;
             },
             get updateFilter() {
-                return user && modelAcl?.getUpdateFilter ? self.cleanFilter(modelAcl.getUpdateFilter(user)) : null;
+                return active && modelAcl?.getUpdateFilter ? self.cleanFilter(modelAcl.getUpdateFilter(user)) : null;
             },
             get omitFields() {
-                return user && modelAcl?.getOmitFields ? (modelAcl.getOmitFields(user) ?? []) : [];
+                if (!active || !modelAcl?.getOmitFields) return [];
+                const list: string[] = modelAcl.getOmitFields(user) ?? [];
+                // getOmitFields hides fields from READ responses. When stripping them from a
+                // WRITE payload, keep write-only fields (required, no default) — stripping a
+                // field the database mandates guarantees a failed insert. The archetype is
+                // `password`: hidden on read, required on write. Read-side omit is unaffected
+                // (it uses getRelatedOmit, not this getter).
+                return list.filter((f: string) => !self.#isWriteOnlyField(modelName, f));
             },
         };
+    }
+
+    /**
+     * A field the database requires on insert with no default — write-only when also hidden
+     * by getOmitFields (e.g. password). Such fields must survive write-payload omit-stripping.
+     */
+    #isWriteOnlyField(modelName: string, fieldName: string): boolean {
+        const fields = modelName === this.name ? this.fields : this.#getRelatedModelFields(modelName);
+        const f = fields[fieldName];
+        return !!f && f.kind === 'scalar' && f.isRequired === true && f.hasDefaultValue !== true && !f.isId;
     }
 
     /**

@@ -19,6 +19,10 @@ jest.mock('../../src/core/prisma', () => ({
             secret_docs: {
                 getAccessFilter: () => false,
             },
+            message_attachments: {
+                // role-gated nested create target — used to test the system-user bypass on nested creates
+                canCreate: (user: any) => user?.role === 'admin',
+            },
         },
     }),
 }));
@@ -171,6 +175,7 @@ jest.mock('../../src/core/errors', () => {
 });
 
 import { QueryBuilder } from '../../src/orm/QueryBuilder';
+import { createSystemUser } from '../../src/core/user';
 
 describe('QueryBuilder (TypeScript)', () => {
     let qb: QueryBuilder;
@@ -204,6 +209,31 @@ describe('QueryBuilder (TypeScript)', () => {
     describe('filter()', () => {
         it('should return empty object for empty input', () => {
             expect(qb.filter('')).toEqual({});
+        });
+
+        it('should 400 (not 500 crash) on numeric between: with a single value', () => {
+            expect(() => qb.filter('userId=between:40')).toThrow('between_requires_two_values');
+        });
+
+        it('should accept numeric between: with two values', () => {
+            const r: any = qb.filter('userId=between:40;60');
+            expect(r.userId).toEqual({ gte: 40, lte: 60 });
+        });
+
+        it('system user bypasses read-side omit (getRelatedOmit returns {})', () => {
+            // internal_notes is omitted for non-admins; a system user should see it (full ACL bypass)
+            expect(qb.getRelatedOmit('messages', createSystemUser())).toEqual({});
+            expect(qb.getRelatedOmit('messages', { id: 1, role: 'user' })).toEqual({ internal_notes: true });
+        });
+
+        it('system user bypasses canCreate on NESTED relation creates', () => {
+            // message_attachments.canCreate is admin-only; system user must not be blocked
+            expect(() => qb.create({ content: 'x', attachments: [{ url: 'a' }] }, createSystemUser())).not.toThrow();
+        });
+
+        it('non-admin is still blocked by canCreate on nested creates', () => {
+            expect(() => qb.create({ content: 'x', attachments: [{ url: 'a' }] }, { id: 1, role: 'user' }))
+                .toThrow('no_permission_to_create');
         });
 
         it('should parse simple key-value filters', () => {
@@ -719,7 +749,7 @@ describe('QueryBuilder (TypeScript)', () => {
         });
 
         it('should bypass enforcement for the application role', () => {
-            const result: any = qb.filter('internal_notes=x', { id: 'system', role: 'application' });
+            const result: any = qb.filter('internal_notes=x', createSystemUser());
             expect(result.internal_notes).toBeDefined();
         });
 
@@ -832,7 +862,7 @@ describe('QueryBuilder (TypeScript)', () => {
         });
 
         it('should bypass the whitelist for the application role', () => {
-            const result: any = qb.update(1, { content: 'x', createdAt: '2024-01-01' }, { id: 'system', role: 'application' });
+            const result: any = qb.update(1, { content: 'x', createdAt: '2024-01-01' }, createSystemUser());
             expect(result.content).toBe('x');
             expect(result.createdAt).toBe('2024-01-01');
         });

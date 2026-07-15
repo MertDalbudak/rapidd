@@ -197,7 +197,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
             if (!request.user) {
                 throw new ErrorResponse(401, 'authentication_required');
             }
-            const userRole = (request.user.role as string)?.toLowerCase();
+            const userRole = request.user.role?.toLowerCase();
             if (!userRole || !allowedRoles.includes(userRole)) {
                 throw new ErrorResponse(403, 'insufficient_permissions');
             }

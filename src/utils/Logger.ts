@@ -218,7 +218,7 @@ export const Logger = {
         time: number;
         ip?: string;
         contentLength?: string;
-        userId?: string | number;
+        userId?: string | number | null;
         userAgent?: string;
         requestHeaders?: Record<string, unknown>;
         requestBody?: unknown;

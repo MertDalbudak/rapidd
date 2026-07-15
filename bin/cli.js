@@ -52,13 +52,17 @@ function createProject() {
     const SKIP = new Set([
         'node_modules', 'dist', '__test__', '.github', '.claude', 'wiki',
         'bin', '.git', 'package-lock.json', '.env', 'prisma/client',
+        // Generated / app-specific artifacts — `rapidd build` produces these from the
+        // user's own schema; never seed a fresh project with the template's dev copies.
+        'models',   // src/models/*
+        'acl.ts',   // src/config/acl.ts (build regenerates a permissive scaffold)
+        'user.ts',  // src/config/user.ts (build regenerates)
     ]);
 
     const FILES = [
         'src/',
         'config/',
         'locales/',
-        'routes/',
         'templates/',
         'public/',
         'prisma/schema.prisma',

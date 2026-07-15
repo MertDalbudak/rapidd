@@ -2,6 +2,7 @@ import { QueryBuilder, PRISMA_WRITE_OPS } from './QueryBuilder';
 import { prisma, prismaTransaction, getAcl } from '../core/prisma';
 import { modelMiddleware } from '../core/middleware';
 import { ErrorResponse } from '../core/errors';
+import { isSystemUser, createSystemUser, getDefaultUser } from '../core/user';
 import * as dmmf from '../core/dmmf';
 import type { RapiddUser, ModelOptions, GetManyOptions, GetManyResult, UpsertManyResult, UpsertManyOptions, ModelAcl, MiddlewareContext } from '../types';
 
@@ -54,7 +55,10 @@ class Model {
         const aclConfig = getAcl();
         this.acl = aclConfig.model[name] || {};
         this.options = options || {};
-        this.user = this.options.user || { id: 'system', role: 'application' };
+        // Resolve the acting user: explicit > app-configured default (src/config/user.ts) >
+        // framework system user (bypasses ACL). No hardcoded id/role — the old
+        // { id: 'system', role: 'application' } assumed a string PK and a magic role value.
+        this.user = this.options.user ?? getDefaultUser() ?? createSystemUser();
         this.user_id = this.user ? this.user.id : null;
     }
 
@@ -407,10 +411,12 @@ class Model {
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object)
         const transformedData = this._queryCreate(createData);
 
-        // CREATE
+        // CREATE — apply the ACL omit clause so write responses don't leak hidden fields (e.g. password)
+        const createOmit = this._omit();
         const result = await this.prisma.create({
             'data': transformedData,
             'include': this.include('ALL'),
+            ...(createOmit && Object.keys(createOmit).length > 0 ? { omit: createOmit } : {}),
             ...(beforeCtx.options || options)
         });
 
@@ -450,10 +456,12 @@ class Model {
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object)
         const transformedData = this._queryUpdate(targetId as string | number, updateData);
 
+        const updateOmit = this._omit();
         const result = await this.prisma.update({
             'where': this.#mergeAclIntoUniqueWhere(this.buildWhereId(targetId), updateFilter),
             'data': transformedData,
             'include': this.include('ALL'),
+            ...(updateOmit && Object.keys(updateOmit).length > 0 ? { omit: updateOmit } : {}),
             ...(beforeCtx.options || options)
         });
 
@@ -507,11 +515,13 @@ class Model {
         const whereId = this.buildWhereUniqueKey(targetKey, upsertData);
         const whereClause = this.#mergeAclIntoUniqueWhere(whereId, updateFilter);
 
+        const upsertOmit = this._omit();
         const result = await this.prisma.upsert({
             'where': whereClause,
             'create': createData,
             'update': updateData,
             'include': this.include('ALL'),
+            ...(upsertOmit && Object.keys(upsertOmit).length > 0 ? { omit: upsertOmit } : {}),
             ...(beforeCtx.options || options)
         });
 
@@ -705,7 +715,7 @@ class Model {
     /**
      * Internal method to count records matching a filter
      */
-    _count = async (q: Record<string, any> = {}): Promise<number> => {
+    _count = async (q: string | Record<string, any> = {}): Promise<number> => {
         // Execute before middleware
         const beforeCtx = await this._executeMiddleware('before', 'count', { query: q });
 
@@ -829,9 +839,13 @@ class Model {
     }
 
     /**
-     * Count records matching a filter
+     * Count records matching a filter.
+     * @param q a filter STRING using the same query syntax as getMany's `q` (e.g. "status=active").
+     *   Note: unlike getMany you pass the string DIRECTLY, not wrapped as `{ q }`. A non-string
+     *   is treated as "no filter" (counts all rows the ACL permits). The model's ACL access
+     *   filter is always AND-combined in.
      */
-    async count(q: Record<string, any> = {}): Promise<number> {
+    async count(q: string | Record<string, any> = {}): Promise<number> {
         return await this._count(q);
     }
 
@@ -900,11 +914,14 @@ class Model {
 
     /**
      * Get access filter for read operations
-     * Returns empty filter for 'application' role or when ACL returns true
+     * Returns empty filter for a system user or when ACL returns true
      */
     getAccessFilter(): Record<string, any> {
+        // Bypass before evaluating the ACL callback — a system user has a null id, and
+        // running the app's filter builder with it is both wasteful and a crash risk.
+        if (isSystemUser(this.user)) return {};
         const filter = this._getAccessFilter();
-        if (this.user.role == "application" || filter === true) {
+        if (filter === true) {
             return {};
         }
         if (filter === false) {
@@ -920,7 +937,7 @@ class Model {
      * Check if user has permission to create records
      */
     canCreate(data?: Record<string, any>): boolean {
-        if (this.user.role == "application") return true;
+        if (isSystemUser(this.user)) return true;
         return this._canCreate(data);
     }
 
@@ -928,7 +945,7 @@ class Model {
      * Get the writable-fields whitelist for this user, or null when unrestricted
      */
     getWritableFields(): string[] | null {
-        if (this.user.role == "application") return null;
+        if (isSystemUser(this.user)) return null;
         const list = this.acl.getWritableFields?.(this.user);
         return Array.isArray(list) ? list : null;
     }
@@ -944,7 +961,7 @@ class Model {
      * these fields instead, so internal backend logic can still write them.
      */
     assertWritable(data: Record<string, any>): void {
-        if (this.user.role == "application") return;
+        if (isSystemUser(this.user)) return;
         if (!data || typeof data !== 'object') return;
         const violations: string[] = [];
         this.#collectWriteViolations(this.name, data, violations, '', 0, false);
@@ -973,7 +990,15 @@ class Model {
         if (Object.keys(data).some((k: string) => (PRISMA_WRITE_OPS as readonly string[]).includes(k))) return;
 
         const modelAcl = getAcl().model[modelName] || {};
-        const omit = new Set<string>(modelAcl.getOmitFields?.(this.user) ?? []);
+        const modelFields = dmmf.getFields(modelName);
+        // Omit hides fields on read; when validating a WRITE payload, keep write-only fields
+        // (required, no default — e.g. password) so clients can still create such records.
+        const omit = new Set<string>(
+            (modelAcl.getOmitFields?.(this.user) ?? []).filter((f: string) => {
+                const fd = modelFields[f];
+                return !(fd && fd.kind === 'scalar' && fd.isRequired === true && fd.hasDefaultValue !== true && !fd.isId);
+            })
+        );
         const writableList = modelAcl.getWritableFields?.(this.user);
         const writable = Array.isArray(writableList) ? new Set<string>(writableList) : null;
 
@@ -1010,11 +1035,12 @@ class Model {
 
     /**
      * Get filter for update operations
-     * Returns empty filter for 'application' role or when ACL returns true
+     * Returns empty filter for a system user or when ACL returns true
      */
     getUpdateFilter(): Record<string, any> | false {
+        if (isSystemUser(this.user)) return {};
         const filter = this._getUpdateFilter();
-        if (this.user.role == "application" || filter === true) {
+        if (filter === true) {
             return {};
         }
         return filter;
@@ -1022,11 +1048,12 @@ class Model {
 
     /**
      * Get filter for delete operations
-     * Returns empty filter for 'application' role or when ACL returns true
+     * Returns empty filter for a system user or when ACL returns true
      */
     getDeleteFilter(): Record<string, any> | false {
+        if (isSystemUser(this.user)) return {};
         const filter = this._getDeleteFilter();
-        if (this.user.role == "application" || filter === true) {
+        if (filter === true) {
             return {};
         }
         return filter;

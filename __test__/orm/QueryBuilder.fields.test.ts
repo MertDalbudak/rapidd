@@ -561,4 +561,20 @@ describe('QueryBuilder - buildFieldSelection()', () => {
             expect(result).not.toHaveProperty('omit');
         });
     });
+
+    describe('write-only field carve-out (omit vs create)', () => {
+        it('should NOT strip a required-no-default omitted field (password) from create', () => {
+            // users omits password on read, but password is required-with-no-default → must be writable
+            const usersQb = new QueryBuilder('users');
+            const result: any = usersQb.create({ name: 'A', email: 'a@x.com', password: 'secret' }, normalUser);
+            expect(result.password).toBe('secret');
+        });
+
+        it('should still strip an optional omitted field from create', () => {
+            // 'internal_notes' is optional and omitted for non-admins → stripped from writes
+            const result: any = qb.create({ content: 'hi', internal_notes: 'secret' }, normalUser);
+            expect(result.content).toBe('hi');
+            expect(result.internal_notes).toBeUndefined();
+        });
+    });
 });

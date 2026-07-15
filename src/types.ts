@@ -5,8 +5,10 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 // =====================================================
 
 export interface RapiddUser {
-    id: string | number;
-    role: string;
+    // id and role are null only for the framework system user (identity-less, bypasses ACL).
+    // Real users — the only ones ACL callbacks ever receive — always have both.
+    id: string | number | null;
+    role: string | null;
     [key: string]: unknown;
 }
 
@@ -145,6 +147,7 @@ export interface DMMFField {
     isRequired: boolean;
     isId: boolean;
     isUnique: boolean;
+    hasDefaultValue?: boolean;
     relationFromFields?: string[];
     relationToFields?: string[];
     relationName?: string;

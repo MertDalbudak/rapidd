@@ -68,6 +68,7 @@ import { Model } from '../../src/orm/Model';
 import { modelMiddleware } from '../../src/core/middleware';
 import { getAcl } from '../../src/core/prisma';
 import { ErrorResponse } from '../../src/core/errors';
+import { createSystemUser, isSystemUser } from '../../src/core/user';
 
 describe('Model', () => {
     let model: Model;
@@ -91,9 +92,17 @@ describe('Model', () => {
             expect(model.user_id).toBe(1);
         });
 
-        it('should default to system user when no options', () => {
+        it('should default to a (non-forgeable) identity-less system user when no options', () => {
             const m = new Model('posts');
-            expect(m.user).toEqual({ id: 'system', role: 'application' });
+            expect(isSystemUser(m.user)).toBe(true);
+            // No fabricated PK / magic role — both are null
+            expect(m.user.id).toBeNull();
+            expect(m.user.role).toBeNull();
+        });
+
+        it('should NOT treat role="application" as a system bypass anymore', () => {
+            const m = new Model('posts', { user: { id: 1, role: 'application' } });
+            expect(isSystemUser(m.user)).toBe(false);
         });
 
         it('should load ACL for model', () => {
@@ -178,8 +187,8 @@ describe('Model', () => {
             expect(model.canCreate()).toBe(true);
         });
 
-        it('should return true for application role', () => {
-            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+        it('should return true for a system user', () => {
+            const m = new Model('posts', { user: createSystemUser({ id: 'sys' }) });
             expect(m.canCreate()).toBe(true);
         });
 
@@ -203,9 +212,18 @@ describe('Model', () => {
             expect(model.getAccessFilter()).toEqual({});
         });
 
-        it('should return empty object for application role', () => {
-            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+        it('should return empty object for a system user', () => {
+            const m = new Model('posts', { user: createSystemUser({ id: 'sys' }) });
             expect(m.getAccessFilter()).toEqual({});
+        });
+
+        it('should NOT invoke the ACL callback for a system user (null-id safe)', () => {
+            const getAccessFilter = jest.fn((u: any) => ({ ownerId: u.id.toUpperCase() })); // would throw on null id
+            (getAcl as jest.Mock).mockReturnValue({ model: { posts: { getAccessFilter } } });
+            const m = new Model('posts', { user: createSystemUser() });
+            expect(() => m.getAccessFilter()).not.toThrow();
+            expect(m.getAccessFilter()).toEqual({});
+            expect(getAccessFilter).not.toHaveBeenCalled();
         });
 
         it('should return empty when filter is true', () => {
@@ -241,8 +259,8 @@ describe('Model', () => {
             expect(m.getUpdateFilter()).toBeUndefined();
         });
 
-        it('should return empty object for application role', () => {
-            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+        it('should return empty object for a system user', () => {
+            const m = new Model('posts', { user: createSystemUser({ id: 'sys' }) });
             expect(m.getUpdateFilter()).toEqual({});
         });
 
@@ -475,6 +493,15 @@ describe('Model', () => {
             expect(result).toEqual(created);
         });
 
+        it('should apply the ACL omit clause to the create response (no field leak)', async () => {
+            (getAcl as jest.Mock).mockReturnValue({ model: { posts: { getOmitFields: () => ['status'] } } });
+            mockPrismaModel.create.mockResolvedValue({ id: 1 });
+            const m = new Model('posts', { user: { id: 1, role: 'user' } });
+            await m.create({ title: 'X' });
+            const call = mockPrismaModel.create.mock.calls[0][0];
+            expect(call.omit).toEqual({ status: true });
+        });
+
         it('should throw 403 when canCreate returns false', async () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { canCreate: () => false } }
@@ -702,7 +729,7 @@ describe('Model', () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { canCreate: () => false, getUpdateFilter: () => false } }
             });
-            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+            const m = new Model('posts', { user: createSystemUser({ id: 'sys' }) });
             mockPrismaModel.upsert.mockResolvedValue({ id: 1 });
             const result = await m.upsert({ id: 1, title: 'Test' });
             expect(result).toEqual({ id: 1 });
@@ -837,7 +864,7 @@ describe('Model', () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { canCreate: () => false, getUpdateFilter: () => false } }
             });
-            const m = new Model('posts', { user: { id: 'sys', role: 'application' } });
+            const m = new Model('posts', { user: createSystemUser({ id: 'sys' }) });
             mockPrismaModel.findMany.mockResolvedValue([]);
             mockPrismaModel.createMany.mockResolvedValue({ count: 1 });
             const result = await m.upsertMany([{ id: 1, title: 'Test' }]);
