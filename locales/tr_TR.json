@@ -91,5 +91,13 @@
     "invalid_relation_field": "{modelName} modelinin '{field}' alanı bir ilişki değildir ve yol olarak kullanılamaz",
     "incomplete_composite_key": "'{relation}' ilişkisi için eksik bileşik anahtar — eksik: {missing}",
     "fields_not_writable": "{model} modelinin şu alanları yazılabilir değil: {fields}",
-    "field_not_filterable": "{modelName} modelinin '{field}' alanı kısıtlıdır ve filtreleme veya sıralama için kullanılamaz"
+    "field_not_filterable": "{modelName} modelinin '{field}' alanı kısıtlıdır ve filtreleme veya sıralama için kullanılamaz",
+    "filter_array_too_large": "Filtre dizisi çok büyük (en fazla {max}, alınan {received})",
+    "too_many_filter_conditions": "Çok fazla filtre koşulu (en fazla {max}, alınan {received})",
+    "filter_path_too_deep": "Filtre ilişki yolu '{field}' çok derin (en fazla {max} seviye)",
+    "empty_filter_group": "'{operator}' filtre grubunda koşul yok",
+    "invalid_filter_condition": "Geçersiz filtre koşulu: '{condition}'",
+    "unbalanced_filter_group": "Filtrede dengelenmemiş parantez veya köşeli parantez",
+    "filter_group_too_deep": "Filtre grupları çok derin iç içe geçmiş (en fazla {max})",
+    "empty_filter_value": "'{field}' için filtre koşulu boş bir değere sahip"
 }

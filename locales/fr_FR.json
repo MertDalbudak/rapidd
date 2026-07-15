@@ -91,5 +91,13 @@
     "invalid_relation_field": "Le champ '{field}' de {modelName} n'est pas une relation et ne peut pas servir de chemin",
     "incomplete_composite_key": "Clé composite incomplète pour la relation '{relation}' — manquant : {missing}",
     "fields_not_writable": "Les champs suivants de {model} ne sont pas modifiables : {fields}",
-    "field_not_filterable": "Le champ '{field}' de {modelName} est restreint et ne peut pas être utilisé pour filtrer ou trier"
+    "field_not_filterable": "Le champ '{field}' de {modelName} est restreint et ne peut pas être utilisé pour filtrer ou trier",
+    "filter_array_too_large": "Le tableau de filtre est trop grand (max {max}, reçu {received})",
+    "too_many_filter_conditions": "Trop de conditions de filtre (max {max}, reçu {received})",
+    "filter_path_too_deep": "Le chemin de relation du filtre '{field}' est trop profond (max {max} niveaux)",
+    "empty_filter_group": "Le groupe de filtre '{operator}' n'a aucune condition",
+    "invalid_filter_condition": "Condition de filtre invalide : '{condition}'",
+    "unbalanced_filter_group": "Parenthèses ou crochets déséquilibrés dans le filtre",
+    "filter_group_too_deep": "Les groupes de filtre sont imbriqués trop profondément (max {max})",
+    "empty_filter_value": "La condition de filtre pour '{field}' a une valeur vide"
 }

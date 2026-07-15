@@ -27,6 +27,18 @@ const API_INCLUDE_RESULT_LIMIT: number = (() => {
 
 const MAX_NESTING_DEPTH: number = 10;
 
+// Cap array-valued filters ([a,b,c] / not:[...]) so one param can't emit an unbounded IN/OR clause
+const MAX_FILTER_ARRAY_LENGTH: number = parseInt(process.env.MAX_FILTER_ARRAY_LENGTH as string, 10) || 1000;
+
+// Cap the number of comma-separated conditions in a single filter string
+const MAX_FILTER_CONDITIONS: number = parseInt(process.env.MAX_FILTER_CONDITIONS as string, 10) || 100;
+
+// Cap relation-path depth in filter/sort keys (a.b.c...) — schema bounds this, but stop abuse early
+const MAX_FILTER_PATH_DEPTH: number = 10;
+
+// Cap nesting depth of boolean filter groups (OR(AND(OR(...)))) to bound recursion
+const MAX_FILTER_GROUP_DEPTH: number = 10;
+
 /**
  * Prisma nested-write operation keys.
  * Payloads containing any of these are treated as raw Prisma operations and passed
@@ -263,39 +275,162 @@ class QueryBuilder {
     }
 
     /**
-     * Parse filter string into Prisma where conditions
-     * Supports: numeric/date/string operators, not:, #NULL, not:#NULL
+     * Parse filter string into Prisma where conditions.
      *
-     * When a user is provided, fields hidden by the ACL (getOmitFields) are rejected
-     * with 403 — otherwise a client could infer restricted values through filter
-     * probing (e.g. salary=gt:100000) even though the field never renders.
+     * Two syntaxes, auto-detected:
+     * - Legacy: comma-separated conditions combined with implicit AND
+     *     name=%max%,status=not:inactive
+     * - Boolean groups (when a top-level OR(/AND( token is present): explicit prefix
+     *   operators, nestable, case-insensitive:
+     *     OR(AND(OR(name=%max%,school.name=%Realschule%),status=not:inactive),status=active)
+     *   → { OR: [ { AND: [ { OR: [...] }, ... ] }, ... ] }
+     *
+     * Leaf conditions in both modes share the same type-aware parsing, relation
+     * navigation, and ACL-omit enforcement. When a user is provided, fields hidden by
+     * the ACL (getOmitFields) are rejected with 403 so a client can't infer restricted
+     * values through filter probing (e.g. salary=gt:100000).
      */
     filter(q: string, user: any = null): Record<string, unknown> {
         if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
 
+        // Detect boolean-group syntax via a lenient (non-throwing) top-level scan
+        const topParts = this.#splitTopLevel(q, false);
+        const hasGroup = topParts.some((p: string) => /^(or|and)\s*\(/i.test(p.trim()));
+
+        if (hasGroup) {
+            const fragments = topParts
+                .map((p: string) => p.trim())
+                .filter((p: string) => p.length > 0)
+                .map((p: string) => this.#parseFilterExpression(p, user, 0, { count: 0 }));
+            // Multiple top-level expressions combine with implicit AND
+            return fragments.length === 1 ? fragments[0] : { AND: fragments };
+        }
+
+        // Legacy path — comma-separated implicit AND, flat-merged onto one object
         const result: Record<string, unknown> = {};
         const filterParts = q.split(FILTER_PATTERNS.FILTER_SPLIT);
 
+        if (filterParts.length > MAX_FILTER_CONDITIONS) {
+            throw new ErrorResponse(400, "too_many_filter_conditions", { max: MAX_FILTER_CONDITIONS, received: filterParts.length });
+        }
+
         for (const part of filterParts) {
-            // Split only on first '=' to handle values containing '='
-            const eqIndex = part.indexOf('=');
-            if (eqIndex === -1) continue; // Skip invalid filter parts without '='
-            const key = part.substring(0, eqIndex);
-            const value = part.substring(eqIndex + 1);
-            const relationPath = key.split('.').map((e: string) => e.trim());
-            const fieldName = relationPath.pop()!;
-            const trimmedValue = value?.trim() ?? null;
-
-            // Navigate to the correct filter context for nested relations
-            const { filter: filterContext, modelName } = this.#navigateToFilterContext(result, relationPath, user);
-
-            // Apply the filter value (validates the field against the resolved model)
-            this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName, user);
+            // Skip invalid filter parts without '='
+            if (part.indexOf('=') === -1) continue;
+            this.#applyLeafCondition(result, part, user, false);
         }
 
         return result;
+    }
+
+    /**
+     * Recursively parse a boolean-group expression into a Prisma where fragment.
+     * A group is `OR(...)` / `AND(...)` (case-insensitive); anything else is a leaf condition.
+     */
+    #parseFilterExpression(part: string, user: any, depth: number, leaves: { count: number }): Record<string, any> {
+        if (depth > MAX_FILTER_GROUP_DEPTH) {
+            throw new ErrorResponse(400, "filter_group_too_deep", { max: MAX_FILTER_GROUP_DEPTH });
+        }
+
+        const groupMatch = part.match(/^(or|and)\s*\(([\s\S]*)\)$/i);
+        if (groupMatch) {
+            const op = groupMatch[1].toLowerCase() === 'or' ? 'OR' : 'AND';
+            const inner = groupMatch[2];
+            const childParts = this.#splitTopLevel(inner, true)
+                .map((p: string) => p.trim())
+                .filter((p: string) => p.length > 0);
+
+            if (childParts.length === 0) {
+                throw new ErrorResponse(400, "empty_filter_group", { operator: op });
+            }
+
+            const children = childParts.map((cp: string) => this.#parseFilterExpression(cp, user, depth + 1, leaves));
+            return { [op]: children };
+        }
+
+        // Leaf condition
+        if (++leaves.count > MAX_FILTER_CONDITIONS) {
+            throw new ErrorResponse(400, "too_many_filter_conditions", { max: MAX_FILTER_CONDITIONS });
+        }
+        if (part.indexOf('=') === -1) {
+            throw new ErrorResponse(400, "invalid_filter_condition", { condition: part });
+        }
+        const fragment: Record<string, any> = {};
+        this.#applyLeafCondition(fragment, part, user, true);
+        return fragment;
+    }
+
+    /**
+     * Apply a single `key=value` leaf condition onto the given filter object
+     * (navigates relation paths, enforces path depth, applies the typed/ACL-checked value).
+     *
+     * @param inGroup true when this leaf is inside a boolean OR()/AND() group.
+     *
+     * Empty values: a bare `field=` skips the condition ONLY for a top-level scalar in the
+     * legacy comma list (a documented convenience for optional query params). An empty value
+     * on a relation path (`tags.name=`) or inside a boolean group is rejected — otherwise it
+     * would silently collapse to a match-all condition (`{tags:{some:{}}}` or `{}`), which is
+     * especially dangerous inside an OR.
+     */
+    #applyLeafCondition(rootFilter: Record<string, any>, part: string, user: any, inGroup: boolean): void {
+        // Split only on first '=' to handle values containing '='
+        const eqIndex = part.indexOf('=');
+        const key = part.substring(0, eqIndex);
+        const value = part.substring(eqIndex + 1);
+        const relationPath = key.split('.').map((e: string) => e.trim());
+        if (relationPath.length > MAX_FILTER_PATH_DEPTH) {
+            throw new ErrorResponse(400, "filter_path_too_deep", { max: MAX_FILTER_PATH_DEPTH, field: key });
+        }
+        const fieldName = relationPath.pop()!;
+        const trimmedValue = value?.trim() ?? null;
+
+        // Guard empty values (see doc above) before navigating — navigation would otherwise
+        // leave a dangling relation filter even though the value contributes nothing.
+        if (!trimmedValue) {
+            if (inGroup || relationPath.length > 0) {
+                throw new ErrorResponse(400, "empty_filter_value", { field: key });
+            }
+            return; // legacy top-level scalar: skip this optional condition
+        }
+
+        const { filter: filterContext, modelName } = this.#navigateToFilterContext(rootFilter, relationPath, user);
+        this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName, user);
+    }
+
+    /**
+     * Split a string on top-level commas, respecting () and [] nesting.
+     * @param strict when true, throws on unbalanced parentheses/brackets; when false,
+     *   clamps depth at 0 so stray delimiters in legacy values can't corrupt detection.
+     */
+    #splitTopLevel(str: string, strict: boolean): string[] {
+        const parts: string[] = [];
+        let depth = 0;
+        let current = '';
+        for (let i = 0; i < str.length; i++) {
+            const ch = str[i];
+            if (ch === '(' || ch === '[') {
+                depth++;
+            } else if (ch === ')' || ch === ']') {
+                depth--;
+                if (depth < 0) {
+                    if (strict) throw new ErrorResponse(400, "unbalanced_filter_group", { value: str });
+                    depth = 0;
+                }
+            }
+            if (ch === ',' && depth === 0) {
+                parts.push(current);
+                current = '';
+            } else {
+                current += ch;
+            }
+        }
+        if (strict && depth !== 0) {
+            throw new ErrorResponse(400, "unbalanced_filter_group", { value: str });
+        }
+        parts.push(current);
+        return parts;
     }
 
     /**
@@ -472,7 +607,10 @@ class QueryBuilder {
         if (value.startsWith('[') && value.endsWith(']')) {
             const arr = this.#parseArrayValue(value);
             if ((fieldType === 'String' || fieldType === null) && arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
-                filter.NOT = arr.map((v: unknown) => ({ [fieldName]: this.#filterString(String(v), fieldType === null) }));
+                // Append — assignment would clobber a previous field's not:[...] group.
+                // Prisma NOT arrays AND their entries, which is the right semantics here.
+                if (!filter.NOT) filter.NOT = [];
+                filter.NOT.push(...arr.map((v: unknown) => ({ [fieldName]: this.#filterString(String(v), fieldType === null) })));
             } else {
                 filter[fieldName] = { notIn: this.#coerceArrayValues(arr, fieldName, fieldType) };
             }
@@ -576,8 +714,12 @@ class QueryBuilder {
         if (value.startsWith('[') && value.endsWith(']')) {
             const arr = this.#parseArrayValue(value);
             if ((fieldType === 'String' || fieldType === null) && arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
-                if (!filter.OR) filter.OR = [];
-                arr.forEach((v: unknown) => filter.OR.push({ [fieldName]: this.#filterString(String(v), fieldType === null) }));
+                // Each field's wildcard list is its own OR group nested under AND —
+                // a shared top-level OR would merge groups across fields:
+                // name=[%a%,%b%],title=[%c%,%d%] must mean (a OR b) AND (c OR d)
+                const orGroup = arr.map((v: unknown) => ({ [fieldName]: this.#filterString(String(v), fieldType === null) }));
+                if (!filter.AND) filter.AND = [];
+                filter.AND.push({ OR: orGroup });
             } else {
                 filter[fieldName] = { in: this.#coerceArrayValues(arr, fieldName, fieldType) };
             }
@@ -741,11 +883,28 @@ class QueryBuilder {
      * Parse array value from string
      */
     #parseArrayValue(value: string): any[] {
+        let arr: any[];
         try {
-            return JSON.parse(value);
+            const parsed = JSON.parse(value);
+            arr = Array.isArray(parsed) ? parsed : value.slice(1, -1).split(',').map((v: string) => v.trim());
         } catch {
-            return value.slice(1, -1).split(',').map((v: string) => v.trim());
+            arr = value.slice(1, -1).split(',').map((v: string) => v.trim());
         }
+
+        // Bound the array so a single param can't produce an unbounded IN/OR clause
+        if (arr.length > MAX_FILTER_ARRAY_LENGTH) {
+            throw new ErrorResponse(400, "filter_array_too_large", { max: MAX_FILTER_ARRAY_LENGTH, received: arr.length });
+        }
+
+        // Reject non-primitive elements — JSON.parse would otherwise let a client smuggle
+        // structured objects/arrays (e.g. [{"gt":5}]) into the query on untyped columns
+        for (const el of arr) {
+            if (el !== null && typeof el === 'object') {
+                throw new ErrorResponse(400, "invalid_filter_value", { field: '', value: String(value), expected: 'array of scalar values' });
+            }
+        }
+
+        return arr;
     }
 
     /**

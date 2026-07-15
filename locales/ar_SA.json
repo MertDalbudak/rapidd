@@ -91,5 +91,13 @@
     "invalid_relation_field": "الحقل '{field}' في {modelName} ليس علاقة ولا يمكن استخدامه كمسار",
     "incomplete_composite_key": "مفتاح مركب غير مكتمل للعلاقة '{relation}' — الناقص: {missing}",
     "fields_not_writable": "الحقول التالية في {model} غير قابلة للكتابة: {fields}",
-    "field_not_filterable": "الحقل '{field}' في {modelName} مقيد ولا يمكن استخدامه للتصفية أو الفرز"
+    "field_not_filterable": "الحقل '{field}' في {modelName} مقيد ولا يمكن استخدامه للتصفية أو الفرز",
+    "filter_array_too_large": "مصفوفة التصفية كبيرة جدًا (الحد الأقصى {max}، المستلم {received})",
+    "too_many_filter_conditions": "شروط تصفية كثيرة جدًا (الحد الأقصى {max}، المستلم {received})",
+    "filter_path_too_deep": "مسار علاقة التصفية '{field}' عميق جدًا (الحد الأقصى {max} مستويات)",
+    "empty_filter_group": "مجموعة التصفية '{operator}' لا تحتوي على شروط",
+    "invalid_filter_condition": "شرط تصفية غير صالح: '{condition}'",
+    "unbalanced_filter_group": "أقواس غير متوازنة في التصفية",
+    "filter_group_too_deep": "مجموعات التصفية متداخلة بعمق كبير (الحد الأقصى {max})",
+    "empty_filter_value": "شرط التصفية للحقل '{field}' له قيمة فارغة"
 }

@@ -75,7 +75,10 @@ GET /api/v1/posts?filter=status=active,title=%typescript%
 GET /api/v1/posts?filter=createdAt=after:2025-01-01,views=gte:100
 GET /api/v1/posts?include=author,comments.user&fields=id,title,author.name
 GET /api/v1/posts?sort=createdAt:desc&limit=10&offset=20
+GET /api/v1/posts?filter=OR(AND(status=active,views=gte:100),author.name=%erika%)
 ```
+
+Comma-separated conditions combine with implicit AND. For explicit boolean logic use nestable `OR(...)` / `AND(...)` groups (case-insensitive) whose leaves are ordinary conditions, including relation paths.
 
 20+ filter operators for strings, numbers, dates, arrays, nulls, and nested relation fields. Responses include pagination metadata with `total`, `count`, `limit`, `offset`, and `hasMore`.
 

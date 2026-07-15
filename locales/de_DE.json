@@ -91,5 +91,13 @@
     "invalid_relation_field": "Feld '{field}' von {modelName} ist keine Relation und kann nicht als Pfad verwendet werden",
     "incomplete_composite_key": "Unvollständiger zusammengesetzter Schlüssel für Relation '{relation}' — fehlend: {missing}",
     "fields_not_writable": "Die folgenden Felder von {model} sind nicht beschreibbar: {fields}",
-    "field_not_filterable": "Das Feld '{field}' von {modelName} ist eingeschränkt und kann nicht zum Filtern oder Sortieren verwendet werden"
+    "field_not_filterable": "Das Feld '{field}' von {modelName} ist eingeschränkt und kann nicht zum Filtern oder Sortieren verwendet werden",
+    "filter_array_too_large": "Filter-Array ist zu groß (max. {max}, erhalten {received})",
+    "too_many_filter_conditions": "Zu viele Filterbedingungen (max. {max}, erhalten {received})",
+    "filter_path_too_deep": "Filter-Relationspfad '{field}' ist zu tief (max. {max} Ebenen)",
+    "empty_filter_group": "Filtergruppe '{operator}' hat keine Bedingungen",
+    "invalid_filter_condition": "Ungültige Filterbedingung: '{condition}'",
+    "unbalanced_filter_group": "Unausgeglichene Klammern im Filter",
+    "filter_group_too_deep": "Filtergruppen sind zu tief verschachtelt (max. {max})",
+    "empty_filter_value": "Filterbedingung für '{field}' hat einen leeren Wert"
 }

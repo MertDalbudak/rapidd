@@ -91,5 +91,13 @@
     "invalid_relation_field": "O campo '{field}' de {modelName} não é uma relação e não pode ser usado como caminho",
     "incomplete_composite_key": "Chave composta incompleta para a relação '{relation}' — faltando: {missing}",
     "fields_not_writable": "Os seguintes campos de {model} não são graváveis: {fields}",
-    "field_not_filterable": "O campo '{field}' de {modelName} é restrito e não pode ser usado para filtrar ou ordenar"
+    "field_not_filterable": "O campo '{field}' de {modelName} é restrito e não pode ser usado para filtrar ou ordenar",
+    "filter_array_too_large": "O array de filtro é muito grande (máx {max}, recebido {received})",
+    "too_many_filter_conditions": "Muitas condições de filtro (máx {max}, recebido {received})",
+    "filter_path_too_deep": "O caminho de relação do filtro '{field}' é muito profundo (máx {max} níveis)",
+    "empty_filter_group": "O grupo de filtro '{operator}' não tem condições",
+    "invalid_filter_condition": "Condição de filtro inválida: '{condition}'",
+    "unbalanced_filter_group": "Parênteses ou colchetes não balanceados no filtro",
+    "filter_group_too_deep": "Os grupos de filtro estão aninhados profundamente demais (máx {max})",
+    "empty_filter_value": "A condição de filtro para '{field}' tem um valor vazio"
 }

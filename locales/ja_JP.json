@@ -91,5 +91,13 @@
     "invalid_relation_field": "{modelName} のフィールド '{field}' はリレーションではないため、パスとして使用できません",
     "incomplete_composite_key": "リレーション '{relation}' の複合キーが不完全です — 不足: {missing}",
     "fields_not_writable": "{model} の次のフィールドは書き込みできません: {fields}",
-    "field_not_filterable": "{modelName} のフィールド '{field}' は制限されており、フィルターや並べ替えに使用できません"
+    "field_not_filterable": "{modelName} のフィールド '{field}' は制限されており、フィルターや並べ替えに使用できません",
+    "filter_array_too_large": "フィルター配列が大きすぎます（最大 {max}、受信 {received}）",
+    "too_many_filter_conditions": "フィルター条件が多すぎます（最大 {max}、受信 {received}）",
+    "filter_path_too_deep": "フィルターのリレーションパス '{field}' が深すぎます（最大 {max} 階層）",
+    "empty_filter_group": "フィルターグループ '{operator}' に条件がありません",
+    "invalid_filter_condition": "無効なフィルター条件: '{condition}'",
+    "unbalanced_filter_group": "フィルター内の括弧が対応していません",
+    "filter_group_too_deep": "フィルターグループのネストが深すぎます（最大 {max}）",
+    "empty_filter_value": "'{field}' のフィルター条件の値が空です"
 }

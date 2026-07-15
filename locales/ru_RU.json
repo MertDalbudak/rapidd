@@ -91,5 +91,13 @@
     "invalid_relation_field": "Поле '{field}' модели {modelName} не является связью и не может использоваться как путь",
     "incomplete_composite_key": "Неполный составной ключ для связи '{relation}' — отсутствует: {missing}",
     "fields_not_writable": "Следующие поля {model} недоступны для записи: {fields}",
-    "field_not_filterable": "Поле '{field}' модели {modelName} ограничено и не может использоваться для фильтрации или сортировки"
+    "field_not_filterable": "Поле '{field}' модели {modelName} ограничено и не может использоваться для фильтрации или сортировки",
+    "filter_array_too_large": "Массив фильтра слишком большой (макс. {max}, получено {received})",
+    "too_many_filter_conditions": "Слишком много условий фильтра (макс. {max}, получено {received})",
+    "filter_path_too_deep": "Путь связи фильтра '{field}' слишком глубокий (макс. {max} уровней)",
+    "empty_filter_group": "Группа фильтра '{operator}' не содержит условий",
+    "invalid_filter_condition": "Недопустимое условие фильтра: '{condition}'",
+    "unbalanced_filter_group": "Несбалансированные скобки в фильтре",
+    "filter_group_too_deep": "Группы фильтра вложены слишком глубоко (макс. {max})",
+    "empty_filter_value": "Условие фильтра для '{field}' имеет пустое значение"
 }

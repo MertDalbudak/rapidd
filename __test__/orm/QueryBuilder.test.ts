@@ -295,9 +295,19 @@ describe('QueryBuilder (TypeScript)', () => {
             expect(result.attachments).toEqual({ some: {} });
         });
 
-        it('should skip empty filter value (no null filter applied)', () => {
+        it('should skip empty filter value on a top-level scalar (legacy optional param)', () => {
             const result: any = qb.filter('content=');
             expect(result.content).toBeUndefined();
+        });
+
+        it('should still skip empty scalar alongside real conditions', () => {
+            const result: any = qb.filter('content=,userId=5');
+            expect(result.content).toBeUndefined();
+            expect(result.userId).toEqual({ equals: 5 });
+        });
+
+        it('should reject an empty value on a relation path (would leave a dangling some:{})', () => {
+            expect(() => qb.filter('attachments.url=')).toThrow('empty_filter_value');
         });
 
         // ── 1:n relation filtering (some wrapper) ──────────────
@@ -375,6 +385,121 @@ describe('QueryBuilder (TypeScript)', () => {
         it('should keep array values as strings on String fields', () => {
             const result: any = qb.filter('content=[hello,world]');
             expect(result.content).toEqual({ in: ['hello', 'world'] });
+        });
+
+        it('should group wildcard arrays per field: (a OR b) AND (c OR d)', () => {
+            const result: any = qb.filter('content=[%a%,%b%],internal_notes=[%c%,%d%]');
+            expect(result.OR).toBeUndefined();
+            expect(result.AND).toHaveLength(2);
+            expect(result.AND[0]).toEqual({ OR: [{ content: { contains: 'a' } }, { content: { contains: 'b' } }] });
+            expect(result.AND[1]).toEqual({ OR: [{ internal_notes: { contains: 'c' } }, { internal_notes: { contains: 'd' } }] });
+        });
+
+        it('should nest a single wildcard array as its own OR group', () => {
+            const result: any = qb.filter('content=[%a%,%b%]');
+            expect(result.AND).toEqual([{ OR: [{ content: { contains: 'a' } }, { content: { contains: 'b' } }] }]);
+        });
+
+        it('should combine a wildcard array group with plain field filters', () => {
+            const result: any = qb.filter('content=[%a%,%b%],userId=5');
+            expect(result.AND).toHaveLength(1);
+            expect(result.userId).toEqual({ equals: 5 });
+        });
+
+        it('should not clobber NOT groups across fields (not:[..] on two fields)', () => {
+            const result: any = qb.filter('content=not:[%a%],internal_notes=not:[%b%]', { id: 1, role: 'admin' });
+            expect(result.NOT).toHaveLength(2);
+            expect(result.NOT[0]).toEqual({ content: { contains: 'a' } });
+            expect(result.NOT[1]).toEqual({ internal_notes: { contains: 'b' } });
+        });
+
+        // ── Boolean groups: OR(...) / AND(...) ──────────────────
+        it('should parse a top-level OR group', () => {
+            const result: any = qb.filter('OR(content=%a%,userId=5)');
+            expect(result.OR).toHaveLength(2);
+            expect(result.OR[0]).toEqual({ content: { contains: 'a' } });
+            expect(result.OR[1]).toEqual({ userId: { equals: 5 } });
+        });
+
+        it('should accept lowercase and(...)/or(...)', () => {
+            const result: any = qb.filter('and(content=%a%,userId=5)');
+            expect(result.AND).toHaveLength(2);
+        });
+
+        it('should parse the nested example: OR(AND(OR(..),..),OR(..))', () => {
+            const result: any = qb.filter(
+                'OR(AND(OR(content=%max%,user.name=%Realschule%),content=not:inactive),OR(userId=5,content=%erika%))'
+            );
+            expect(result.OR).toHaveLength(2);
+            // OR[0] = AND( OR(content, user.name), content!=inactive )
+            expect(result.OR[0].AND).toHaveLength(2);
+            expect(result.OR[0].AND[0].OR[0]).toEqual({ content: { contains: 'max' } });
+            expect(result.OR[0].AND[0].OR[1]).toEqual({ user: { name: { contains: 'Realschule' } } });
+            expect(result.OR[0].AND[1]).toEqual({ content: { not: { equals: 'inactive' } } });
+            // OR[1] = OR(userId=5, content~erika)
+            expect(result.OR[1].OR[0]).toEqual({ userId: { equals: 5 } });
+            expect(result.OR[1].OR[1]).toEqual({ content: { contains: 'erika' } });
+        });
+
+        it('should keep array values intact inside groups (commas not split)', () => {
+            const result: any = qb.filter('OR(userId=[1,2,3],content=%x%)');
+            expect(result.OR[0]).toEqual({ userId: { in: [1, 2, 3] } });
+        });
+
+        it('should AND multiple top-level expressions when one is a group', () => {
+            const result: any = qb.filter('content=%a%,OR(userId=1,userId=2)');
+            expect(result.AND).toHaveLength(2);
+            expect(result.AND[0]).toEqual({ content: { contains: 'a' } });
+            expect(result.AND[1].OR).toHaveLength(2);
+        });
+
+        it('should enforce ACL omit inside boolean groups', () => {
+            expect(() => qb.filter('OR(content=%a%,internal_notes=%x%)', { id: 7, role: 'user' }))
+                .toThrow('field_not_filterable');
+        });
+
+        it('should reject an empty group', () => {
+            expect(() => qb.filter('OR()')).toThrow('empty_filter_group');
+        });
+
+        it('should reject unbalanced parentheses', () => {
+            expect(() => qb.filter('OR(content=%a%,AND(userId=1)')).toThrow('unbalanced_filter_group');
+        });
+
+        it('should reject groups nested beyond the depth cap', () => {
+            let q = 'userId=1';
+            for (let i = 0; i < 11; i++) q = `OR(${q})`;
+            expect(() => qb.filter(q)).toThrow('filter_group_too_deep');
+        });
+
+        it('should not treat a field literally named similarly as a group', () => {
+            // 'content=or(x)' is a leaf whose VALUE contains 'or(' — not a group
+            const result: any = qb.filter('content=ORDER');
+            expect(result.content).toEqual({ equals: 'ORDER' });
+        });
+
+        // ── Hardening: array/object injection + DoS guards ──────
+        it('should reject object elements smuggled via JSON array syntax', () => {
+            expect(() => qb.filter('userId=[{"gt":5}]')).toThrow();
+        });
+
+        it('should reject nested arrays in filter arrays', () => {
+            expect(() => qb.filter('userId=[[1,2],[3]]')).toThrow();
+        });
+
+        it('should reject arrays larger than the configured cap', () => {
+            const huge = '[' + Array.from({ length: 1001 }, (_, i) => i).join(',') + ']';
+            expect(() => qb.filter(`userId=${huge}`)).toThrow('filter_array_too_large');
+        });
+
+        it('should reject too many filter conditions', () => {
+            const many = Array.from({ length: 101 }, (_, i) => `userId=${i}`).join(',');
+            expect(() => qb.filter(many)).toThrow('too_many_filter_conditions');
+        });
+
+        it('should reject relation paths deeper than the cap', () => {
+            const deep = Array.from({ length: 11 }, () => 'user').join('.') + '.name';
+            expect(() => qb.filter(`${deep}=x`)).toThrow('filter_path_too_deep');
         });
 
         it('should match the whole day for date-only values on DateTime fields', () => {

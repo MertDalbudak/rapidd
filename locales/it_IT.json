@@ -91,5 +91,13 @@
     "invalid_relation_field": "Il campo '{field}' di {modelName} non è una relazione e non può essere usato come percorso",
     "incomplete_composite_key": "Chiave composita incompleta per la relazione '{relation}' — mancante: {missing}",
     "fields_not_writable": "I seguenti campi di {model} non sono scrivibili: {fields}",
-    "field_not_filterable": "Il campo '{field}' di {modelName} è riservato e non può essere usato per filtrare o ordinare"
+    "field_not_filterable": "Il campo '{field}' di {modelName} è riservato e non può essere usato per filtrare o ordinare",
+    "filter_array_too_large": "L'array del filtro è troppo grande (max {max}, ricevuti {received})",
+    "too_many_filter_conditions": "Troppe condizioni di filtro (max {max}, ricevute {received})",
+    "filter_path_too_deep": "Il percorso di relazione del filtro '{field}' è troppo profondo (max {max} livelli)",
+    "empty_filter_group": "Il gruppo di filtro '{operator}' non ha condizioni",
+    "invalid_filter_condition": "Condizione di filtro non valida: '{condition}'",
+    "unbalanced_filter_group": "Parentesi o parentesi quadre non bilanciate nel filtro",
+    "filter_group_too_deep": "I gruppi di filtro sono annidati troppo in profondità (max {max})",
+    "empty_filter_value": "La condizione di filtro per '{field}' ha un valore vuoto"
 }

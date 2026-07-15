@@ -91,5 +91,13 @@
     "invalid_relation_field": "Field '{field}' of {modelName} is not a relation and cannot be used as a path",
     "incomplete_composite_key": "Incomplete composite key for relation '{relation}' — missing: {missing}",
     "fields_not_writable": "The following fields of {model} are not writable: {fields}",
-    "field_not_filterable": "Field '{field}' of {modelName} is restricted and cannot be used to filter or sort"
+    "field_not_filterable": "Field '{field}' of {modelName} is restricted and cannot be used to filter or sort",
+    "filter_array_too_large": "Filter array is too large (max {max}, received {received})",
+    "too_many_filter_conditions": "Too many filter conditions (max {max}, received {received})",
+    "filter_path_too_deep": "Filter relation path '{field}' is too deep (max {max} levels)",
+    "empty_filter_group": "Filter group '{operator}' has no conditions",
+    "invalid_filter_condition": "Invalid filter condition: '{condition}'",
+    "unbalanced_filter_group": "Unbalanced parentheses or brackets in filter",
+    "filter_group_too_deep": "Filter groups are nested too deeply (max {max})",
+    "empty_filter_value": "Filter condition for '{field}' has an empty value"
 }
