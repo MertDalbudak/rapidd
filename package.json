@@ -134,7 +134,7 @@
       "/node_modules/"
     ],
     "transformIgnorePatterns": [
-      "node_modules/(?!(cookie)/)"
+      "node_modules/(?!(cookie|@fastify/cookie)/)"
     ]
   }
 }
