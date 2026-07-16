@@ -283,13 +283,13 @@ class QueryBuilder {
      *     name=%max%,status=not:inactive
      * - Boolean groups (when a top-level OR(/AND( token is present): explicit prefix
      *   operators, nestable, case-insensitive:
-     *     OR(AND(OR(name=%max%,school.name=%Realschule%),status=not:inactive),status=active)
+     *     OR(AND(OR(name=%foo%,author.name=%acme%),status=not:inactive),status=active)
      *   → { OR: [ { AND: [ { OR: [...] }, ... ] }, ... ] }
      *
      * Leaf conditions in both modes share the same type-aware parsing, relation
      * navigation, and ACL-omit enforcement. When a user is provided, fields hidden by
      * the ACL (getOmitFields) are rejected with 403 so a client can't infer restricted
-     * values through filter probing (e.g. salary=gt:100000).
+     * values through filter probing (e.g. price=gt:100000).
      */
     filter(q: string, user: any = null): Record<string, unknown> {
         if (typeof q !== 'string' || q.trim() === '') {
@@ -1252,7 +1252,7 @@ class QueryBuilder {
                     return acc;
                 }, {});
             } else {
-                // Parse dot notation includes (e.g., "student.agency,course")
+                // Parse dot notation includes (e.g., "author.profile,tags")
                 const includeList = include_query.split(',').map((item: string) => item.trim());
                 const topLevelIncludes = new Set<string>();
                 const deepIncludes: Record<string, string[]> = {};
@@ -1370,7 +1370,7 @@ class QueryBuilder {
 
     /**
      * Recursively set a nested field path into a select object.
-     * e.g. "agency.name" on obj → obj.agency = { select: { name: true } }
+     * e.g. "author.name" on obj → obj.author = { select: { name: true } }
      */
     #setNestedField(obj: Record<string, any>, fieldPath: string): void {
         const dotIdx = fieldPath.indexOf('.');
@@ -2276,10 +2276,10 @@ class QueryBuilder {
         const hasOnlyPkFields = (item: Record<string, any>): boolean => {
             const keys = Object.keys(item);
 
-            // For n:m relations with composite FK (e.g., StudentCourse with studentId, courseId)
+            // For n:m relations with composite FK (e.g., PostTag with postId, tagId)
             if (Array.isArray(relatedObject.fields)) {
                 // Check if all keys are part of the composite FK fields
-                // e.g., { courseId: 5 } should be connect, { courseId: 5, grade: 'A' } should be upsert
+                // e.g., { tagId: 5 } should be connect, { tagId: 5, weight: 3 } should be upsert
                 return keys.every((k: string) => relatedObject.fields!.includes(k));
             }
 
@@ -2295,7 +2295,7 @@ class QueryBuilder {
         // - connect: item has ONLY the PK/FK fields (just linking an existing record)
         // - upsert: item has PK AND additional data fields (update if exists, create if not)
         // - create: item has NO PK (always create new record)
-        // For n:m relations: { courseId: 5 } -> connect, { courseId: 5, grade: 'A' } -> upsert
+        // For n:m relations: { tagId: 5 } -> connect, { tagId: 5, weight: 3 } -> upsert
         const connectItems: Record<string, any>[] = [];
         const upsertItems: Record<string, any>[] = [];
         const createItems: Record<string, any>[] = [];
@@ -2334,7 +2334,7 @@ class QueryBuilder {
                 const where: Record<string, any> = {};
                 if (Array.isArray(relatedObject.fields)) {
                     // n:m relation - build composite key where clause
-                    // e.g., { studentId_courseId: { studentId: parentId, courseId: e.courseId } }
+                    // e.g., { postId_tagId: { postId: parentId, tagId: e.tagId } }
                     where[relatedObject.field!] = this.#buildCompositePairId(e, relatedObject, parentId);
                 } else if (isCompositePK) {
                     pkFields.forEach((field: string) => { where[field] = e[field]; });
@@ -2625,8 +2625,8 @@ class QueryBuilder {
 
     /**
      * Simplify nested filter by removing parent-referencing conditions.
-     * When including appointments from student_tariff, conditions on the parent
-     * ({student_tariff: {...}}) are already implied by the parent row and must be dropped.
+     * When including comments from a post, conditions on the parent
+     * ({post: {...}}) are already implied by the parent row and must be dropped.
      * Parent references are matched by RELATION NAME (resolved from the child model's
      * relations targeting the parent model), with the raw parent model name as fallback
      * for schemas where relation and model names coincide.

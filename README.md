@@ -228,13 +228,20 @@ docker build -t my-api . && docker run -p 3000:3000 --env-file .env my-api
 
 | Package | Description |
 |---------|-------------|
-| [`@rapidd/core`](https://www.npmjs.com/package/@rapidd/core) | Framework runtime, project scaffolding, and unified `npx rapidd` CLI |
+| [`@rapidd/core`](https://www.npmjs.com/package/@rapidd/core) | Project template + unified `npx rapidd` CLI — scaffolds the framework **source** into your project |
 | [`@rapidd/build`](https://www.npmjs.com/package/@rapidd/build) | Code generation — models, routes, and ACL from your Prisma schema |
 
 ```bash
 npx @rapidd/core create-project   # scaffold a new project
 npx rapidd build                   # generate from schema (after npm install)
 ```
+
+> **You own the code.** `create-project` copies the entire framework — ORM, plugins,
+> auth, utilities — into your repository. `@rapidd/core` is **not** a runtime dependency
+> (only `@rapidd/build` remains, as a devDependency, to regenerate models and routes from
+> your schema). This is the strongest form of "you own it": every file is yours to read and
+> edit. The trade-off is that framework fixes don't arrive via `npm update` — see
+> [How updates work](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started#architecture--updates).
 
 ---
 

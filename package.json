@@ -3,18 +3,27 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "2.3.0",
+  "version": "2.3.1",
   "description": "Code-first REST API framework for TypeScript. Database in, API out.",
   "main": "dist/main.js",
   "bin": {
     "rapidd": "bin/cli.js"
   },
   "files": [
+    "CHANGELOG.md",
     "bin/",
-    "src/",
+    "src/app.ts",
+    "src/index.ts",
+    "src/types.ts",
+    "src/auth/",
+    "src/config/",
+    "src/core/",
+    "src/middleware/",
+    "src/orm/",
+    "src/plugins/",
+    "src/utils/",
     "config/",
     "locales/",
-    "routes/",
     "templates/",
     "public/",
     "prisma/schema.prisma",
@@ -57,7 +66,7 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": "^22.12.0 || >=24.0.0"
   },
   "author": "Mert Dalbudak",
   "license": "ISC",

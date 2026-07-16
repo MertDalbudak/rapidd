@@ -458,13 +458,13 @@ describe('QueryBuilder (TypeScript)', () => {
 
         it('should parse the nested example: OR(AND(OR(..),..),OR(..))', () => {
             const result: any = qb.filter(
-                'OR(AND(OR(content=%max%,user.name=%Realschule%),content=not:inactive),OR(userId=5,content=%erika%))'
+                'OR(AND(OR(content=%max%,user.name=%Acme%),content=not:inactive),OR(userId=5,content=%erika%))'
             );
             expect(result.OR).toHaveLength(2);
             // OR[0] = AND( OR(content, user.name), content!=inactive )
             expect(result.OR[0].AND).toHaveLength(2);
             expect(result.OR[0].AND[0].OR[0]).toEqual({ content: { contains: 'max' } });
-            expect(result.OR[0].AND[0].OR[1]).toEqual({ user: { name: { contains: 'Realschule' } } });
+            expect(result.OR[0].AND[0].OR[1]).toEqual({ user: { name: { contains: 'Acme' } } });
             expect(result.OR[0].AND[1]).toEqual({ content: { not: { equals: 'inactive' } } });
             // OR[1] = OR(userId=5, content~erika)
             expect(result.OR[1].OR[0]).toEqual({ userId: { equals: 5 } });

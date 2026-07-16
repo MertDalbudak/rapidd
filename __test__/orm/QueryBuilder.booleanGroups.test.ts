@@ -6,7 +6,7 @@
  * correctness with arrays/nested groups, ACL-omit enforcement, DoS caps, error/edge
  * cases, and legacy backward-compatibility.
  *
- * Uses a rich mock schema (students -> school, courses; typed scalar/enum/bool/date fields).
+ * Uses a rich mock schema (members -> team, posts; typed scalar/enum/bool/date fields).
  */
 
 const OMIT: Record<string, string[]> = {}; // per-role omit overrides, set per test if needed
@@ -16,14 +16,14 @@ jest.mock('../../src/core/prisma', () => ({
     prismaTransaction: jest.fn(),
     getAcl: () => ({
         model: {
-            students: {
+            members: {
                 // non-admin cannot see 'notes'
                 getOmitFields: (user: any) => (user?.role === 'admin' ? [] : ['notes']),
             },
-            schools: {
+            teams: {
                 getOmitFields: (user: any) => (user?.role === 'admin' ? [] : ['secret_code']),
             },
-            courses: {
+            posts: {
                 getOmitFields: () => [],
             },
         },
@@ -32,27 +32,27 @@ jest.mock('../../src/core/prisma', () => ({
 
 jest.mock('../../src/core/dmmf', () => {
     const fields: Record<string, any> = {
-        students: {
+        members: {
             id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
             name: { name: 'name', kind: 'scalar', type: 'String', isList: false, isRequired: true },
             status: { name: 'status', kind: 'scalar', type: 'String', isList: false, isRequired: false },
             age: { name: 'age', kind: 'scalar', type: 'Int', isList: false, isRequired: false },
-            gpa: { name: 'gpa', kind: 'scalar', type: 'Float', isList: false, isRequired: false },
+            rating: { name: 'rating', kind: 'scalar', type: 'Float', isList: false, isRequired: false },
             active: { name: 'active', kind: 'scalar', type: 'Boolean', isList: false, isRequired: false },
-            enrolledAt: { name: 'enrolledAt', kind: 'scalar', type: 'DateTime', isList: false, isRequired: false },
-            grade: { name: 'grade', kind: 'enum', type: 'Grade', isList: false, isRequired: false },
+            createdAt: { name: 'createdAt', kind: 'scalar', type: 'DateTime', isList: false, isRequired: false },
+            tier: { name: 'tier', kind: 'enum', type: 'Tier', isList: false, isRequired: false },
             notes: { name: 'notes', kind: 'scalar', type: 'String', isList: false, isRequired: false },
-            schoolId: { name: 'schoolId', kind: 'scalar', type: 'Int', isList: false, isRequired: false },
-            school: { name: 'school', kind: 'object', type: 'schools', isList: false, isRequired: false, relationFromFields: ['schoolId'], relationToFields: ['id'] },
-            courses: { name: 'courses', kind: 'object', type: 'courses', isList: true, isRequired: false, relationFromFields: [], relationToFields: [] },
+            teamId: { name: 'teamId', kind: 'scalar', type: 'Int', isList: false, isRequired: false },
+            team: { name: 'team', kind: 'object', type: 'teams', isList: false, isRequired: false, relationFromFields: ['teamId'], relationToFields: ['id'] },
+            posts: { name: 'posts', kind: 'object', type: 'posts', isList: true, isRequired: false, relationFromFields: [], relationToFields: [] },
         },
-        schools: {
+        teams: {
             id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
             name: { name: 'name', kind: 'scalar', type: 'String', isList: false, isRequired: true },
             city: { name: 'city', kind: 'scalar', type: 'String', isList: false, isRequired: false },
             secret_code: { name: 'secret_code', kind: 'scalar', type: 'String', isList: false, isRequired: false },
         },
-        courses: {
+        posts: {
             id: { name: 'id', kind: 'scalar', type: 'Int', isList: false, isRequired: true, isId: true },
             title: { name: 'title', kind: 'scalar', type: 'String', isList: false, isRequired: true },
         },
@@ -67,12 +67,12 @@ jest.mock('../../src/core/dmmf', () => {
         getModel: (m: string) => (fields[m] ? { name: m, fields: Object.values(fields[m]) } : undefined),
         getPrimaryKey: () => 'id',
         getRelations: () => [],
-        isListRelation: (parent: string, rel: string) => parent === 'students' && rel === 'courses',
+        isListRelation: (parent: string, rel: string) => parent === 'members' && rel === 'posts',
         buildRelationships: (m: string) => {
-            if (m === 'students') {
+            if (m === 'members') {
                 return [
-                    { name: 'school', object: 'schools', isList: false, field: 'schoolId', foreignKey: 'id' },
-                    { name: 'courses', object: 'courses', isList: true, field: undefined, foreignKey: 'id' },
+                    { name: 'team', object: 'teams', isList: false, field: 'teamId', foreignKey: 'id' },
+                    { name: 'posts', object: 'posts', isList: true, field: undefined, foreignKey: 'id' },
                 ];
             }
             return [];
@@ -103,7 +103,7 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
     const system = createSystemUser({ id: 'sys' });
 
     beforeEach(() => {
-        qb = new QueryBuilder('students');
+        qb = new QueryBuilder('members');
     });
 
     // ── A. Basic construction ────────────────────────────────
@@ -168,11 +168,11 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
 
         it('the canonical 3-deep example (a OR b) AND … structure', () => {
             const r: any = qb.filter(
-                'OR(AND(OR(name=%max%,school.name=%Realschule%),status=not:inactive),OR(status=active,name=%erika%))'
+                'OR(AND(OR(name=%max%,team.name=%Acme%),status=not:inactive),OR(status=active,name=%erika%))'
             );
             expect(r.OR).toHaveLength(2);
             expect(r.OR[0].AND[0].OR[0]).toEqual({ name: { contains: 'max' } });
-            expect(r.OR[0].AND[0].OR[1]).toEqual({ school: { name: { contains: 'Realschule' } } });
+            expect(r.OR[0].AND[0].OR[1]).toEqual({ team: { name: { contains: 'Acme' } } });
             expect(r.OR[0].AND[1]).toEqual({ status: { not: { equals: 'inactive' } } });
             expect(r.OR[1].OR[0]).toEqual({ status: { equals: 'active' } });
             expect(r.OR[1].OR[1]).toEqual({ name: { contains: 'erika' } });
@@ -201,9 +201,9 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
         });
 
         it('date operators', () => {
-            const r: any = qb.filter('AND(enrolledAt=after:2024-01-01,enrolledAt=before:2024-12-31)');
-            expect(r.AND[0].enrolledAt.gt).toBeInstanceOf(Date);
-            expect(r.AND[1].enrolledAt.lt).toBeInstanceOf(Date);
+            const r: any = qb.filter('AND(createdAt=after:2024-01-01,createdAt=before:2024-12-31)');
+            expect(r.AND[0].createdAt.gt).toBeInstanceOf(Date);
+            expect(r.AND[1].createdAt.lt).toBeInstanceOf(Date);
         });
 
         it('boolean literal', () => {
@@ -212,8 +212,8 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
         });
 
         it('enum exact match (no wildcard)', () => {
-            const r: any = qb.filter('OR(grade=A,grade=B)');
-            expect(r.OR[0]).toEqual({ grade: { equals: 'A' } });
+            const r: any = qb.filter('OR(tier=A,tier=B)');
+            expect(r.OR[0]).toEqual({ tier: { equals: 'A' } });
         });
 
         it('#NULL / not:#NULL', () => {
@@ -244,23 +244,23 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
     // ── E. Relations inside groups ───────────────────────────
     describe('relations inside groups', () => {
         it('to-one relation path', () => {
-            const r: any = qb.filter('OR(school.name=%x%,name=y)');
-            expect(r.OR[0]).toEqual({ school: { name: { contains: 'x' } } });
+            const r: any = qb.filter('OR(team.name=%x%,name=y)');
+            expect(r.OR[0]).toEqual({ team: { name: { contains: 'x' } } });
         });
 
         it('list relation path uses some', () => {
-            const r: any = qb.filter('OR(courses.title=%math%,name=y)');
-            expect(r.OR[0]).toEqual({ courses: { some: { title: { contains: 'math' } } } });
+            const r: any = qb.filter('OR(posts.title=%math%,name=y)');
+            expect(r.OR[0]).toEqual({ posts: { some: { title: { contains: 'math' } } } });
         });
 
         it('relation-by-scalar FK rewrite inside a group', () => {
-            const r: any = qb.filter('OR(school=5,name=y)');
-            expect(r.OR[0]).toEqual({ schoolId: { equals: 5 } });
+            const r: any = qb.filter('OR(team=5,name=y)');
+            expect(r.OR[0]).toEqual({ teamId: { equals: 5 } });
         });
 
         it('to-one relation #NULL inside a group', () => {
-            const r: any = qb.filter('OR(school=#NULL,name=y)');
-            expect(r.OR[0]).toEqual({ school: { is: null } });
+            const r: any = qb.filter('OR(team=#NULL,name=y)');
+            expect(r.OR[0]).toEqual({ team: { is: null } });
         });
     });
 
@@ -328,7 +328,7 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
         });
 
         it('rejects an omitted field on a related model inside a group (403)', () => {
-            expect(() => qb.filter('OR(name=a,school.secret_code=%x%)', user)).toThrow('field_not_filterable');
+            expect(() => qb.filter('OR(name=a,team.secret_code=%x%)', user)).toThrow('field_not_filterable');
         });
 
         it('allows the same fields for admin', () => {
@@ -385,7 +385,7 @@ describe('QueryBuilder boolean groups — OR()/AND()', () => {
         });
 
         it('empty value on a relation path inside a group (400)', () => {
-            expect(() => qb.filter('OR(name=a,courses.title=)')).toThrow('empty_filter_value');
+            expect(() => qb.filter('OR(name=a,posts.title=)')).toThrow('empty_filter_value');
         });
 
         it('invalid field inside a group (400)', () => {

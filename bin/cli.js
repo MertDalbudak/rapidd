@@ -49,14 +49,20 @@ function createProject() {
     const packageRoot = path.resolve(__dirname, '..');
     const projectName = path.basename(targetDir);
 
-    const SKIP = new Set([
+    // Junk / build artifacts — skipped wherever they appear (matched by basename).
+    const SKIP_NAMES = new Set([
         'node_modules', 'dist', '__test__', '.github', '.claude', 'wiki',
-        'bin', '.git', 'package-lock.json', '.env', 'prisma/client',
-        // Generated / app-specific artifacts — `rapidd build` produces these from the
-        // user's own schema; never seed a fresh project with the template's dev copies.
-        'models',   // src/models/*
-        'acl.ts',   // src/config/acl.ts (build regenerates a permissive scaffold)
-        'user.ts',  // src/config/user.ts (build regenerates)
+        'bin', '.git', 'package-lock.json', '.env', '.DS_Store',
+    ]);
+
+    // App-specific artifacts — matched by EXACT project-relative path so a framework
+    // core file that merely shares a basename (e.g. src/core/user.ts) is never dropped.
+    // `rapidd build` regenerates these from the user's own schema.
+    const SKIP_PATHS = new Set([
+        'src/models',         // generated model subclasses
+        'src/config/acl.ts',  // build regenerates a permissive scaffold
+        'src/config/user.ts', // build regenerates the default-user stub
+        'prisma/client',      // generated Prisma client
     ]);
 
     const FILES = [
@@ -82,10 +88,12 @@ function createProject() {
         if (!fs.existsSync(src)) continue;
 
         const dest = path.join(targetDir, entry);
+        const rel = entry.replace(/\/$/, ''); // project-relative path (posix, no trailing slash)
 
         if (entry.endsWith('/')) {
-            copyDir(src, dest, SKIP);
+            copyDir(src, dest, rel, SKIP_NAMES, SKIP_PATHS);
         } else {
+            if (SKIP_PATHS.has(rel) || SKIP_NAMES.has(path.basename(rel))) continue;
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(src, dest);
         }
@@ -114,7 +122,7 @@ function createProject() {
             dev: 'tsx watch main.ts',
             build: 'tsc',
         },
-        engines: corePkg.engines || { node: '>=24.0.0' },
+        engines: corePkg.engines || { node: '^22.12.0 || >=24.0.0' },
         dependencies: pick(coreDeps, [
             '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/static',
             '@prisma/adapter-mariadb', '@prisma/adapter-pg', '@prisma/client', '@prisma/internals',
@@ -142,17 +150,20 @@ function createProject() {
     console.log('  npm run dev\n');
 }
 
-function copyDir(src, dest, skip) {
+function copyDir(src, dest, rel, skipNames, skipPaths) {
     fs.mkdirSync(dest, { recursive: true });
 
     for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
-        if (skip.has(entry.name) || entry.name === '.DS_Store') continue;
+        if (skipNames.has(entry.name)) continue;
+
+        const childRel = rel ? `${rel}/${entry.name}` : entry.name; // posix project-relative path
+        if (skipPaths.has(childRel)) continue;
 
         const srcPath = path.join(src, entry.name);
         const destPath = path.join(dest, entry.name);
 
         if (entry.isDirectory()) {
-            copyDir(srcPath, destPath, skip);
+            copyDir(srcPath, destPath, childRel, skipNames, skipPaths);
         } else {
             fs.copyFileSync(srcPath, destPath);
         }

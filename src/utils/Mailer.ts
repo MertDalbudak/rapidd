@@ -206,10 +206,10 @@ function validateOptions(options: EmailOptions): void {
  * // With attachments
  * await Mailer.send('support', {
  *     to: ['user1@example.com', 'user2@example.com'],
- *     subject: 'Invoice',
- *     html: '<p>Please find your invoice attached.</p>',
+ *     subject: 'Your report',
+ *     html: '<p>Please find your report attached.</p>',
  *     attachments: [
- *         { filename: 'invoice.pdf', path: './invoice.pdf' }
+ *         { filename: 'report.pdf', path: './report.pdf' }
  *     ]
  * });
  *

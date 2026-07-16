@@ -366,11 +366,11 @@ describe('Model', () => {
                 model: { posts: { getAccessFilter: () => ({ AND: [{ role: { not: 'super_admin' } }, { active: true }] }) } }
             });
             const m = new Model('posts', { user: { id: 1, role: 'admin' } });
-            m._filter = jest.fn(() => ({ role: { not: 'student' } }));
-            const result = m.filter('role=not:student');
+            m._filter = jest.fn(() => ({ role: { not: 'guest' } }));
+            const result = m.filter('role=not:guest');
             expect(result.AND).toBeDefined();
             expect(result.AND).toHaveLength(2);
-            expect(result.AND[0]).toEqual({ role: { not: 'student' } });
+            expect(result.AND[0]).toEqual({ role: { not: 'guest' } });
             expect(result.AND[1]).toEqual({ AND: [{ role: { not: 'super_admin' } }, { active: true }] });
         });
     });
