@@ -71,7 +71,8 @@ export { default as apiPlugin } from './plugins/response'; // backward compat al
 export { default as authPlugin } from './plugins/auth';
 export { default as languagePlugin } from './plugins/language';
 export { default as securityPlugin } from './plugins/security';
-export { default as rateLimitPlugin, RateLimiter } from './plugins/rateLimit';
+export { default as rateLimitPlugin, RateLimiter, getRateLimiter } from './plugins/rateLimit';
+export type { RateLimiterOptions } from './plugins/rateLimit';
 export { default as rateLimiterPlugin } from './plugins/rateLimit'; // backward compat alias
 export { default as rlsPlugin } from './plugins/rls';
 

@@ -251,7 +251,22 @@ export interface RateLimitPathConfig {
 export interface RateLimitResult {
     allowed: boolean;
     count: number;
+    /** Epoch milliseconds when the window resets, on the clock of whichever store produced it. */
     resetTime: number;
+    /**
+     * Milliseconds until the window resets, measured by the store's own clock. Kept separate
+     * from `resetTime` because the Redis store reports Redis's clock: subtracting a local
+     * `Date.now()` from it would reintroduce exactly the clock-skew dependency the Lua
+     * script avoids.
+     */
+    retryAfterMs: number;
+    /**
+     * Identifies this request's entry in the store so it can be refunded later
+     * (see `ignoreSuccessfulRequests`). Redis: the sorted-set member. Memory: the
+     * window stamp, used to confirm the window hasn't rolled over before refunding.
+     * Absent when the request was denied (nothing was recorded).
+     */
+    token?: string;
 }
 
 // =====================================================
