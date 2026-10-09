@@ -379,6 +379,10 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const changes = changesOf(request);
             const values = merged(sections, changes);
             const validation = validate(values, sections, project);
+            // Generated secrets of settings that do not apply (token secrets without sign-in) are not written
+            for (const [key, value] of Object.entries(changes)) {
+                if (suggested[key] !== undefined && value === suggested[key] && !validation.visible.includes(key)) delete changes[key];
+            }
             const invalid = Object.keys(changes).filter((k) => validation.errors[k]);
             const problems = await fileProblems(files);
             if (invalid.length > 0 || Object.keys(problems).length > 0) {

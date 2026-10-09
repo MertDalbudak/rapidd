@@ -92,7 +92,7 @@ Comma-separated conditions combine with implicit AND. For explicit boolean logic
 
 ## Authentication
 
-Auto-enabled when a user table is detected. External identity providers plug in with env vars:
+Auto-enabled when a user table is detected — or off with `AUTH_PROVIDERS=none`: every request is anonymous and access rules decide. External identity providers plug in with env vars:
 
 ```env
 AUTH_PROVIDERS=ldap,oidc,local        # tried in order for password logins

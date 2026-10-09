@@ -380,6 +380,9 @@ export function installAccessPage(R) {
                 return out;
             }
             const roles = rolesOf(rules);
+            if (R.signInOff()) {
+                out.push(R.notice('info', 'No sign-in: every request is anonymous', 'The rows for the role “anonymous” — else “Everyone else” — decide what any caller may do. Rules on $user values give anonymous requests no rows.'));
+            }
             out.push(policyCard(rules, roles));
 
             const without = S.acl.models.filter((m) => !m.code && !rules.models[m.name]);

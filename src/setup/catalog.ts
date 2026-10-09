@@ -27,6 +27,10 @@ export interface Setting {
     default?: string;
     /** Allowed values (enum, multi) */
     options?: string[];
+    /** multi: options that stand alone — choosing one clears the others */
+    exclusive?: string[];
+    /** How options are shown, when not by their value */
+    labels?: Record<string, string>;
     placeholder?: string;
     /** Only shown — and only validated — when this holds */
     when?: Condition;
@@ -59,6 +63,8 @@ const is = (key: string, value: string): Condition => ({ key, equals: value });
 const set = (key: string): Condition => ({ key, set: true });
 const EXTERNAL: Condition = { any: [has('AUTH_PROVIDERS', 'ldap'), has('AUTH_PROVIDERS', 'oidc'), has('AUTH_PROVIDERS', 'webdav')] };
 const PRODUCTION = is('NODE_ENV', 'production');
+/** Sign-in is on — everything but AUTH_PROVIDERS=none */
+const SIGN_IN: Condition = { not: has('AUTH_PROVIDERS', 'none') };
 
 /** Lower-cased, trimmed items of a comma-separated value */
 export function listItems(value: string | undefined): string[] {
@@ -272,15 +278,17 @@ export const SECTIONS: Section[] = [
         id: 'providers',
         group: 'Authentication',
         title: 'Sign-in providers',
-        description: 'Where users sign in. Every provider you enable gets its own page.',
+        description: 'Where users sign in — or none, for an API without sign-in. Every provider you enable gets its own page.',
         settings: [
-            { key: 'AUTH_PROVIDERS', label: 'Identity providers', type: 'multi', options: ['local', 'ldap', 'oidc', 'webdav'], default: 'local',
-                help: 'In order — password logins try them one after another. local: your user table · ldap: LDAP / Active Directory · oidc: OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, Google) · webdav: a WebDAV server (Nextcloud).' },
+            { key: 'AUTH_PROVIDERS', label: 'Identity providers', type: 'multi', options: ['local', 'ldap', 'oidc', 'webdav', 'none'], default: 'local',
+                exclusive: ['none'], labels: { none: 'none — no sign-in' },
+                help: 'In order — password logins try them one after another. local: your user table · ldap: LDAP / Active Directory · oidc: OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, Google) · webdav: a WebDAV server (Nextcloud) · none: no sign-in — every request is anonymous, access rules decide what it may do.' },
         ],
     },
     {
         id: 'tokens',
         group: 'Authentication',
+        when: SIGN_IN,
         title: 'Tokens',
         description: 'How access and refresh tokens are signed, and how long they live.',
         settings: [
@@ -295,6 +303,7 @@ export const SECTIONS: Section[] = [
     {
         id: 'sessions',
         group: 'Authentication',
+        when: SIGN_IN,
         title: 'Sessions',
         description: 'Where sessions are stored and how long they last.',
         settings: [
@@ -307,6 +316,7 @@ export const SECTIONS: Section[] = [
     {
         id: 'transport',
         group: 'Authentication',
+        when: SIGN_IN,
         title: 'Session transport',
         description: 'How clients send their session: a header, a cookie, or both.',
         settings: [
@@ -327,6 +337,7 @@ export const SECTIONS: Section[] = [
     {
         id: 'users',
         group: 'Authentication',
+        when: SIGN_IN,
         title: 'User table',
         description: 'Your users — for local sign-in, and to link external identities to rows. Detected automatically; set these only to override.',
         settings: [

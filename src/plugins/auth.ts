@@ -5,6 +5,7 @@ import { ErrorResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
 import { safeRedirectTarget, appendQuery } from '../core/origins';
 import { getAppConfig } from '../core/config';
+import { anonymousUser } from '../core/user';
 import { Logger } from '../utils/Logger';
 import type { RapiddUser, AuthOptions, AuthStrategy, RouteAuthConfig } from '../types';
 
@@ -42,6 +43,14 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
                 throw new ErrorResponse(401, 'authentication_not_available');
             };
         });
+        // Sign-in is off on purpose (AUTH_PROVIDERS=none): every request is the anonymous user,
+        // so routes serve it and access rules decide what it may do. (Without a user table but
+        // with sign-in configured, requests stay without a user — routes refuse them.)
+        if (auth.isAnonymous?.()) {
+            fastify.addHook('onRequest', async (request) => {
+                request.user = anonymousUser();
+            });
+        }
         return;
     }
 

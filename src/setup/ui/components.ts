@@ -135,14 +135,19 @@ export function installComponents(R) {
         }
         if (setting.type === 'multi') {
             const items = value ? value.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean) : [];
+            // An exclusive option (none) stands alone: choosing it clears the others, and back
+            const alone = setting.exclusive || [];
+            const ordered = items.filter((x) => !alone.includes(x));
             return h('div', null,
                 h('div', { class: 'chips', role: 'group', 'aria-label': setting.label }, (setting.options || []).map((o) => {
                     const on = items.includes(o);
+                    const next = alone.includes(o) ? (on ? [] : [o]) : on ? items.filter((x) => x !== o) : ordered.concat([o]);
                     return h('button', { type: 'button', class: 'chip' + (on ? ' on' : ''), disabled: locked, 'aria-pressed': String(on),
-                        onclick: () => R.setValue(key, (on ? items.filter((x) => x !== o) : items.concat([o])).join(','), true) },
-                    on ? h('span', { class: 'ord', text: String(items.indexOf(o) + 1) }) : null, o);
+                        onclick: () => R.setValue(key, next.join(','), true) },
+                    on && !alone.includes(o) ? h('span', { class: 'ord', text: String(ordered.indexOf(o) + 1) }) : on ? R.icon('check') : null,
+                    (setting.labels && setting.labels[o]) || o);
                 })),
-                items.length > 1 ? h('div', { class: 'help', text: 'Tried in this order: ' + items.join(' → ') + '. Click to remove, click again to add at the end.' }) : null);
+                ordered.length > 1 ? h('div', { class: 'help', text: 'Tried in this order: ' + ordered.join(' → ') + '. Click to remove, click again to add at the end.' }) : null);
         }
         if (setting.type === 'json') {
             return h('textarea', { class: 'input', id, disabled: locked, spellcheck: 'false', placeholder: setting.placeholder || '', value,

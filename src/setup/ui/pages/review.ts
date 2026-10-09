@@ -26,7 +26,7 @@ export function installReviewPage(R) {
     }
 
     function settingsCard() {
-        const keys = Object.keys(S.changes);
+        const keys = R.pendingKeys();
         if (!keys.length) return null;
         return R.card({ title: 'Settings', icon: 'sliders', badge: R.badge(String(keys.length), 'brand'), description: 'Written to ' + S.state.envFile.display + ' — the previous version is kept as ' + S.state.envFile.display + '.bak.', body: 'flush' },
             h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
@@ -159,7 +159,7 @@ export function installReviewPage(R) {
             const v = S.validation;
             const { invalid, missing } = problems();
             // Here generated secrets count too: they are written with everything else
-            const total = Object.keys(S.changes).length + R.unsaved().files;
+            const total = R.pendingKeys().length + R.unsaved().files;
             // Saving needs valid changes; starting the API needs every setting (npm run setup only saves)
             const blocked = invalid.length > 0;
             const blockedStart = blocked || (!R.command() && missing.length > 0);

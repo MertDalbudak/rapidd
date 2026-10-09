@@ -6,6 +6,9 @@ export function installStartPages(R) {
     const S = R.S;
     const AUTH_SECTIONS = ['providers', 'tokens', 'sessions', 'transport', 'users', 'identities', 'ldap', 'oidc', 'webdav'];
 
+    /** AUTH_PROVIDERS=none: no sign-in, every request is anonymous */
+    R.signInOff = () => (R.value('AUTH_PROVIDERS') || '').split(',').map((x) => x.trim().toLowerCase()).includes('none');
+
     /** The page that fixes a setup reason */
     R.pageFor = (key) => {
         if (/^(DATABASE_|REDIS_)/.test(key)) return 'database';
@@ -38,8 +41,10 @@ export function installStartPages(R) {
             { page: 'model', title: 'Data model & API', state: R.byId.model.status(),
                 text: p.schema.error ? 'The schema has errors' : p.schema.models.length === 0 ? 'Read the tables from the database, or create them from the schema'
                     : p.schema.models.length + ' models · ' + (p.client.generated ? 'client generated' : 'client not generated') + ' · ' + p.generated.routes + ' route files' },
-            { page: 'signin', title: 'Sign-in', state: R.byId.signin.status(), text: 'Identity providers, tokens and sessions — ' + (R.value('AUTH_PROVIDERS') || 'local') },
-            { page: 'admin', title: 'First user', state: R.byId.admin.status(), text: S.admin ? (S.admin.available ? 'The user table is empty — create the first account' : S.admin.reason) : 'The first account, while the user table is empty', optional: true },
+            { page: 'signin', title: 'Sign-in', state: R.byId.signin.status(),
+                text: R.signInOff() ? 'No sign-in — every request is anonymous' : 'Identity providers, tokens and sessions — ' + (R.value('AUTH_PROVIDERS') || 'local') },
+            { page: 'admin', title: 'First user', state: R.byId.admin.status(), optional: true,
+                text: R.signInOff() ? 'Not needed — there is no sign-in' : S.admin ? (S.admin.available ? 'The user table is empty — create the first account' : S.admin.reason) : 'The first account, while the user table is empty' },
             { page: 'access', title: 'Access control', state: R.byId.access.status(),
                 text: p.schema.models.length === 0 ? 'Rules per model and role' : p.acl.missing.length ? p.acl.missing.length + ' of ' + p.schema.models.length + ' models without rules' : 'Every model has rules (' + rules + ' in config/acl.json)' },
             { page: 'rls', title: 'Row-level security', state: '', text: 'Database-enforced isolation (PostgreSQL)', optional: true },
@@ -86,7 +91,8 @@ export function installStartPages(R) {
             R.stat('database', 'Database', R.hasValue('DATABASE_URL') ? (p.schema.provider || 'set') : 'Not configured', p.schema.exists ? p.schema.path : 'no schema', R.hasValue('DATABASE_URL') ? '' : 'bad-text'),
             R.stat('layers', 'Data model', p.schema.models.length + ' models', p.client.generated ? 'Prisma client generated' : 'Prisma client missing', p.client.generated ? '' : 'warn-text'),
             R.stat('code', 'Generated code', p.generated.routes + ' routes', p.generated.models + ' model classes'),
-            R.stat('key', 'Sign-in', providers.join(', '), (R.value('AUTH_STRATEGIES') || 'bearer') + ' tokens')));
+            R.signInOff() ? R.stat('key', 'Sign-in', 'None', 'every request is anonymous', 'warn-text')
+                : R.stat('key', 'Sign-in', providers.join(', '), (R.value('AUTH_STRATEGIES') || 'bearer') + ' tokens')));
         out.push(checklist());
         return out;
     }
@@ -115,9 +121,17 @@ export function installStartPages(R) {
         status: () => R.groupState(AUTH_SECTIONS),
         render: () => {
             const providers = (R.value('AUTH_PROVIDERS') || 'local').split(',').map((x) => x.trim()).filter(Boolean);
-            const out = [R.pageHead('Sign-in', 'How users sign in: local accounts, LDAP / Active Directory, OpenID Connect (Entra ID, Keycloak, Okta, …) or WebDAV — and the tokens and sessions they get.')];
-            if (S.state.project.userModel === null && providers.includes('local')) {
-                out.push(R.notice('info', 'No user table found', 'Local sign-in needs a table such as user or account with a password column. Without one, sign-in comes from external providers only — or set the table under Users.'));
+            const out = [R.pageHead('Sign-in', 'How users sign in: local accounts, LDAP / Active Directory, OpenID Connect (Entra ID, Keycloak, Okta, …) or WebDAV — and the tokens and sessions they get. Or no sign-in at all.')];
+            const noSignIn = R.button('No sign-in', { size: 'sm', icon: 'globe', disabled: R.info('AUTH_PROVIDERS').locked, onClick: () => R.setValue('AUTH_PROVIDERS', 'none', true) });
+            if (R.signInOff()) {
+                const closed = R.value('ACL_DEFAULT') === 'deny';
+                out.push(R.notice(closed ? 'info' : 'warn', 'No sign-in — every request is anonymous',
+                    'The API has no sign-in routes and issues no tokens. Every request runs as the anonymous user (role “anonymous”): access rules decide what it may read and change — the rules for “anonymous”, else “Everyone else”. Models without rules are '
+                        + (closed ? 'closed (ACL_DEFAULT=deny).' : 'open to everyone who reaches the API.'),
+                    [R.button('Access control', { size: 'sm', icon: 'shield', onClick: () => R.go('access') }),
+                        R.info('AUTH_PROVIDERS').locked ? null : R.button('Turn sign-in on', { size: 'sm', kind: 'ghost', onClick: () => R.setValue('AUTH_PROVIDERS', '', true) })]));
+            } else if (S.state.project.userModel === null && providers.includes('local')) {
+                out.push(R.notice('info', 'No user table found', 'Local sign-in needs a table such as user or account with a password column. Without one, sign-in comes from external providers only — set the table under Users, or run the API without sign-in.', [noSignIn]));
             }
             for (const id of AUTH_SECTIONS) {
                 const section = R.section(id);

@@ -2,6 +2,8 @@ import fs from 'fs';
 import path from 'path';
 import { isRulesEntry } from '../core/aclRules';
 import { describeUserModel } from './project';
+import { listItems } from './catalog';
+import { ANONYMOUS_ROLE } from '../core/user';
 import type { DMMF, DMMFField, DMMFModel } from '../types';
 
 /**
@@ -144,6 +146,8 @@ export function aclContext(root: string, dmmf: DMMF | null, env: Record<string, 
         // invalid AUTH_ROLE_MAP is reported on the sign-in page
     }
     if (env.AUTH_DEFAULT_ROLE) roles.add(env.AUTH_DEFAULT_ROLE);
+    // Sign-in off: every request has this role
+    if (listItems(env.AUTH_PROVIDERS).includes('none')) roles.add(ANONYMOUS_ROLE);
 
     return {
         models,

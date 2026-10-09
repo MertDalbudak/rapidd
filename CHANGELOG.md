@@ -65,6 +65,12 @@ start. The built-in Mailer is removed — apps use the mail library of their cho
     (`POST /auth/exchange`), never in URLs. Verified end-to-end against Keycloak 26.
   - `webdav` — credentials validated with an authenticated PROPFIND (Nextcloud, ownCloud, ...).
   - Custom providers implementing `AuthProvider`.
+- **No sign-in** (`AUTH_PROVIDERS=none`, or `providers: []` in `src/config/auth.ts`): no `/auth`
+  routes, tokens or JWT secrets; every request runs as the anonymous user (`{ id: null, role:
+  "anonymous" }`, or the default user of `src/config/user.ts`) — not a system user: access rules
+  apply (role `anonymous`, else `*`). The setup wizard offers it as *none — no sign-in*.
+- JWT secrets are required (in production) only when auth is on — a project without a user table
+  no longer fails to start without them.
 - **Identity mapping**: link external identities to user-table rows (`AUTH_LINK`, default email,
   case-insensitive on PostgreSQL, ambiguous matches rejected), `provision` rows on first login,
   claims-only users with `AUTH_ROLE_MAP` role mapping, or full control via `resolveUser`.

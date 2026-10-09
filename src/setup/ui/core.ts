@@ -226,6 +226,8 @@ export function installCore(R) {
     /** Untouched generated secrets are not counted: they are saved with the setup anyway */
     R.generated = (key) => !!S.state.suggested[key] && S.changes[key] === S.state.suggested[key];
     R.unsaved = () => ({ settings: Object.keys(S.changes).filter((k) => !R.generated(k)).length, files: Object.keys(R.stagedFiles()).length });
+    /** Settings a save writes: generated secrets of settings that do not apply are left out (the server does the same) */
+    R.pendingKeys = () => Object.keys(S.changes).filter((k) => !(R.generated(k) && S.validation && !S.validation.visible.includes(k)));
 
     // ── Validation ───────────────────────────────────────────────────────
     let timer = null;

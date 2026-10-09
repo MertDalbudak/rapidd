@@ -70,6 +70,28 @@ describe('validate', () => {
         expect(authEnabled({ AUTH_PROVIDERS: 'oidc' }, { userModel: null })).toBe(true);
     });
 
+    it('no sign-in (AUTH_PROVIDERS=none): stands alone, hides the sign-in settings, needs no JWT secrets', () => {
+        const prod = { DATABASE_URL: DB, NODE_ENV: 'production', AUTH_PROVIDERS: 'none' };
+        const user = { userModel: { model: 'user' } as any, schema: { models: ['user'] } as any };
+        const v = validate(prod, sections, user);
+        expect(v.blockers).toEqual([]);
+        expect(v.visible).not.toEqual(expect.arrayContaining(['JWT_SECRET']));
+        for (const key of ['JWT_SECRET', 'AUTH_SESSION_STORAGE', 'AUTH_STRATEGIES', 'DB_USER_TABLE']) expect(v.visible).not.toContain(key);
+        expect(v.warnings.AUTH_PROVIDERS).toMatch(/models without access rules are open/);
+        expect(validate({ ...prod, ACL_DEFAULT: 'deny' }, sections, user).warnings.AUTH_PROVIDERS).toMatch(/access rules for “anonymous” or “\*” decide/);
+        expect(authEnabled({ AUTH_PROVIDERS: 'none' }, user)).toBe(false);
+        expect(validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'none,local' }, sections).errors.AUTH_PROVIDERS).toBe('none cannot be combined with others');
+        expect(validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'none,local' }, sections).blockers).toContain('AUTH_PROVIDERS');
+    });
+
+    it('local sign-in without a user table: says that the API would refuse every request', () => {
+        const project = { userModel: null, schema: { models: ['product'] } as any };
+        expect(validate({ DATABASE_URL: DB }, sections, project).warnings.AUTH_PROVIDERS).toMatch(/choose none for an API without sign-in/);
+        expect(validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'oidc' }, sections, project).warnings.AUTH_PROVIDERS).toBeUndefined();
+        // A fresh project (no models yet) is not warned about
+        expect(validate({ DATABASE_URL: DB }, sections, { userModel: null, schema: { models: [] } as any }).warnings.AUTH_PROVIDERS).toBeUndefined();
+    });
+
     it('warns about risky production values', () => {
         const v = validate({ DATABASE_URL: DB, NODE_ENV: 'production', JWT_SECRET: 'x'.repeat(40), JWT_REFRESH_SECRET: 'x'.repeat(40),
             ALLOWED_ORIGINS: '*', LOG_LEVEL: 'finest' }, sections);

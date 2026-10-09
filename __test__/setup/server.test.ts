@@ -304,6 +304,22 @@ describe('HTTP setup wizard', () => {
             }
         });
 
+        it('no sign-in: no JWT secrets are written, no first user offered, the anonymous role is known', async () => {
+            fs.mkdirSync(path.join(dir, 'prisma', 'client'));
+            fs.writeFileSync(path.join(dir, 'prisma', 'client', 'index.js'), 'module.exports = {};');
+            await start();
+            const changes = { DATABASE_URL: 'postgresql://u:p@h/db', AUTH_PROVIDERS: 'none' };
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/admin/status', headers: bearer, payload: { changes } })).json())
+                .toEqual({ available: false, reason: 'Sign-in is off (AUTH_PROVIDERS=none) — the API needs no accounts' });
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/acl/context', headers: bearer, payload: { changes } })).json().roles).toContain('anonymous');
+            const r = await wizard.app.inject({ method: 'POST', url: '/setup/api/finish', headers: bearer, payload: { changes } });
+            expect(r.json()).toMatchObject({ ok: true });
+            const env = dotenv.parse(fs.readFileSync(process.env.ENV_FILE!));
+            expect(env).toMatchObject({ AUTH_PROVIDERS: 'none', COOKIE_SECRET: expect.stringMatching(/^[0-9a-f]{64}$/) });
+            expect(env.JWT_SECRET).toBeUndefined();
+            expect(env.JWT_REFRESH_SECRET).toBeUndefined();
+        });
+
         it('finish: first boot refuses while the API still cannot start', async () => {
             await start();
             const r = await wizard.app.inject({ method: 'POST', url: '/setup/api/finish', headers: bearer, payload: { changes: { DATABASE_URL: 'postgresql://u:p@h/db' } } });

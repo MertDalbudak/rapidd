@@ -4,6 +4,7 @@ import { createAdapter } from '../core/adapter';
 import { parseScalar } from '../orm/values';
 import { readSchema, describeUserModel } from './project';
 import type { UserModelInfo } from './project';
+import { listItems } from './catalog';
 import type { Values } from './catalog';
 
 /**
@@ -40,6 +41,7 @@ export interface AdminStatus {
 
 /** Can a first user be created — and which fields does it need? */
 export async function adminStatus(values: Values, root: string = process.cwd()): Promise<AdminStatus> {
+    if (listItems(values.AUTH_PROVIDERS).includes('none')) return { available: false, reason: 'Sign-in is off (AUTH_PROVIDERS=none) — the API needs no accounts' };
     const schema = await readSchema(root);
     if (!schema.dmmf) return { available: false, reason: schema.exists ? 'The Prisma schema cannot be read' : 'There is no Prisma schema yet' };
     const model = describeUserModel(schema.dmmf, values);

@@ -238,7 +238,10 @@ export type AuthProviderConfig =
  * Every field is optional; env vars (AUTH_PROVIDERS, LDAP_*, OIDC_*, WEBDAV_*) fill the gaps.
  */
 export interface AuthConfig {
-    /** Identity providers, tried in order for password logins. Default: AUTH_PROVIDERS env, else ['local'] */
+    /**
+     * Identity providers, tried in order for password logins. Default: AUTH_PROVIDERS env, else
+     * ['local']. An empty list (AUTH_PROVIDERS=none) turns sign-in off: every request is anonymous.
+     */
     providers?: Array<AuthProviderConfig | AuthProvider>;
     /** Link external identities to user-table rows (default { field: 'email', from: 'email' }); false disables */
     link?: AuthLinkConfig | false;

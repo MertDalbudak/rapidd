@@ -120,6 +120,8 @@ function typeError(setting: Setting, value: string): string | null {
             const items = listItems(value);
             const unknown = items.filter((i) => !setting.options?.includes(i));
             if (unknown.length) return `Unknown: ${unknown.join(', ')} — allowed: ${setting.options?.join(', ')}`;
+            const alone = items.filter((i) => setting.exclusive?.includes(i));
+            if (alone.length && items.length > 1) return `${alone.join(', ')} cannot be combined with others`;
             return new Set(items).size === items.length ? null : 'Listed twice';
         }
         case 'url':
@@ -162,6 +164,21 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
         }
         case 'PORT':
             return value && (Number(value) < 1 || Number(value) > 65535) ? ['1 – 65535', null] : [null, null];
+        case 'AUTH_PROVIDERS': {
+            const providers = listItems(value);
+            if (providers.includes('none')) {
+                return [null, values.ACL_DEFAULT === 'deny'
+                    ? 'No sign-in: every request is anonymous — access rules for “anonymous” or “*” decide what it may do'
+                    : 'No sign-in, and models without access rules are open: anyone who reaches the API may read and change their data. Add access rules, or close such models (ACL_DEFAULT=deny)'];
+            }
+            // Local sign-in without a user table: nobody can sign in, and the routes refuse every request
+            const external = providers.some((p) => p !== 'local');
+            const modelled = Array.isArray(project?.schema?.models) && project!.schema!.models.length > 0;
+            if (!external && modelled && project?.userModel === null && !values.DB_USER_TABLE) {
+                return [null, 'There is no user table, so nobody can sign in and the API refuses every request — choose none for an API without sign-in, or add a user table'];
+            }
+            return [null, null];
+        }
         case 'JWT_SECRET':
         case 'JWT_REFRESH_SECRET':
         case 'COOKIE_SECRET':
@@ -257,8 +274,9 @@ export function validate(values: Values, sections: Section[] = buildSections(), 
     return result;
 }
 
-/** Mirrors Auth: enabled with a user table (detected or DB_USER_TABLE) or any external provider */
+/** Mirrors Auth: off with AUTH_PROVIDERS=none; on with a user table (detected or DB_USER_TABLE) or any external provider */
 export function authEnabled(values: Values, project: Partial<ProjectInfo>): boolean {
+    if (listItems(values.AUTH_PROVIDERS).includes('none')) return false;
     const external = listItems(values.AUTH_PROVIDERS).some((p) => p !== 'local');
     return external || !!values.DB_USER_TABLE || !!project.userModel;
 }

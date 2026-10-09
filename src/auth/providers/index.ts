@@ -63,9 +63,16 @@ export function webdavConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Webda
     return { type: 'webdav', url: env.WEBDAV_URL || '', timeout: int(env.WEBDAV_TIMEOUT) };
 }
 
-/** AUTH_PROVIDERS (default 'local') → provider configs, each fed from its env vars */
+/**
+ * AUTH_PROVIDERS (default 'local') → provider configs, each fed from its env vars.
+ * `none`: no providers — sign-in is off and every request is anonymous.
+ */
 export function providerConfigsFromEnv(env: NodeJS.ProcessEnv = process.env): AuthProviderConfig[] {
     const names = list(env.AUTH_PROVIDERS);
+    if (names.some((name) => name.toLowerCase() === 'none')) {
+        if (names.length > 1) throw new Error('[Auth] AUTH_PROVIDERS=none turns sign-in off — it cannot be combined with providers');
+        return [];
+    }
     return (names.length ? names : ['local']).map((type) => {
         switch (type.toLowerCase()) {
             case 'local': return { type: 'local' };
@@ -73,7 +80,7 @@ export function providerConfigsFromEnv(env: NodeJS.ProcessEnv = process.env): Au
             case 'oidc': return oidcConfigFromEnv(env);
             case 'webdav': return webdavConfigFromEnv(env);
             default:
-                throw new Error(`[Auth] Unknown provider "${type}" in AUTH_PROVIDERS (expected local, ldap, oidc, webdav)`);
+                throw new Error(`[Auth] Unknown provider "${type}" in AUTH_PROVIDERS (expected local, ldap, oidc, webdav — or none)`);
         }
     });
 }

@@ -151,6 +151,7 @@ export class Auth {
     private _userModel: any = null;
     private _sessionStore: ISessionStore | null = null;
     private _authDisabled = false;
+    private _anonymous = false;
     private _initPromise: Promise<void> | null = null;
     private _explicitIdentifierFields: boolean;
     private _explicitPasswordField: boolean;
@@ -233,28 +234,38 @@ export class Auth {
     }
 
     private async _doInitialize(): Promise<void> {
-        // Secrets first: they must be enforced even when schema auto-detection fails below
-        this._ensureSecrets();
+        // Providers first, so configuration errors surface at startup. Without any
+        // (AUTH_PROVIDERS=none) sign-in is off on purpose: no tokens, no secrets to require
+        const providers = this.providers;
+        if (providers.length === 0) {
+            this._authDisabled = true;
+            this._anonymous = true;
+            Logger.log('Auth: no identity providers (AUTH_PROVIDERS=none) — sign-in is off, every request is anonymous');
+            return;
+        }
 
         try {
             await loadDMMF();
         } catch {
+            // Auth stays on without the schema — its secrets must be in place
+            this._ensureSecrets();
             Logger.warn('Auth: could not load DMMF, auto-detection skipped');
             return;
         }
 
-        // Instantiate providers now so configuration errors surface at startup
-        const providers = this.providers;
         const hasExternal = providers.some(p => p.type !== 'local');
 
         // Auto-detect user model from DMMF
         const userModel = findUserModel();
+        if (!userModel && !this.options.userModel && !hasExternal) {
+            this._authDisabled = true;
+            Logger.log('Auth: no user table detected, auth disabled');
+            return;
+        }
+
+        // Auth is on: its secrets are required in production (generated per start in development)
+        this._ensureSecrets();
         if (!userModel && !this.options.userModel) {
-            if (!hasExternal) {
-                this._authDisabled = true;
-                Logger.log('Auth: no user table detected, auth disabled');
-                return;
-            }
             Logger.log('Auth: no user table detected — external providers only, users come from identity claims');
         }
 
@@ -332,6 +343,14 @@ export class Auth {
      */
     isEnabled(): boolean {
         return !this._authDisabled;
+    }
+
+    /**
+     * Sign-in is off on purpose — no identity providers (AUTH_PROVIDERS=none): every request
+     * is the anonymous user, and access rules decide what it may do
+     */
+    isAnonymous(): boolean {
+        return this._anonymous;
     }
 
     // ── Providers ───────────────────────────────────

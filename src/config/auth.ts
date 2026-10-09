@@ -7,6 +7,7 @@ import type { AuthConfig } from '../types';
  * Single external providers are configured with env vars alone — see .env.example:
  *
  *   AUTH_PROVIDERS=ldap,local        # password providers are tried in this order
+ *   AUTH_PROVIDERS=none              # no sign-in: every request is anonymous, access rules decide
  *   LDAP_URL=ldaps://dc1.corp.example.com
  *   OIDC_ISSUER=https://login.microsoftonline.com/<tenant-id>/v2.0
  *
