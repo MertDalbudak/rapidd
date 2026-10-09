@@ -69,7 +69,6 @@ function createProject() {
         'src/',
         'config/',
         'locales/',
-        'templates/',
         'public/',
         'prisma/schema.prisma',
         'prisma.config.ts',
@@ -126,13 +125,13 @@ function createProject() {
         dependencies: pick(coreDeps, [
             '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/static',
             '@prisma/adapter-mariadb', '@prisma/adapter-pg', '@prisma/client', '@prisma/internals',
-            'bcrypt', 'dotenv', 'ejs', 'fastify', 'fastify-plugin',
-            'ioredis', 'jsonwebtoken', 'luxon', 'nodemailer', 'pg',
+            'bcrypt', 'dotenv', 'fastify', 'fastify-plugin',
+            'ioredis', 'jsonwebtoken', 'pg',
         ]),
         devDependencies: pick(coreDevDeps, [
             '@rapidd/build',
-            '@types/bcrypt', '@types/ejs', '@types/jsonwebtoken', '@types/luxon',
-            '@types/node', '@types/nodemailer', '@types/pg',
+            '@types/bcrypt', '@types/jsonwebtoken',
+            '@types/node', '@types/pg',
             'prisma', 'tsx', 'typescript',
         ]),
     };

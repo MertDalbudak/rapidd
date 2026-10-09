@@ -8,6 +8,7 @@ import fs from 'fs';
 
 // Mock prisma and heavy dependencies before importing app
 jest.mock('../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: {},
     prismaTransaction: jest.fn(),
     requestContext: { run: jest.fn((store: any, fn: any) => fn()) },

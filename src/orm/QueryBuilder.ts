@@ -4,6 +4,9 @@ import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
 import { isSystemUser } from '../core/user';
 import * as dmmf from '../core/dmmf';
+import { dayRange, filterTimeZone, startOfDay } from './dates';
+import { PRISMA_WRITE_OPS, isRawOperation, secureNestedOperations } from './nestedOperations';
+import { parseScalar } from './values';
 import type {
     RelationConfig,
     DMMFField,
@@ -40,16 +43,8 @@ const MAX_FILTER_PATH_DEPTH: number = 10;
 // Cap nesting depth of boolean filter groups (OR(AND(OR(...)))) to bound recursion
 const MAX_FILTER_GROUP_DEPTH: number = 10;
 
-/**
- * Prisma nested-write operation keys.
- * Payloads containing any of these are treated as raw Prisma operations and passed
- * through untransformed (shared with Model.assertWritable — keep the lists in sync
- * by importing this constant, not copying it).
- */
-export const PRISMA_WRITE_OPS = [
-    'connect', 'create', 'connectOrCreate', 'disconnect', 'set',
-    'update', 'upsert', 'deleteMany', 'updateMany', 'createMany',
-] as const;
+// Raw Prisma nested-write operations (connect, deleteMany, ...) — see ./nestedOperations
+export { PRISMA_WRITE_OPS };
 
 // Prisma scalar types whose filter values must parse as numbers
 const NUMERIC_FIELD_TYPES = new Set(['Int', 'BigInt', 'Float', 'Decimal']);
@@ -290,8 +285,17 @@ class QueryBuilder {
      * navigation, and ACL-omit enforcement. When a user is provided, fields hidden by
      * the ACL (getOmitFields) are rejected with 403 so a client can't infer restricted
      * values through filter probing (e.g. price=gt:100000).
+     *
+     * Also accepted: an object of field equality conditions (`{ courseId: '5' }` — values
+     * taken literally, parsed by field type, same ACL checks) and an array of filter
+     * strings (`?q=a&q=b`), combined with AND.
      */
-    filter(q: string, user: any = null): Record<string, unknown> {
+    filter(q: string | string[] | Record<string, unknown>, user: any = null): Record<string, unknown> {
+        if (Array.isArray(q)) {
+            q = q.filter((part) => typeof part === 'string' && part.trim() !== '').join(',');
+        } else if (q && typeof q === 'object') {
+            return this.#equalityFilter(q, user);
+        }
         if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
@@ -432,6 +436,32 @@ class QueryBuilder {
         }
         parts.push(current);
         return parts;
+    }
+
+    /**
+     * Object filter: field equality conditions. Values are literal (no operator syntax, so
+     * nothing can be injected through them), parsed by field type; null matches null.
+     */
+    #equalityFilter(q: Record<string, unknown>, user: any): Record<string, unknown> {
+        const where: Record<string, unknown> = {};
+        for (const [fieldName, value] of Object.entries(q)) {
+            const field = this.fields[fieldName];
+            if (!field || field.kind === 'object') {
+                throw new ErrorResponse(400, "invalid_filter_field", { field: fieldName, modelName: this.name });
+            }
+            this.#assertQueryableField(fieldName, this.name, user);
+            if (value === null) {
+                where[fieldName] = null;
+                continue;
+            }
+            const scalar = typeof value !== 'object' || value instanceof Date;
+            const parsed = scalar && field.type !== 'Json' && field.type !== 'Bytes' ? parseScalar(field, value) : undefined;
+            if (parsed === undefined) {
+                throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value: String(value).slice(0, 100), expected: field.type });
+            }
+            where[fieldName] = parsed;
+        }
+        return where;
     }
 
     /**
@@ -805,10 +835,7 @@ class QueryBuilder {
 
         // Date-only values match the entire day (same semantics as 'on:')
         if (FILTER_PATTERNS.DATE_ONLY.test(value)) {
-            return {
-                gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-                lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1),
-            };
+            return this.#calendarDay(value, date);
         }
         return { equals: date };
     }
@@ -991,11 +1018,7 @@ class QueryBuilder {
 
             // Handle 'on:' - match entire day
             if (foundOperator === 'on:') {
-                const date = this.#parseDate(operatorValue);
-                return {
-                    gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-                    lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1),
-                };
+                return this.#calendarDay(operatorValue, this.#parseDate(operatorValue));
             }
 
             // Handle 'between:'
@@ -1023,14 +1046,39 @@ class QueryBuilder {
     }
 
     /**
-     * Parse a date string and validate it
+     * Parse a date string and validate it. With API_TIMEZONE set, a date-only value means
+     * the start of that day in the configured zone (instead of UTC midnight).
      */
     #parseDate(dateStr: string): Date {
+        const zone = filterTimeZone();
+        if (zone) {
+            const day = dayRange(dateStr, zone);
+            if (day) return day.gte;
+        }
         const date = new Date(dateStr);
         if (isNaN(date.getTime())) {
             throw new Error(`Invalid date: ${dateStr}`);
         }
         return date;
+    }
+
+    /**
+     * The calendar day a filter value names, as a [gte, lt) range. A date-only value is read
+     * from the string itself; a datetime selects the day that contains it — both in
+     * API_TIMEZONE when set, else in the server's timezone.
+     */
+    #calendarDay(value: string, parsed: Date): { gte: Date; lt: Date } {
+        const zone = filterTimeZone();
+        const fromString = dayRange(value, zone);
+        if (fromString) return fromString;
+        if (!zone) {
+            return {
+                gte: startOfDay(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate(), undefined),
+                lt: startOfDay(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate() + 1, undefined),
+            };
+        }
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(parsed);
+        return dayRange(parts, zone)!;
     }
 
     /**
@@ -1677,7 +1725,8 @@ class QueryBuilder {
      * deliberately for trusted internal transformations.
      */
     create(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
-        let result: Record<string, any> = { ...data };
+        // One working copy; the per-key processors edit it in place
+        const result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to set
         const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
@@ -1693,10 +1742,10 @@ class QueryBuilder {
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                result = this.#processCreateRelation(result, key, user);
+                this.#processCreateRelation(result, key, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect
-                result = this.#processForeignKeyField(result, key, user, false);
+                this.#processForeignKeyField(result, key, user, false);
             }
         }
 
@@ -1704,35 +1753,33 @@ class QueryBuilder {
     }
 
     /**
-     * Process a relation field for create operation
+     * Process a relation field for create operation (edits `data`, the caller's working copy)
      */
     #processCreateRelation(
         data: Record<string, any>,
         key: string,
         user: any = null
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
-        if (!data[key]) return data;
+        if (!data[key]) return;
 
         this.#ensureRelations(relatedObject);
 
-        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
-            result[key] = this.#processCreateArrayRelation(
+            data[key] = this.#processCreateArrayRelation(
                 data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, key, user
             );
         } else {
             // Clone the nested object to avoid mutating original
-            result[key] = this.#processCreateSingleRelation(
+            data[key] = this.#processCreateSingleRelation(
                 { ...data[key] }, relatedObject, key, user
             );
         }
-        return result;
     }
 
     /**
@@ -1870,17 +1917,17 @@ class QueryBuilder {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
 
+        // Raw Prisma operations (connect, create, ...) — held to the related model's ACL
+        if (isRawOperation(item)) {
+            return this.#secureRawOperations(item, relatedObject, user, depth);
+        }
+
         // Get ACL context for the related model
         const { modelAcl: relatedAcl, omitFields } = this.#resolveAclContext(relatedObject.object, user);
 
-        // Check canCreate permission
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, item)) {
+        // A plain object payload creates the related record
+        if (user && !isSystemUser(user) && relatedAcl?.canCreate && !relatedAcl.canCreate(user, item)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
-        }
-
-        // If item is already a Prisma operation (connect, create, etc.), skip field validation
-        if (PRISMA_WRITE_OPS.some((op: string) => op in item)) {
-            return { ...item };
         }
 
         // Apply omit fields
@@ -1988,19 +2035,18 @@ class QueryBuilder {
      * Process a scalar field that is a FK to a to-one relation, turning it into a
      * relation connect. In update mode (allowDisconnect) a null value becomes a
      * disconnect; in create mode falsy values are simply dropped.
-     * Shared by the create and update write transformers.
+     * Shared by the create and update write transformers; edits `data`, their working copy.
      */
     #processForeignKeyField(
         data: Record<string, any>,
         key: string,
         user: any,
         allowDisconnect: boolean
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByField(key);
-        if (!relatedObject) return data;
+        if (!relatedObject) return;
 
-        const result: Record<string, any> = { ...data };
-        const value = result[key];
+        const value = data[key];
         // Create mode keeps the historical truthy check; update mode connects on any non-null value
         const shouldConnect = allowDisconnect ? value != null : Boolean(value);
 
@@ -2013,12 +2059,25 @@ class QueryBuilder {
             // Apply ACL access filter for connect
             const { accessFilter } = this.#resolveAclContext(relatedObject.object, user);
 
-            result[relatedObject.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, accessFilter) };
+            data[relatedObject.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, accessFilter) };
         } else if (allowDisconnect) {
-            result[relatedObject.name] = { disconnect: true };
+            data[relatedObject.name] = { disconnect: true };
         }
-        delete result[key];
-        return result;
+        delete data[key];
+    }
+
+    /**
+     * A plain row for bulk writes (createMany): fields the ACL hides or doesn't let this user
+     * write are removed, nothing is transformed. Relations aren't supported by createMany.
+     */
+    sanitizeRow(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        const row: Record<string, any> = { ...data };
+        const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
+        for (const field of omitFields) {
+            delete row[field];
+        }
+        this.#applyWritableWhitelist(row, modelAcl, user);
+        return row;
     }
 
     /**
@@ -2026,8 +2085,9 @@ class QueryBuilder {
      * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
      * Does NOT mutate the input data - returns a new transformed object
      */
-    update(id: string | number, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
-        let result: Record<string, any> = { ...data };
+    update(id: string | number | null, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        // One working copy; the per-key processors edit it in place
+        const result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to modify
         const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
@@ -2036,6 +2096,14 @@ class QueryBuilder {
         }
         this.#applyWritableWhitelist(result, modelAcl, user);
 
+        // The record's own key, unchanged, is not a write (clients echo it back; upserts carry
+        // it). Dropping it avoids a pointless key update — and Prisma's checked update input,
+        // used once a foreign key becomes a connect, has no autoincrement id at all.
+        const pk = this.getPrimaryKey();
+        if (id != null && typeof pk === 'string' && result[pk] != null && String(result[pk]) === String(id)) {
+            delete result[pk];
+        }
+
         const keys = Object.keys(result);
         for (const key of keys) {
             const field = this.fields[key];
@@ -2043,10 +2111,10 @@ class QueryBuilder {
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                result = this.#processUpdateRelation(result, key, id, user);
+                this.#processUpdateRelation(result, key, id, user);
             } else {
                 // Check if this scalar field is a FK that should become a connect/disconnect
-                result = this.#processForeignKeyField(result, key, user, true);
+                this.#processForeignKeyField(result, key, user, true);
             }
         }
 
@@ -2054,36 +2122,34 @@ class QueryBuilder {
     }
 
     /**
-     * Process a relation field for update operation
+     * Process a relation field for update operation (edits `data`, the caller's working copy)
      */
     #processUpdateRelation(
         data: Record<string, any>,
         key: string,
-        parentId: string | number,
+        parentId: string | number | null,
         user: any
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
-        if (!data[key]) return data;
+        if (!data[key]) return;
 
         this.#ensureRelations(relatedObject);
 
-        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
-            result[key] = this.#processArrayRelation(
+            data[key] = this.#processArrayRelation(
                 data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, parentId, user
             );
         } else {
             // Clone the nested object to avoid mutating original
-            result[key] = this.#processSingleRelation(
+            data[key] = this.#processSingleRelation(
                 { ...data[key] }, relatedObject, user
             );
         }
-        return result;
     }
 
     /**
@@ -2175,6 +2241,44 @@ class QueryBuilder {
     }
 
     /**
+     * Hold raw Prisma operations in a nested payload ({ tags: { deleteMany: {} } },
+     * { author: { connect: { id } } }, ...) to the related model's ACL — otherwise they
+     * would bypass access/update/delete filters, canCreate and field stripping entirely.
+     * System users (and trusted internal calls without a user) pass through unchanged.
+     */
+    #secureRawOperations(ops: Record<string, any>, relation: RelationConfig, user: any, depth: number = 0): Record<string, any> {
+        if (!user || isSystemUser(user)) return ops;
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
+        }
+        const { modelAcl, accessFilter, updateFilter, deleteFilter, omitFields } = this.#resolveAclContext(relation.object, user);
+        const pk = this.getPrimaryKey(relation.object);
+        const identifiers = Array.isArray(pk) ? pk : [pk];
+        const nestedRelations = dmmf.buildRelationships(relation.object);
+        // `true` from an ACL hook means "no restriction"
+        const normalize = (filter: any) => (filter === true || filter == null ? null : filter);
+
+        return secureNestedOperations(ops, relation, {
+            accessFilter: normalize(accessFilter),
+            updateFilter: normalize(updateFilter),
+            deleteFilter: normalize(deleteFilter),
+            canCreate: (data) => !modelAcl?.canCreate || modelAcl.canCreate(user, data),
+            cleanData: (data) => {
+                const cleaned: Record<string, any> = { ...data };
+                for (const field of omitFields) delete cleaned[field];
+                this.#applyWritableWhitelist(cleaned, modelAcl, user, identifiers);
+                for (const key of Object.keys(cleaned)) {
+                    const nested = nestedRelations.find((r: RelationConfig) => r.name === key);
+                    if (nested && isRawOperation(cleaned[key])) {
+                        cleaned[key] = this.#secureRawOperations(cleaned[key], nested, user, depth + 1);
+                    }
+                }
+                return cleaned;
+            },
+        });
+    }
+
+    /**
      * Resolve the ACL context (hooks + evaluated filters) for a model and user.
      * Central helper for the `user && acl?.hook ? ... : fallback` boilerplate.
      * Filters are lazy getters — only the hooks you destructure are invoked.
@@ -2183,6 +2287,7 @@ class QueryBuilder {
         modelAcl: any;
         accessFilter: Record<string, any> | null;
         updateFilter: Record<string, any> | null;
+        deleteFilter: Record<string, any> | null;
         omitFields: string[];
     } {
         const modelAcl = getAcl().model[modelName];
@@ -2197,6 +2302,9 @@ class QueryBuilder {
             },
             get updateFilter() {
                 return active && modelAcl?.getUpdateFilter ? self.cleanFilter(modelAcl.getUpdateFilter(user)) : null;
+            },
+            get deleteFilter() {
+                return active && modelAcl?.getDeleteFilter ? self.cleanFilter(modelAcl.getDeleteFilter(user)) : null;
             },
             get omitFields() {
                 if (!active || !modelAcl?.getOmitFields) return [];
@@ -2409,17 +2517,17 @@ class QueryBuilder {
         relatedObject: RelationConfig,
         user: any = null
     ): Record<string, any> | null {
+        // Raw Prisma operations (connect, deleteMany, ...) — held to the related model's ACL
+        if (isRawOperation(dataObj)) {
+            return this.#secureRawOperations(dataObj, relatedObject, user);
+        }
+
         // Get ACL context for the related model
         const { modelAcl: relatedAcl, omitFields } = this.#resolveAclContext(relatedObject.object, user);
 
-        // Check canCreate permission since upsert may create new records
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
+        // A plain object payload becomes an upsert, which may create the related record
+        if (user && !isSystemUser(user) && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
-        }
-
-        // If dataObj is already a Prisma operation (connect, create, disconnect, etc.), skip field validation
-        if (PRISMA_WRITE_OPS.some((op: string) => op in dataObj)) {
-            return dataObj;
         }
 
         // Remove omitted fields from input
@@ -2698,8 +2806,6 @@ class QueryBuilder {
      * receive localized messages; it defaults to the configured default language.
      */
     static errorHandler(error: any, data: Record<string, unknown> = {}, language: string | null = null): QueryErrorResponse {
-        Logger.error(error);
-
         // Default values
         let statusCode: number = error.status_code || 500;
         let message: string;
@@ -2761,6 +2867,14 @@ class QueryBuilder {
             statusCode = 500;
             key = 'internal_server_error';
             message = LanguageDict.get(key, null, language);
+        }
+
+        // Client errors (404, 403, duplicates, validation) are expected traffic: warn, so error
+        // level and alerting stay meaningful for real failures
+        if (statusCode >= 500) {
+            Logger.error(error);
+        } else {
+            Logger.warn(`${statusCode} ${key ?? error?.code ?? ''}`.trim(), { message: error?.message });
         }
 
         return {

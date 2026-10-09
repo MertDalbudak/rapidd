@@ -14,6 +14,7 @@ function loadLogger(env: Record<string, string> = {}): typeof import('../../src/
     process.env.NODE_ENV = env.NODE_ENV ?? 'development';
     process.env.LOG_LEVEL = env.LOG_LEVEL ?? 'essential';
     process.env.LOG_DIR = env.LOG_DIR ?? '';
+    process.env.LOG_FORMAT = env.LOG_FORMAT ?? '';
 
     jest.isolateModules(() => {
         mod = require('../../src/utils/Logger');
@@ -279,6 +280,64 @@ describe('Logger', () => {
 
             expect(fs.existsSync(nestedDir)).toBe(true);
             expect(fs.existsSync(path.join(nestedDir, 'app.log'))).toBe(true);
+        });
+    });
+
+    // ── Security & enterprise output ─────────────────────────
+
+    describe('redaction at finest', () => {
+        it('never writes credentials from headers or bodies', () => {
+            const { Logger } = loadLogger({ LOG_LEVEL: 'finest' });
+
+            Logger.request({
+                method: 'POST', url: '/auth/login', status: 200, time: 5,
+                requestHeaders: { authorization: 'Bearer abc.def', cookie: 'token=xyz', 'content-type': 'application/json' },
+                requestBody: { user: 'alice', password: 'hunter2', nested: { clientSecret: 's3cr3t', keep: 'visible' } },
+                responseHeaders: { 'set-cookie': 'token=xyz' },
+                responseBody: JSON.stringify({ accessToken: 'jwt-a', refreshToken: 'jwt-r', user: { id: 1 } }),
+            });
+
+            const output = consoleSpy.log.mock.calls[0][0] as string;
+            for (const secret of ['abc.def', 'token=xyz', 'hunter2', 's3cr3t', 'jwt-a', 'jwt-r']) {
+                expect(output).not.toContain(secret);
+            }
+            expect(output).toContain('[REDACTED]');
+            expect(output).toContain('visible');
+            expect(output).toContain('alice');
+        });
+    });
+
+    describe('LOG_FORMAT=json', () => {
+        it('writes one JSON object per line with merged data', () => {
+            const { Logger } = loadLogger({ LOG_LEVEL: 'fine', LOG_FORMAT: 'json' });
+            Logger.log('Server running', { host: '0.0.0.0', port: 3000 });
+            const record = JSON.parse(consoleSpy.log.mock.calls[0][0] as string);
+            expect(record).toMatchObject({ level: 'info', msg: 'Server running', host: '0.0.0.0', port: 3000 });
+            expect(typeof record.time).toBe('string');
+        });
+
+        it('serializes errors and access logs', () => {
+            const { Logger } = loadLogger({ LOG_LEVEL: 'fine', LOG_FORMAT: 'json' });
+            Logger.error(new TypeError('bad thing'));
+            const err = JSON.parse(consoleSpy.error.mock.calls[0][0] as string);
+            expect(err).toMatchObject({ level: 'error', msg: 'bad thing', err: { type: 'TypeError', message: 'bad thing' } });
+
+            Logger.request({ method: 'GET', url: '/x', status: 200, time: 12.4, ip: '1.2.3.4', requestId: 'r-1' });
+            const access = JSON.parse(consoleSpy.log.mock.calls[0][0] as string);
+            expect(access).toMatchObject({ msg: 'request', method: 'GET', url: '/x', status: 200, durationMs: 12, ip: '1.2.3.4', requestId: 'r-1' });
+        });
+    });
+
+    describe('log context', () => {
+        it('stamps lines written inside a context with the request id (across awaits)', async () => {
+            const { Logger } = loadLogger({ LOG_LEVEL: 'essential' });
+            await Logger.withContext({ requestId: 'req-42' }, async () => {
+                await new Promise((r) => setTimeout(r, 1));
+                Logger.warn('inside');
+            });
+            Logger.warn('outside');
+            expect(consoleSpy.warn.mock.calls[0][0]).toContain('[req:req-42] inside');
+            expect(consoleSpy.warn.mock.calls[1][0]).not.toContain('req:');
         });
     });
 });

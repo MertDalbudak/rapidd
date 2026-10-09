@@ -3,6 +3,7 @@ import path from 'path';
 import type { RLSVariables, DatabaseProvider, AdapterResult, AclConfig } from '../types';
 import * as dmmf from './dmmf';
 import { Logger } from '../utils/Logger';
+import { applyAclDefault } from './acl';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'client'));
@@ -171,6 +172,13 @@ export const prisma = rlsEnabled
     })
     : basePrisma;
 
+/** Whether this request's queries carry RLS variables (each query then runs in its own transaction) */
+export function rlsActive(): boolean {
+    if (!rlsEnabled) return false;
+    const variables = requestContext.getStore()?.variables;
+    return !!variables && Object.keys(variables).length > 0;
+}
+
 // =====================================================
 // TRANSACTION HELPERS
 // =====================================================
@@ -246,6 +254,8 @@ export function getAcl(): AclConfig {
                 Logger.error(`ACL config failed to load — falling back to UNRESTRICTED access for all models: ${error?.message || error}`);
             }
         }
+        // ACL_DEFAULT=deny closes every model that has no entry
+        _acl = applyAclDefault(_acl!);
     }
     return _acl!;
 }

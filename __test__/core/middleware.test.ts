@@ -252,4 +252,19 @@ describe('modelMiddleware', () => {
             expect(modelMiddleware.getMiddleware('before', 'count', 'any')).toEqual([]);
         });
     });
+
+    describe('operation state', () => {
+        it('gives each operation a state object, and carries one passed in', () => {
+            const before = modelMiddleware.createContext({ name: 'posts' }, 'update', {});
+            expect(before.state).toEqual({});
+            before.state.previous = { title: 'old' };
+            const after = modelMiddleware.createContext({ name: 'posts' }, 'update', { state: before.state });
+            expect(after.state.previous).toEqual({ title: 'old' });
+        });
+
+        it('keeps softDelete when the caller sets it (after-delete of a soft delete)', () => {
+            expect(modelMiddleware.createContext({ name: 'p' }, 'delete', { softDelete: true }).softDelete).toBe(true);
+            expect(modelMiddleware.createContext({ name: 'p' }, 'delete', {}).softDelete).toBe(false);
+        });
+    });
 });

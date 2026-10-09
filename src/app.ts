@@ -1,7 +1,8 @@
 import 'dotenv/config';
 import path from 'path';
 import fs from 'fs';
-import Fastify, { FastifyInstance } from 'fastify';
+import { randomUUID } from 'crypto';
+import Fastify, { FastifyInstance, FastifyRequest } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
 import fastifyCors from '@fastify/cors';
 import fastifyFormbody from '@fastify/formbody';
@@ -9,8 +10,10 @@ import fastifyStatic from '@fastify/static';
 
 import { ErrorResponse } from './core/errors';
 import { LanguageDict } from './core/i18n';
-import { disconnectAll } from './core/prisma';
+import { disconnectAll, prisma, getAcl } from './core/prisma';
+import { auditAcl } from './core/acl';
 import { validateEnv } from './core/env';
+import { parseAllowedOrigins, isOriginAllowed } from './core/origins';
 import { env } from './utils';
 import { Logger } from './utils/Logger';
 
@@ -41,11 +44,67 @@ process.env.STRINGS_PATH = process.env.STRINGS_PATH || path.join(ROOT, 'locales'
 process.env.PUBLIC_PATH = process.env.PUBLIC_PATH || path.join(ROOT, 'public');
 process.env.PUBLIC_STATIC = process.env.PUBLIC_STATIC || path.join(process.env.PUBLIC_PATH!, 'static');
 
-const NODE_ENV = process.env.NODE_ENV;
+const DEFAULT_LANGUAGE = process.env.DEFAULT_LANGUAGE || 'en_US';
 
 // ─── Initialize LanguageDict ────────────────────────
 
-LanguageDict.initialize(process.env.STRINGS_PATH, 'en_US');
+LanguageDict.initialize(process.env.STRINGS_PATH, DEFAULT_LANGUAGE);
+
+// ─── Helpers ────────────────────────────────────────
+
+/**
+ * TRUST_PROXY: true | false | <hop count> | <comma-separated IPs/CIDRs>.
+ * Unset → trust everything in production (backward compatible), nothing elsewhere.
+ */
+export function parseTrustProxy(value: string | undefined, production: boolean): boolean | number | string[] {
+    const v = value?.trim();
+    if (!v) return production;
+    if (v === 'true') return true;
+    if (v === 'false') return false;
+    if (/^\d+$/.test(v)) return parseInt(v, 10);
+    return v.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+const REQUEST_ID_HEADER = (process.env.REQUEST_ID_HEADER || 'x-request-id').toLowerCase();
+/** Incoming ids are reused for end-to-end correlation — but only when they are log-safe */
+const VALID_REQUEST_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+
+const shuttingDown = new WeakSet<FastifyInstance>();
+
+/** Make readiness fail while the server drains (called by startServer on SIGTERM/SIGINT) */
+export function markShuttingDown(app: FastifyInstance): void {
+    shuttingDown.add(app);
+}
+
+/** Resolve within `ms` or reject — health checks must never hang a probe */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error('timeout')), ms);
+        promise.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
+    });
+}
+
+let processHandlersInstalled = false;
+
+/**
+ * Log (and report) crashes. Unhandled rejections are logged without exiting, as Rapidd
+ * always did; uncaught exceptions leave the process in an unknown state, so it exits.
+ */
+export function installProcessHandlers(errorReporter?: RapiddOptions['errorReporter']): void {
+    if (processHandlersInstalled) return;
+    processHandlersInstalled = true;
+
+    process.on('uncaughtException', (err) => {
+        Logger.error(err);
+        try { errorReporter?.(err); } catch { /* never mask the crash */ }
+        process.exit(1);
+    });
+
+    process.on('unhandledRejection', (reason) => {
+        Logger.error(reason as Error);
+        try { errorReporter?.(reason); } catch { /* ignore */ }
+    });
+}
 
 // ─── App Factory ────────────────────────────────────
 
@@ -53,21 +112,58 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     // Validate required environment variables
     validateEnv();
 
+    if (options.processHandlers !== false) {
+        installProcessHandlers(options.errorReporter);
+    }
+
     // Re-initialize translations when a custom dictionary path is provided
     if (options.stringsPath) {
-        LanguageDict.initialize(options.stringsPath, 'en_US');
+        LanguageDict.initialize(options.stringsPath, DEFAULT_LANGUAGE);
+    }
+
+    const production = process.env.NODE_ENV === 'production';
+    if (production && !process.env.TRUST_PROXY) {
+        Logger.warn('TRUST_PROXY is not set — trusting X-Forwarded-For from any client (production default). Set it to your proxy\'s IP/CIDR or hop count, or clients can spoof their IP and dodge rate limits.');
     }
 
     const app = Fastify({
         // Rapidd has its own request/access logger (Logger.request) — Fastify's pino
         // would log every request a second time. Opt back in with FASTIFY_LOGGER=true.
         logger: process.env.FASTIFY_LOGGER === 'true',
-        trustProxy: process.env.TRUST_PROXY !== undefined
-            ? process.env.TRUST_PROXY === 'true'
-            : NODE_ENV === 'production',
+        trustProxy: parseTrustProxy(process.env.TRUST_PROXY, production),
+        requestIdHeader: false,
+        genReqId: (req) => {
+            const incoming = req.headers[REQUEST_ID_HEADER];
+            return typeof incoming === 'string' && VALID_REQUEST_ID.test(incoming) ? incoming : randomUUID();
+        },
+        ...(process.env.BODY_LIMIT ? { bodyLimit: parseInt(process.env.BODY_LIMIT, 10) } : {}),
+        // Graceful close: Fastify's default ('idle') ends up calling closeAllConnections(),
+        // which destroys IN-FLIGHT requests too. With false, Node's server.close() closes idle
+        // keep-alive sockets and waits for running requests; startServer() bounds the wait.
+        forceCloseConnections: false,
         routerOptions: {
             caseSensitive: true,
         },
+    });
+
+    // ── Graceful close ──────────────────────────────
+    // Requests still running when close() starts end their keep-alive socket with their
+    // response — otherwise each lingers until keepAliveTimeout and close() hangs.
+    let closing = false;
+    app.addHook('preClose', async () => {
+        closing = true;
+    });
+    app.addHook('onSend', async (request, reply, payload) => {
+        if (closing && request.raw.httpVersionMajor < 2) reply.header('Connection', 'close');
+        return payload;
+    });
+
+    // ── Request ID & log context ────────────────────
+    // Every log line written while handling a request carries its id (callback-style
+    // hook so the AsyncLocalStorage context spans the whole request lifecycle).
+    app.addHook('onRequest', (request, reply, done) => {
+        reply.header('X-Request-Id', request.id);
+        Logger.withContext({ requestId: request.id }, done);
     });
 
     // ── Body Parsing ────────────────────────────────
@@ -90,54 +186,54 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     const cookieSameSite = (['strict', 'lax', 'none'].includes(process.env.COOKIE_SAME_SITE as string)
         ? process.env.COOKIE_SAME_SITE
         : 'strict') as 'strict' | 'lax' | 'none';
-    const cookieSecure = NODE_ENV === 'production';
+    const cookieSecure = production;
     if (cookieSameSite === 'none' && !cookieSecure) {
         Logger.warn('COOKIE_SAME_SITE=none requires Secure cookies — browsers will reject these cookies outside production');
     }
 
     await app.register(fastifyCookie, {
-        secret: process.env.COOKIE_SECRET,
+        // An empty COOKIE_SECRET must mean "no signing", not a broken signer
+        secret: process.env.COOKIE_SECRET || undefined,
         parseOptions: {
             path: '/',
             httpOnly: true,
             secure: cookieSecure,
             sameSite: cookieSameSite,
-            signed: true,
+            // Signing needs a secret — defaulting to signed without one makes every setCookie throw
+            signed: !!process.env.COOKIE_SECRET,
         },
     });
 
     // ── CORS ────────────────────────────────────────
-    const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map((e: string) => e.trim());
+    const allowedOrigins = parseAllowedOrigins();
+    const extraHeaders = (process.env.CORS_ALLOWED_HEADERS || '').split(',').map((h) => h.trim()).filter(Boolean);
 
-    const sharedCorsOptions = {
+    const corsBase = {
         methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-        allowedHeaders: ['Content-Type', 'Authorization', process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token'],
+        allowedHeaders: ['Content-Type', 'Authorization', process.env.AUTH_CUSTOM_HEADER || 'X-Auth-Token', 'X-Request-Id', ...extraHeaders],
+        // Let browser clients read correlation and rate-limit information
+        exposedHeaders: ['X-Request-Id', 'X-RateLimit-Limit', 'X-RateLimit-Remaining', 'X-RateLimit-Reset', 'Retry-After'],
         credentials: true,
     };
 
-    const corsOptions = NODE_ENV === 'production'
-        ? {
-            ...sharedCorsOptions,
-            origin: (origin: string, cb: (err: Error | null, origin: boolean) => void) => {
-                if (!origin || allowedOrigins.includes('*')) return cb(null, true);
-                let originHost: string;
-                try {
-                    originHost = new URL(origin).hostname;
-                } catch {
-                    return cb(new ErrorResponse(403, 'cors_blocked', { origin }), false);
+    if (production) {
+        await app.register(fastifyCors, {
+            delegator: (request: FastifyRequest, callback: (err: Error | null, options?: Record<string, unknown>) => void) => {
+                const origin = request.headers.origin;
+                // A page served by this API (e.g. a login form) posting to itself is same-origin
+                const allowed = !origin
+                    || isOriginAllowed(origin, allowedOrigins)
+                    || origin === `${request.protocol}://${request.host}`;
+                if (!allowed) {
+                    return callback(new ErrorResponse(403, 'cors_blocked', { origin }));
                 }
-                const allowed = allowedOrigins.some((e: string) => {
-                    const trimmed = e.replace(/^https?:\/\//, '');
-                    return originHost === trimmed || originHost.endsWith(`.${trimmed}`);
-                });
-                if (allowed) return cb(null, true);
-                return cb(new ErrorResponse(403, 'cors_blocked', { origin }), false);
+                // options.cors overrides individual CORS settings (merged over env-derived defaults)
+                callback(null, { ...corsBase, origin: origin || false, ...(options.cors || {}) });
             },
-        }
-        : { ...sharedCorsOptions, origin: true };
-
-    // options.cors overrides individual CORS settings (merged over env-derived defaults)
-    await app.register(fastifyCors, { ...corsOptions, ...(options.cors || {}) } as any);
+        } as any);
+    } else {
+        await app.register(fastifyCors, { ...corsBase, origin: true, ...(options.cors || {}) } as any);
+    }
 
     // ── Security Headers ────────────────────────────
     await app.register(securityPlugin);
@@ -149,24 +245,43 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     await app.register(requestPlugin);
 
     // ── API Decorators & Error Handler ───────────────
-    await app.register(responsePlugin);
+    await app.register(responsePlugin, { errorReporter: options.errorReporter });
+
+    // ── Rate Limiting (optional) ────────────────────
+    // Before authentication: a throttled request must not still cost a bcrypt compare,
+    // an LDAP bind or a token introspection
+    if (options.rateLimit !== false && process.env.RATE_LIMIT_ENABLED !== 'false') {
+        const rateLimitPlugin = (await import('./plugins/rateLimit')).default;
+        await app.register(rateLimitPlugin);
+    }
 
     // ── Authentication ──────────────────────────────
-    await app.register(authPlugin);
+    await app.register(authPlugin, { authOptions: options.auth });
 
     // ── RLS Context ─────────────────────────────────
     await app.register(rlsPlugin);
 
-    // ── Rate Limiting (optional) ────────────────────
-    if (options.rateLimit !== false && process.env.RATE_LIMIT_ENABLED !== 'false') {
-        const rateLimitPlugin = (await import('./plugins/rateLimit')).default;
-        await app.register(rateLimitPlugin);
+    // ── App Plugins ─────────────────────────────────
+    // Registered after the core plugins (auth, RLS, rate limiting are in place) and
+    // before the route loader — e.g. error tracking, OpenAPI, custom decorators.
+    for (const entry of options.plugins || []) {
+        const [plugin, pluginOptions] = Array.isArray(entry) ? entry : [entry, undefined];
+        await app.register(plugin as any, pluginOptions as any);
     }
 
     // ── Route Loading ───────────────────────────────
     const routesPath = options.routesPath || process.env.ROUTES_PATH!;
     if (fs.existsSync(routesPath)) {
         await loadRoutes(app, routesPath);
+    }
+
+    // Surface models without an ACL entry in the boot log
+    auditAcl(getAcl());
+
+    // ── Health Checks ───────────────────────────────
+    // Registered after the app's routes so an app that defines its own keeps it.
+    if (options.health !== false && process.env.HEALTH_ENABLED !== 'false') {
+        registerHealthRoutes(app);
     }
 
     // Flush buffered log writes on graceful shutdown
@@ -186,6 +301,8 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     }
 
     app.addHook('onResponse', async (request, reply) => {
+        // Routes can opt out of access logging (health probes would flood the log)
+        if ((request.routeOptions?.config as { accessLog?: boolean } | undefined)?.accessLog === false) return;
         Logger.request({
             method: request.method,
             url: request.url,
@@ -195,6 +312,7 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
             contentLength: request.headers['content-length'],
             userId: request.user?.id,
             userAgent: request.headers['user-agent'],
+            requestId: request.id,
             requestHeaders: request.headers,
             requestBody: request.body,
             responseHeaders: reply.getHeaders(),
@@ -204,8 +322,11 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
 
     // ── 404 Handler ─────────────────────────────────
     app.setNotFoundHandler((request, reply) => {
-        const language = request.language || 'en_US';
-        reply.code(404).send({ status_code: 404, message: LanguageDict.get('record_not_found', null, language) });
+        reply.code(404).send({
+            status_code: 404,
+            message: LanguageDict.get('record_not_found', null, request.language || null),
+            key: 'record_not_found',
+        });
     });
 
     // ── Graceful Shutdown ───────────────────────────
@@ -214,6 +335,57 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     });
 
     return app;
+}
+
+// ─── Health Checks ──────────────────────────────────
+
+/**
+ * GET /health        — liveness: the process is up and serving
+ * GET /health/ready  — readiness: database (and session store) reachable, not shutting down
+ * Exempt from rate limiting and access logging; skipped when the app defines the routes itself.
+ */
+function registerHealthRoutes(app: FastifyInstance): void {
+    const config = { rateLimit: false, accessLog: false, auth: { strategies: [] } };
+
+    if (!app.hasRoute({ method: 'GET', url: '/health' })) {
+        app.get('/health', { config }, async () => ({ status: 'ok' }));
+    }
+
+    if (!app.hasRoute({ method: 'GET', url: '/health/ready' })) {
+        app.get('/health/ready', { config }, async (_request, reply) => {
+            const checks: Record<string, 'ok' | 'fail' | 'degraded' | 'skipped'> = {};
+
+            // `onFailure`: what an unhealthy dependency means for readiness. The session store
+            // falls back to memory, so Redis being down is 'degraded' — failing readiness would
+            // pull every instance out of the load balancer at once and turn a degradation into
+            // an outage. The database has no fallback.
+            const run = async (name: string, check: () => Promise<boolean>, onFailure: 'fail' | 'degraded') => {
+                try {
+                    checks[name] = await withTimeout(check(), 3000) ? 'ok' : onFailure;
+                } catch (err) {
+                    checks[name] = onFailure;
+                    Logger.warn(`Readiness check "${name}" failed`, { error: (err as Error).message });
+                }
+            };
+
+            await Promise.all([
+                run('database', async () => {
+                    await (prisma as any).$queryRawUnsafe('SELECT 1');
+                    return true;
+                }, 'fail'),
+                app.auth?.isEnabled?.()
+                    ? run('sessions', () => app.auth.getSessionStore().isHealthy(), 'degraded')
+                    : Promise.resolve(void (checks.sessions = 'skipped')),
+            ]);
+
+            const draining = shuttingDown.has(app);
+            const ready = !draining && Object.values(checks).every((c) => c !== 'fail');
+            return reply.code(ready ? 200 : 503).send({
+                status: ready ? 'ok' : (draining ? 'shutting_down' : 'unavailable'),
+                checks,
+            });
+        });
+    }
 }
 
 // ─── Route Loader ───────────────────────────────────
@@ -255,16 +427,5 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
         }
     }
 }
-
-
-// Handle uncaught errors
-process.on('uncaughtException', (err) => {
-    Logger.error(err);
-    process.exit(1);
-});
-
-process.on('unhandledRejection', (reason) => {
-    Logger.error(reason as Error);
-});
 
 export default buildApp;

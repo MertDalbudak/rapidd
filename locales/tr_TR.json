@@ -47,6 +47,7 @@
     "auth_not_configured": "Kimlik doğrulama yapılandırılmamış",
     "invalid_composite_key": "Geçersiz bileşik anahtar: {expected} alan bekleniyor, {received} alındı",
     "invalid_composite_key_format": "Geçersiz bileşik anahtar formatı. Bir nesne veya tilde ile ayrılmış bir dize bekleniyor",
+    "invalid_id": "{field} için geçersiz değer: '{value}'",
     "no_permission_to_create": "{model} oluşturma izni yok",
     "no_permission_to_update": "Kaydı güncelleme izni yok",
     "no_permission_to_delete": "Kaydı silme izni yok",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Geçersiz filtre koşulu: '{condition}'",
     "unbalanced_filter_group": "Filtrede dengelenmemiş parantez veya köşeli parantez",
     "filter_group_too_deep": "Filtre grupları çok derin iç içe geçmiş (en fazla {max})",
-    "empty_filter_value": "'{field}' için filtre koşulu boş bir değere sahip"
+    "empty_filter_value": "'{field}' için filtre koşulu boş bir değere sahip",
+    "auth_provider_unavailable": "Kimlik doğrulama sağlayıcısı {provider} kullanılamıyor",
+    "auth_provider_not_found": "Kimlik doğrulama sağlayıcısı {provider} bulunamadı",
+    "auth_login_failed": "{provider} ile giriş başarısız oldu",
+    "account_not_linked": "Bu {provider} girişine bağlı bir hesap yok",
+    "account_inactive": "Hesap etkin değil",
+    "invalid_login_ticket": "Geçersiz veya süresi dolmuş giriş bileti",
+    "session_expired": "Oturumun süresi doldu, lütfen tekrar giriş yapın"
 }

@@ -6,6 +6,190 @@ All notable changes to `@rapidd/core` are documented here. This project follows
 (the framework source is copied into your project rather than installed), framework fixes below
 do **not** reach existing projects via `npm update` — see the linked section for how to adopt them.
 
+## [Unreleased] — 3.0.0
+
+Enterprise sign-in (LDAP / Active Directory, OpenID Connect / OAuth2, WebDAV), hardened sessions,
+and the operational basics production deployments need: health checks, graceful shutdown, request
+ids, structured logs. The built-in Mailer is removed — apps use the mail library of their choice.
+
+> **Read before upgrading — breaking or client-visible changes:**
+> 1. **Mailer removed** (`src/utils/Mailer.ts`, `templates/`, `config/app.json` → `emails`, and the
+>    `nodemailer`/`ejs` dependencies). Projects that use it keep their vendored copy, or switch to
+>    nodemailer / their provider's SDK directly.
+> 2. **Refresh tokens rotate and are bound to their session.** Every `/auth/refresh` returns a new
+>    refresh token — clients must store it. Replaying an already-used refresh token is treated as
+>    theft and revokes the session. Refresh tokens issued by 2.x keep working until they expire.
+> 3. **`AUTH_SESSION_STORAGE` defaults to `memory` unless `REDIS_URL`/`REDIS_HOST` is set** (was
+>    `redis`, which then failed over to memory). Production without Redis now logs a warning.
+> 4. **ApiClient no longer retries POST/PATCH by default** (a retry could create twice). Pass
+>    `retries` to opt in.
+> 5. `/health` and `/health/ready` are registered unless the app defines them (`HEALTH_ENABLED=false`).
+> 6. ApiClient's `AuthConfig` type is exported from the package index as `ApiAuthConfig` (the name
+>    now belongs to the auth configuration).
+> 7. Rate limiting now runs **before** authentication, and `config/rate-limit.json` gained an `/auth`
+>    bucket (60/min) for the SSO, exchange and refresh routes.
+> 8. **Ids are parsed by the key's type**: `/items/abc` for an `Int` key is `400 invalid_id` (was a
+>    Prisma validation error or, for malformed UUIDs, a 500). Lenient parses are gone — composite
+>    parts like `12abc` were read as `12`.
+> 9. **Raw Prisma nested writes follow the related model's ACL** (`connect`, `deleteMany`, ...; see
+>    Access Control). Payloads that relied on bypassing it now get 403 or are narrowed.
+>    `delete` is now recognized as a raw operation too.
+> 10. **Date-only filters** (`on:2024-06-15`, `createdAt=2024-06-15`) select the calendar day of the
+>     string. Servers west of UTC previously matched the day before. New `API_TIMEZONE` fixes the
+>     zone the day is read in (default: server timezone, as before).
+> 11. `upsertMany` results gained `skipped`, and `totalFailed` counts records (a failed bulk insert
+>     counts all of its rows, not 1).
+> 12. Client errors (4xx) are logged at `warn` instead of `error`.
+
+### Added — authentication
+
+- **Identity providers**, selected with `AUTH_PROVIDERS` (env-only setup) or `src/config/auth.ts`:
+  - `local` — the user table (as before).
+  - `ldap` — LDAP / Active Directory: search-then-bind or direct bind, failover across servers,
+    StartTLS/LDAPS, `memberOf`, AD nested groups or group search. Requires `npm install ldapts`
+    (optional peer dependency). Empty passwords are rejected (unauthenticated-bind trap); input is
+    escaped for filters (RFC 4515) and DNs (RFC 4514); outages answer 503, not 401.
+  - `oidc` — OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, Auth0, Google, ADFS, GitHub via
+    explicit endpoints). **Resource server**: IdP access tokens accepted as bearer tokens — JWKS
+    signature (asymmetric algorithms only), issuer, audience, expiry, required scopes; opaque tokens
+    via RFC 7662 introspection. **Browser login**: authorization code + PKCE, state bound to the
+    browser, nonce, full id_token validation; tokens reach SPAs through a single-use 60 s ticket
+    (`POST /auth/exchange`), never in URLs. Verified end-to-end against Keycloak 26.
+  - `webdav` — credentials validated with an authenticated PROPFIND (Nextcloud, ownCloud, ...).
+  - Custom providers implementing `AuthProvider`.
+- **Identity mapping**: link external identities to user-table rows (`AUTH_LINK`, default email,
+  case-insensitive on PostgreSQL, ambiguous matches rejected), `provision` rows on first login,
+  claims-only users with `AUTH_ROLE_MAP` role mapping, or full control via `resolveUser`.
+- **Hooks**: `validateUser` (login, refresh, first use of an external token — reject deactivated
+  accounts; a rejected refresh revokes the session) and `onLogin` (audit, last-login).
+- **Revocation**: `auth.revokeSession()`, `auth.revokeUserSessions(userId)` (per-user index — no
+  keyspace scans), `getAuth()` for code outside requests. `AUTH_SESSION_MAX_AGE` absolute lifetime.
+- Routes: `GET /auth/providers`, `GET /auth/:provider/login`, `GET /auth/:provider/callback`,
+  `POST /auth/exchange`. `/auth/login` accepts an optional `provider`.
+- Cookie mode: refresh cookie `<name>_refresh` (path `/auth`) — cookie-only clients can refresh.
+
+### Added — operations
+
+- `startServer()` (`src/server.ts`, used by `main.ts`): graceful shutdown on SIGTERM/SIGINT —
+  readiness turns 503, optional `SHUTDOWN_DELAY_MS`, in-flight requests finish, connections and
+  pools close, exit within `SHUTDOWN_TIMEOUT_MS`.
+- `GET /health` (liveness) and `GET /health/ready` (database; session store reported as
+  `degraded` without failing readiness, since sessions fall back to memory).
+- Request ids: `X-Request-Id` (incoming value reused when log-safe) on every response and stamped on
+  every log line written during the request.
+- `LOG_FORMAT=json` structured logs.
+- `buildApp`/`startServer` options: `plugins`, `errorReporter` (every 5xx + process crashes),
+  `health`, `auth`, `processHandlers`. Route configs `rateLimit: false` and `accessLog: false`.
+- `ACL_DEFAULT=deny` (models without an ACL entry are closed) and a startup audit listing models
+  without an entry.
+- `${ENV_VAR}` / `${ENV_VAR:-default}` substitution in `config/app.json` — secrets out of the file.
+- `REDIS_URL` (`rediss://`), `REDIS_USERNAME`, `REDIS_TLS` — shared by sessions and rate limiting.
+- `TRUST_PROXY` accepts hop counts and IP/CIDR lists; `CORS_ALLOWED_HEADERS`; `BODY_LIMIT`;
+  `DEFAULT_LANGUAGE`; `PUBLIC_URL`; enumerated env vars are validated at startup.
+- `ctx.state` in model middleware: one object shared by an operation's before and after hooks.
+
+### Security — hardening from an adversarial review of the new auth layer
+
+Each item was a working exploit against the first version of the provider layer (proven by tests,
+now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider suites):
+
+- **Account linking matched with wildcards** on PostgreSQL (`mode: insensitive` compiles to an
+  unescaped `ILIKE`, so `a_ice@` linked to `alice@`) and with accent/padding-insensitive collations on
+  MySQL. Links are now decided by an exact (case-insensitive) comparison in code.
+- **A refresh in flight could undo a revocation**: refresh now writes conditionally (`SET … XX`) and
+  re-checks after recreating the session.
+- **Revocations during a Redis outage came back when Redis recovered**: they are recorded and
+  replayed against Redis before switching back from memory.
+- **`revokeUserSessions` now also ends tokens that aren't session-bound** (legacy refresh tokens —
+  now single-use — tokens minted without a session, IdP bearer tokens issued earlier).
+- **Users from `resolveUser` were never re-validated**: refresh re-runs `resolveUser`; LDAP sessions
+  re-check the directory entry (deleted / disabled / locked accounts end at the next refresh).
+- **Role mapping**: exact matches only; LDAP groups are full DNs (a "Domain Admins" CN in another OU no
+  longer matches); `role:` / `group:` key prefixes keep IdP roles and groups apart.
+- Claims-only user ids are namespaced (`<provider>:<subject>`), so they cannot collide with
+  user-table ids.
+- WebDAV identities are the server-confirmed principal (`current-user-principal`), not the typed
+  alias; unconfirmable logins are rejected.
+- OIDC: id_tokens are refused as bearer tokens; introspected tokens without `aud` must be issued to
+  one of our clients; `email_verified: "false"` counts as unverified; several providers may share an
+  issuer.
+- Redirects: control characters rejected (`/<TAB>/evil.com`), https required in production,
+  scheme/port of `ALLOWED_ORIGINS` entries enforced; production SSO requires `PUBLIC_URL` instead of
+  trusting the Host header.
+- Refresh tokens are never accepted as access tokens (even with `JWT_REFRESH_SECRET == JWT_SECRET`);
+  JWT secrets are enforced even when schema loading fails; an empty `COOKIE_SECRET` no longer breaks
+  every cookie request; memory sessions return copies (mutating `request.user` no longer rewrites the
+  session) and are capped; login tickets and OAuth codes are redacted from logged URLs.
+
+### Added — verification
+
+- Opt-in integration tests against real servers (`npm run test:integration`: Redis 7, OpenLDAP,
+  Keycloak 26 including its login form), set up by `__test__/integration/setup.sh`. Skipped in `npm test`.
+
+### Fixed
+
+- **Graceful close cut in-flight requests**: Fastify's default (`forceCloseConnections: 'idle'`)
+  destroys all sockets on close; requests now finish and keep-alive sockets close with them.
+- **Logout did not revoke cookie or custom-header sessions** — only `Authorization: Bearer`.
+- **Cookie-only mode could never refresh** (the refresh token was never delivered).
+- **Cookie strategy crashed without `COOKIE_SECRET`** (`unsignCookie` is not decorated then), and
+  `setCookie` without an explicit `signed` threw for the same reason.
+- **`LOG_LEVEL=finest` wrote passwords, tokens and auth headers to the access log** — now redacted.
+- Login timing revealed whether an account exists (no bcrypt work for unknown users).
+- Refresh looked users up by a hard-coded `id` column; it now uses the user model's primary key.
+- After-delete hooks of soft deletes always saw `softDelete: false`.
+- Production CORS blocked same-origin requests (pages served by the API posting back).
+- Rate limiter gave up reconnecting to Redis after ~10 min (memory until restart) and could throw
+  on shutdown; session store `destroy()` left the Redis connection open; timers kept tests alive.
+- ApiClient: empty/malformed bodies turned HTTP errors into `SyntaxError`s (and were retried); a
+  caller-provided `AbortSignal` disabled the timeout; concurrent OAuth token fetches; no 429 handling.
+- `ErrorResponse` now exposes `statusCode` (Fastify, Sentry) and its class `name`; security headers
+  respect a CSP the handler set; i18n renders object parameters as JSON; the `lang` cookie is
+  validated against the allowed languages; the 404 body carries its `key`.
+
+### Fixed — ORM (QueryBuilder / Model)
+
+- **`upsertMany` on PostgreSQL misreported its result**: one failing record aborted the transaction,
+  every later statement failed, and the commit rolled back — while the result reported updates.
+  Writes now run under savepoints (one per chunk of records, replayed record by record when a chunk
+  fails), so a bad record costs only itself and the report matches the database. Deadlocks,
+  serialization conflicts and lost transactions fail the call instead of being reported as one
+  record. MySQL/MariaDB are unchanged (they roll back only the failed statement). Verified on
+  PostgreSQL: 20 000 mixed records in ~2.5 s.
+- `upsertMany`: existence is looked up with one query per 1 000 keys and a Set (was O(n·m));
+  composite keys failed outright (a compound selector in `findMany`); the bulk-insert path skipped
+  omit / writable-field stripping; a key repeated within a batch was silently dropped (it now
+  updates the row the batch created); rows `skipDuplicates` drops are reported as `skipped`.
+- **Raw Prisma nested operations bypassed the related model's ACL** — `{ tags: { connect: [...] } }`
+  could link records outside the access filter, `{ tags: { deleteMany: {} } }` deleted despite
+  `getDeleteFilter: () => false`. They are now scoped or rejected like Rapidd's own shapes.
+- Updates whose payload echoes the record's own id failed with "Unknown argument `id`" on models
+  with an autoincrement key and a foreign key (Prisma's checked update input has no such id).
+- Compound keys with a custom name (`@@id([a, b], name: "pk")`) and `@@unique` with another field
+  order couldn't be addressed; models with a composite PK broke `upsert`/`upsertMany` with the
+  default key.
+- An object `q` (`getMany({ q: { courseId: 5 } })`) was silently ignored — no filter at all. It is
+  now a set of field equality conditions, parsed by type and ACL-checked like the string form.
+  This also restores the parent scoping of junction sub-routes generated by rapidd-build 2.3.0,
+  which listed every parent's rows. Repeated `?q=` parameters were dropped; they are now AND-ed.
+- Date-only filters were shifted by a day on servers west of UTC (see above).
+- `upsert` passed the key's *name* as the parent id for nested n:m writes.
+
+### Changed — ORM
+
+- `get()` is one query when the record is found and permitted (was two in parallel); the
+  existence check for 403-vs-404 only runs on a miss under a restricting access filter.
+- `getMany()` runs data and count in parallel outside a transaction (was an interactive
+  transaction: four sequential round trips instead of one); with RLS variables active it keeps a
+  single transaction.
+- Relation processing edits one working copy instead of copying the payload once per key.
+- New: `getMany({ where })` — a trusted server-side scope AND-ed with the client filter and ACL;
+  `model.parseKey(field, value)`; DMMF helper `compoundKeyName()`.
+
+### Removed
+
+- Mailer (see above) and the unused `luxon` dependency.
+
 ## [2.3.2] - 2026-07-17
 
 Repairs rate limiting, which was not enforcing what `config/rate-limit.json` said it was — every

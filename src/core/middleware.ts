@@ -123,9 +123,12 @@ function createContext(
         user,
         timestamp: new Date(),
         ...params,
+        // One object per operation, shared by its before and after hooks
+        state: (params.state as Record<string, any>) ?? {},
         abort: false,
         skip: false,
-        softDelete: false,
+        // after-delete hooks receive softDelete: true when the delete became an update
+        softDelete: params.softDelete === true,
     } as MiddlewareContext;
 }
 

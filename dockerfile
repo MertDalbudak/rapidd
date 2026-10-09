@@ -51,7 +51,6 @@ COPY --from=builder --chown=rapidd:nodejs /app/dist ./dist
 # Runtime assets
 COPY --chown=rapidd:nodejs config ./config
 COPY --chown=rapidd:nodejs locales ./locales
-COPY --chown=rapidd:nodejs templates ./templates
 COPY --chown=rapidd:nodejs public ./public
 
 RUN mkdir -p /app/uploads /app/temp/uploads /app/logs && \
@@ -64,6 +63,6 @@ USER rapidd
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD node -e "fetch('http://localhost:3000/').then(r => process.exit(r.status === 404 ? 0 : 1)).catch(() => process.exit(1))"
+    CMD node -e "fetch('http://localhost:' + (process.env.PORT || 3000) + '/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"
 
 ENTRYPOINT ["node", "dist/main.js"]

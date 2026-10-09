@@ -34,9 +34,27 @@ export * as dmmf from './core/dmmf';
 export { createSystemUser, isSystemUser, getDefaultUser } from './core/user';
 
 // ── Authentication ───────────────────────────────────────────────────────────
-export { Auth } from './auth/Auth';
-export { SessionStoreManager, createStore } from './auth/stores';
-export type { ISessionStore } from './auth/stores/ISessionStore';
+export { Auth, getAuth } from './auth/Auth';
+export type { LoginResult } from './auth/Auth';
+export { SessionStoreManager, createStore, MemoryStore, RedisStore } from './auth/stores';
+export type { ISessionStore, SessionWriteOptions } from './auth/stores/ISessionStore';
+export {
+    LocalProvider,
+    LdapProvider,
+    WebdavProvider,
+    OidcProvider,
+    escapeFilterValue,
+    escapeDnValue,
+} from './auth/providers';
+export { IdentityResolver } from './auth/identity';
+
+// ── Access Control ───────────────────────────────────────────────────────────
+export { applyAclDefault, auditAcl, DENY_ALL } from './core/acl';
+
+// ── Configuration ────────────────────────────────────────────────────────────
+export { getAppConfig, substituteEnv } from './core/config';
+export { createRedisClient, isRedisConfigured } from './core/redis';
+export { isOriginAllowed, safeRedirectTarget } from './core/origins';
 
 // ── Errors & Responses ───────────────────────────────────────────────────────
 export { ErrorResponse, ErrorBasicResponse, Response } from './core/errors';
@@ -49,7 +67,6 @@ export { modelMiddleware } from './core/middleware';
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 export { ApiClient, ApiClientError } from './utils/ApiClient';
-export { Mailer } from './utils/Mailer';
 export { Logger } from './utils/Logger';
 export { env } from './utils';
 
@@ -77,13 +94,29 @@ export { default as rateLimiterPlugin } from './plugins/rateLimit'; // backward 
 export { default as rlsPlugin } from './plugins/rls';
 
 // ── App Builder ──────────────────────────────────────────────────────────────
-export { buildApp } from './app';
+export { buildApp, installProcessHandlers, markShuttingDown, parseTrustProxy } from './app';
+export { startServer } from './server';
+export type { StartOptions } from './server';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 export type {
     RapiddUser,
     AuthStrategy,
     AuthOptions,
+    AuthConfig,
+    AuthEventContext,
+    AuthProvider,
+    AuthProviderConfig,
+    AuthLinkConfig,
+    AuthFlowState,
+    ExternalIdentity,
+    LocalProviderConfig,
+    LdapProviderConfig,
+    OidcProviderConfig,
+    WebdavProviderConfig,
+    ResolveUserHelpers,
+    RoleMappingConfig,
+    RapiddPluginEntry,
     RouteAuthConfig,
     ModelOptions,
     GetManyOptions,
@@ -104,17 +137,10 @@ export type {
 export type {
     ServiceConfig,
     EndpointConfig,
-    AuthConfig,
+    AuthConfig as ApiAuthConfig,
     RequestOptions,
     ApiResponse
 } from './utils/ApiClient';
-
-export type {
-    EmailConfig,
-    EmailOptions,
-    EmailAttachment,
-    EmailResult
-} from './utils/Mailer';
 
 export type {
     UploadOptions,
@@ -123,4 +149,4 @@ export type {
 } from './plugins/upload';
 
 export type { EnvConfig } from './core/env';
-export type { LogLevel } from './utils/Logger';
+export type { LogLevel, LogFormat, LogContext } from './utils/Logger';

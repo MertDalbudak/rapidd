@@ -47,6 +47,7 @@
     "auth_not_configured": "A autenticação não está configurada",
     "invalid_composite_key": "Chave composta inválida: esperados {expected} campos, recebidos {received}",
     "invalid_composite_key_format": "Formato de chave composta inválido. Esperado um objeto ou string separada por til",
+    "invalid_id": "Valor inválido '{value}' para {field}",
     "no_permission_to_create": "Sem permissão para criar {model}",
     "no_permission_to_update": "Sem permissão para atualizar o registro",
     "no_permission_to_delete": "Sem permissão para excluir o registro",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Condição de filtro inválida: '{condition}'",
     "unbalanced_filter_group": "Parênteses ou colchetes não balanceados no filtro",
     "filter_group_too_deep": "Os grupos de filtro estão aninhados profundamente demais (máx {max})",
-    "empty_filter_value": "A condição de filtro para '{field}' tem um valor vazio"
+    "empty_filter_value": "A condição de filtro para '{field}' tem um valor vazio",
+    "auth_provider_unavailable": "O provedor de autenticação {provider} está indisponível",
+    "auth_provider_not_found": "Provedor de autenticação {provider} não encontrado",
+    "auth_login_failed": "Falha ao entrar com {provider}",
+    "account_not_linked": "Nenhuma conta está vinculada a este login do {provider}",
+    "account_inactive": "A conta está inativa",
+    "invalid_login_ticket": "Ticket de login inválido ou expirado",
+    "session_expired": "Sessão expirada, faça login novamente"
 }

@@ -131,4 +131,69 @@ describe('MemoryStore', () => {
             expect(await store.get('b')).toEqual({ id: 2 });
         });
     });
+
+    describe('per-entry TTL', () => {
+        it('should honour a TTL passed to create()', async () => {
+            jest.useFakeTimers();
+            try {
+                await store.create('short', { id: 1 }, { ttl: 1 });
+                await store.create('default', { id: 2 });
+                jest.advanceTimersByTime(1500);
+                expect(await store.get('short')).toBeNull();
+                expect(await store.get('default')).toEqual({ id: 2 });
+            } finally {
+                jest.useRealTimers();
+            }
+        });
+    });
+
+    describe('touch() / take()', () => {
+        it('touch() returns the entry and extends it', async () => {
+            jest.useFakeTimers();
+            try {
+                await store.create('s', { id: 1 });
+                jest.advanceTimersByTime(8000);
+                expect(await store.touch('s')).toEqual({ id: 1 });
+                jest.advanceTimersByTime(8000); // 16s after create, 8s after touch
+                expect(await store.get('s')).toEqual({ id: 1 });
+            } finally {
+                jest.useRealTimers();
+            }
+        });
+
+        it('take() returns the entry exactly once', async () => {
+            await store.create('ticket', { v: 1 });
+            const [a, b] = await Promise.all([store.take('ticket'), store.take('ticket')]);
+            expect([a, b].filter(Boolean)).toEqual([{ v: 1 }]);
+            expect(await store.get('ticket')).toBeNull();
+        });
+    });
+
+    describe('deleteByUser()', () => {
+        it('removes every entry indexed under the user, and only those', async () => {
+            await store.create('a1', { id: 1 }, { userId: 1 });
+            await store.create('rt:a1', { jti: 'x' }, { userId: 1, ttl: 100 });
+            await store.create('b1', { id: 2 }, { userId: 2 });
+            await store.create('anon', { v: 1 });
+
+            expect(await store.deleteByUser(1)).toBe(2);
+            expect(await store.get('a1')).toBeNull();
+            expect(await store.get('rt:a1')).toBeNull();
+            expect(await store.get('b1')).toEqual({ id: 2 });
+            expect(await store.get('anon')).toEqual({ v: 1 });
+            expect(await store.deleteByUser(1)).toBe(0);
+        });
+
+        it('matches numeric and string user ids alike', async () => {
+            await store.create('s', { id: 7 }, { userId: 7 });
+            expect(await store.deleteByUser('7')).toBe(1);
+        });
+
+        it('re-indexes an entry overwritten for another user', async () => {
+            await store.create('s', { id: 1 }, { userId: 1 });
+            await store.create('s', { id: 2 }, { userId: 2 });
+            expect(await store.deleteByUser(1)).toBe(0);
+            expect(await store.deleteByUser(2)).toBe(1);
+        });
+    });
 });

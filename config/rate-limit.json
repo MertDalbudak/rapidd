@@ -4,6 +4,10 @@
         "windowMs": 900000,
         "ignoreSuccessfulRequests": true
     },
+    "/auth": {
+        "maxRequests": 60,
+        "windowMs": 60000
+    },
     "/api": {
         "maxRequests": 1000,
         "windowMs": 60000

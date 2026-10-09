@@ -12,6 +12,7 @@ jest.mock('../../src/core/i18n', () => ({
 
 // Mock prisma (required because response.ts now imports QueryBuilder which imports prisma)
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: {},
     prismaTransaction: jest.fn(),
     requestContext: { run: jest.fn((store: any, fn: any) => fn()) },

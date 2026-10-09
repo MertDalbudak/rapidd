@@ -12,12 +12,26 @@ import type { ListMeta } from '../types';
  * Decorates request with getTranslation.
  * Registers a global error handler for ErrorResponse.
  */
-const responsePlugin: FastifyPluginAsync = async (fastify) => {
+interface ResponsePluginOptions {
+    /** Receives every error that ends in a 5xx response (Sentry & co.) */
+    errorReporter?: (error: unknown, request?: FastifyRequest) => void;
+}
+
+const responsePlugin: FastifyPluginAsync<ResponsePluginOptions> = async (fastify, options) => {
+    const report = (error: unknown, request: FastifyRequest) => {
+        if (!options?.errorReporter) return;
+        try {
+            options.errorReporter(error, request);
+        } catch (err) {
+            Logger.error(err as Error, { hook: 'errorReporter' });
+        }
+    };
+
     // Decorate request
     fastify.decorateRequest('user', null);
     fastify.decorateRequest('remoteAddress', '');
     fastify.decorateRequest('getTranslation', function (this: FastifyRequest, key: string, data?: Record<string, unknown> | null, language?: string) {
-        return LanguageDict.get(key, data ?? null, language || this.language || 'en_US');
+        return LanguageDict.get(key, data ?? null, language || this.language || null);
     });
 
     // Decorate reply
@@ -54,9 +68,10 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     fastify.decorateReply('sendError', function (this: FastifyReply, statusCode: number, message: string, data?: unknown) {
         const request = this.request;
-        const language = request?.language || 'en_US';
+        const language = request?.language;
         const error = new ErrorResponse(statusCode, message, data as Record<string, unknown> | null);
-        Logger.error(message, { statusCode });
+        if (statusCode >= 500) Logger.error(message, { statusCode });
+        else Logger.warn(message, { statusCode });
         return this.code(statusCode).send(error.toJSON(language));
     });
 
@@ -67,7 +82,7 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
 
     fastify.decorateReply('sendResponse', function (this: FastifyReply, statusCode: number, message: string, params?: unknown) {
         const request = this.request;
-        const language = request?.language || 'en_US';
+        const language = request?.language || null;
         const translatedMessage = LanguageDict.get(message, params as Record<string, unknown> | null, language);
         return this.code(statusCode).send({ status_code: statusCode, message: translatedMessage });
     });
@@ -82,13 +97,21 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
     // classified via QueryBuilder.errorHandler, and unexpected 5xx are masked in
     // production. All responses carry the machine-readable `key` (+ `data`) contract.
     fastify.setErrorHandler((error, request, reply) => {
-        const language = request.language || 'en_US';
+        const language = request.language;
 
         if (error instanceof ErrorResponse) {
+            if (error.status_code >= 500) {
+                Logger.error(error);
+                report(error, request);
+            }
             return reply.code(error.status_code).send(error.toJSON(language));
         }
 
         if (error instanceof ErrorBasicResponse) {
+            if (error.status_code >= 500) {
+                Logger.error(error);
+                report(error, request);
+            }
             return reply.code(error.status_code).send(error.toJSON());
         }
 
@@ -96,13 +119,14 @@ const responsePlugin: FastifyPluginAsync = async (fastify) => {
         // messages and their own status codes — pass them through
         const fastifyStatus = (error as any).statusCode;
         if (fastifyStatus && fastifyStatus < 500) {
-            Logger.error(error);
+            Logger.warn(`${fastifyStatus} ${(error as Error).message}`);
             return reply.code(fastifyStatus).send({ status_code: fastifyStatus, message: (error as Error).message });
         }
 
         // Everything else (Prisma errors, TypeErrors, ...): classify, translate,
         // and mask in production. request.body feeds P2002 duplicate-value extraction.
         const response = QueryBuilder.errorHandler(error, (request.body as Record<string, unknown>) || {}, language);
+        if (response.status_code >= 500) report(error, request);
         return reply.code(response.status_code).send(response);
     });
 };

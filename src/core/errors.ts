@@ -8,7 +8,13 @@ export class ErrorBasicResponse extends Error {
 
     constructor(message: string, status_code: number = 500) {
         super(message);
+        this.name = new.target.name;
         this.status_code = status_code;
+    }
+
+    /** Fastify, its loggers and error trackers (Sentry, ...) read `statusCode` — not `status_code` */
+    get statusCode(): number {
+        return this.status_code;
     }
 
     toJSON(): { status_code: number; message: string } {
@@ -31,10 +37,10 @@ export class ErrorResponse extends ErrorBasicResponse {
         this.data = data;
     }
 
-    toJSON(language: string = 'en_US'): { status_code: number; message: string; key: string; data?: Record<string, unknown> } {
+    toJSON(language?: string | null): { status_code: number; message: string; key: string; data?: Record<string, unknown> } {
         return {
             status_code: this.status_code,
-            message: LanguageDict.get(this.message, this.data, language),
+            message: LanguageDict.get(this.message, this.data, language || null),
             // Machine-readable contract: clients switch on `key` + `data` instead of
             // parsing localized prose (data is already client-facing — it is what
             // gets interpolated into the message)
@@ -82,10 +88,10 @@ export class Response {
         this.data = data;
     }
 
-    toJSON(language: string = 'en_US'): { status_code: number; message: string; data: Record<string, unknown> | null } {
+    toJSON(language?: string | null): { status_code: number; message: string; data: Record<string, unknown> | null } {
         return {
             status_code: this.status_code,
-            message: LanguageDict.get(this.message, this.data, language),
+            message: LanguageDict.get(this.message, this.data, language || null),
             data: this.data,
         };
     }

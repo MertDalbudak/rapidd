@@ -12,6 +12,7 @@
 const OMIT: Record<string, string[]> = {}; // per-role omit overrides, set per test if needed
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: {},
     prismaTransaction: jest.fn(),
     getAcl: () => ({

@@ -1,4 +1,5 @@
 import { validateEnv, getEnv, getAllEnv, isProduction, isDevelopment, isTest } from '../../src/core/env';
+import { findEnumProblems } from '../../src/core/env';
 
 describe('Environment Utilities', () => {
     const originalEnv = process.env;
@@ -150,5 +151,14 @@ describe('Environment Utilities', () => {
             process.env.NODE_ENV = 'production';
             expect(isTest()).toBe(false);
         });
+    });
+});
+
+describe('findEnumProblems()', () => {
+    it('flags set-but-invalid enumerated values, ignores unset ones', () => {
+        expect(findEnumProblems({ ACL_DEFAULT: 'Deny', LOG_FORMAT: 'json', LOG_LEVEL: '' })).toEqual([
+            'Invalid ACL_DEFAULT="Deny" — expected one of: allow, deny. The default is used instead.',
+        ]);
+        expect(findEnumProblems({})).toEqual([]);
     });
 });

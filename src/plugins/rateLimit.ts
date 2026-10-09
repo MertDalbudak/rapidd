@@ -1,12 +1,14 @@
 import { FastifyPluginAsync, FastifyRequest, FastifyReply } from 'fastify';
 import fp from 'fastify-plugin';
 import { randomUUID } from 'crypto';
-import Redis from 'ioredis';
+import type Redis from 'ioredis';
+import { createRedisClient, isRedisConfigured } from '../core/redis';
 import { ErrorResponse } from '../core/errors';
 import type { RateLimitPathConfig, RateLimitResult } from '../types';
 
+/** Reconnect backoff cap. Reconnects never stop: a long Redis outage must not leave the
+ *  limiter on per-process memory until the next restart. */
 const REDIS_MAX_TIMEOUT = 1000 * 10;
-const REDIS_MAX_RETRIES = 60;
 
 /**
  * Bucket used by every path that matches no entry in `config/rate-limit.json`.
@@ -42,7 +44,7 @@ class RateLimiter {
     private lastCleanup = 0;
 
     constructor(options: RateLimiterOptions = {}) {
-        this.useRedis = !!process.env.REDIS_HOST;
+        this.useRedis = isRedisConfigured();
         this.defaultWindowMs = options.windowMs ?? (Number(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000);
         this.defaultMaxRequests = options.maxRequests ?? (Number(process.env.RATE_LIMIT_MAX_REQUESTS) || 100);
 
@@ -65,24 +67,16 @@ class RateLimiter {
         this.ensureMemoryStore();
 
         if (this.useRedis) {
-            this.redis = new Redis({
-                host: process.env.REDIS_HOST || 'localhost',
-                port: Number(process.env.REDIS_PORT || 6379),
+            this.redis = createRedisClient({
                 db: Number(process.env.REDIS_DB_RATE_LIMIT || 0),
                 lazyConnect: true,
                 connectTimeout: 1000,
-                retryStrategy: (times: number) => {
-                    if (times <= REDIS_MAX_RETRIES) {
-                        return Math.min(times * 1000, REDIS_MAX_TIMEOUT);
-                    }
-                    this.redis?.quit();
-                    this.fallbackToMemory();
-                    return null;
-                },
+                retryStrategy: (times: number) => Math.min(times * 1000, REDIS_MAX_TIMEOUT),
                 maxRetriesPerRequest: 3,
             });
 
-            this.redis.on('connect', () => {
+            // Back to Redis as soon as it is usable again (also after an outage)
+            this.redis.on('ready', () => {
                 this.useRedis = true;
             });
 
@@ -366,8 +360,12 @@ class RateLimiter {
     }
 
     async close(): Promise<void> {
-        if (this.redis) {
-            await this.redis.quit();
+        const redis = this.redis;
+        this.redis = null;
+        this.useRedis = false;
+        if (redis && redis.status !== 'end') {
+            // quit() rejects on an already-closed connection — never fail a shutdown over it
+            await redis.quit().catch(() => redis.disconnect());
         }
     }
 }
@@ -396,6 +394,8 @@ const rateLimiterPlugin: FastifyPluginAsync<RateLimiterOptions> = async (fastify
 
     fastify.addHook('onRequest', async (request, reply) => {
         if (process.env.NODE_ENV !== 'production') return;
+        // Routes can opt out: { config: { rateLimit: false } } (health probes, webhooks...)
+        if ((request.routeOptions?.config as { rateLimit?: boolean } | undefined)?.rateLimit === false) return;
         await limiter.checkLimit(request, reply);
     });
 

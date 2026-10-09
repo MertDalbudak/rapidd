@@ -6,6 +6,7 @@
 
 // Mock dependencies
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: {},
     prismaTransaction: jest.fn(),
     getAcl: jest.fn(() => ({

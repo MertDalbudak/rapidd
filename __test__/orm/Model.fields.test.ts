@@ -13,6 +13,7 @@ const mockPrismaModel = {
 };
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: new Proxy({}, {
         get: (_target, prop) => {
             if (prop === '$transaction') return jest.fn((fn: any) => fn(new Proxy({}, {
@@ -106,6 +107,8 @@ describe('Model - Field Selection', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        // Drop queued mockResolvedValueOnce values so they can't leak into the next test
+        Object.values(mockPrismaModel).forEach((fn) => fn.mockReset());
         modelMiddleware.clear();
     });
 
@@ -220,14 +223,13 @@ describe('Model - Field Selection', () => {
             expect(dataCall).not.toHaveProperty('omit');
         });
 
-        it('should still perform permission check query', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, title: 'Test' })
-                .mockResolvedValueOnce({ id: 1 });
+        it('restricted users: one lookup carries the access filter', async () => {
+            model = new Model('posts', { user: normalUser });
+            mockPrismaModel.findUnique.mockResolvedValueOnce({ id: 1, title: 'Test' });
 
             await model.get(1, '', {}, 'id,title');
-            // Two findUnique calls: data + permission
-            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(2);
+            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
+            expect(mockPrismaModel.findUnique.mock.calls[0][0].where).toEqual({ id: 1, AND: [{ authorId: 42 }] });
         });
 
         it('should handle fields with relations', async () => {
@@ -256,14 +258,22 @@ describe('Model - Field Selection', () => {
             ).rejects.toThrow('record_not_found');
         });
 
-        it('should throw 403 when permission check fails', async () => {
+        it('should throw 403 when the record exists outside the access filter', async () => {
+            model = new Model('posts', { user: normalUser });
             mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, title: 'Test' })
-                .mockResolvedValueOnce(null); // permission denied
+                .mockResolvedValueOnce(null)       // scoped lookup: not visible to this user
+                .mockResolvedValueOnce({ id: 1 }); // existence check: it exists
 
             await expect(
                 model.get(1, '', {}, 'id,title')
             ).rejects.toThrow('no_permission');
+            expect(mockPrismaModel.findUnique.mock.calls[1][0]).toEqual({ where: { id: 1 }, select: { id: true } });
+        });
+
+        it('unrestricted users: a miss is a 404 without a second query', async () => {
+            mockPrismaModel.findUnique.mockResolvedValueOnce(null);
+            await expect(model.get(1, '', {}, 'id,title')).rejects.toThrow('record_not_found');
+            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
         });
     });
 

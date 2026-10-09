@@ -1,4 +1,4 @@
-import path from 'path';
+import { getAppConfig } from '../core/config';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -49,6 +49,8 @@ export interface RequestOptions {
     body?: unknown;
     timeout?: number;
     signal?: AbortSignal;
+    /** Retry attempts. Default: API_MAX_RETRIES for idempotent methods, 0 for POST/PATCH */
+    retries?: number;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -62,13 +64,16 @@ export class ApiClientError extends Error {
     status: number;
     response: unknown;
     url: string;
+    /** Server-requested delay before retrying (Retry-After), in ms */
+    retryAfterMs?: number;
 
-    constructor(message: string, status: number, response: unknown, url: string) {
+    constructor(message: string, status: number, response: unknown, url: string, retryAfterMs?: number) {
         super(message);
         this.name = 'ApiClientError';
         this.status = status;
         this.response = response;
         this.url = url;
+        this.retryAfterMs = retryAfterMs;
     }
 }
 
@@ -77,20 +82,25 @@ export class ApiClientError extends Error {
 const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT || '10000', 10);
 const MAX_RETRIES = parseInt(process.env.API_MAX_RETRIES || '2', 10);
 
-let _config: { services?: Record<string, ServiceConfig> } = { services: {} };
-let _configLoaded = false;
-const _tokenCache = new Map<string, { access_token: string; token_type: string; expires: number }>();
+/** Methods safe to repeat — POST/PATCH are only retried when explicitly asked to */
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+const MAX_BACKOFF_MS = 5000;
 
+const _tokenCache = new Map<string, { access_token: string; token_type: string; expires: number }>();
+const _tokenRequests = new Map<string, Promise<{ access_token: string; token_type: string; expires: number }>>();
+
+/** Services from config/app.json — `${ENV_VAR}` references are resolved from the environment */
 function getConfig(): { services?: Record<string, ServiceConfig> } {
-    if (!_configLoaded) {
-        try {
-            _config = require(path.join(process.cwd(), 'config', 'app.json'));
-        } catch {
-            _config = { services: {} };
-        }
-        _configLoaded = true;
-    }
-    return _config;
+    return getAppConfig();
+}
+
+/** Retry-After (delta seconds or HTTP date) → ms, capped */
+function retryAfterMs(response: Response): number | undefined {
+    const value = response.headers.get('retry-after');
+    if (!value) return undefined;
+    const seconds = Number(value);
+    const ms = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+    return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, MAX_BACKOFF_MS) : undefined;
 }
 
 function getService(name: string): ServiceConfig {
@@ -149,6 +159,15 @@ async function getOAuthToken(serviceName: string, auth: AuthConfig): Promise<{ a
     if (cached && cached.expires > Date.now() + 60000) {
         return cached;
     }
+    // Single-flight: concurrent calls share one token request
+    const pending = _tokenRequests.get(serviceName);
+    if (pending) return pending;
+    const request = requestOAuthToken(serviceName, auth).finally(() => _tokenRequests.delete(serviceName));
+    _tokenRequests.set(serviceName, request);
+    return request;
+}
+
+async function requestOAuthToken(serviceName: string, auth: AuthConfig): Promise<{ access_token: string; token_type: string; expires: number }> {
 
     const tokenUrl = `${auth.secure !== false ? 'https' : 'http'}://${auth.hostname}${auth.token_path}`;
 
@@ -166,7 +185,8 @@ async function getOAuthToken(serviceName: string, auth: AuthConfig): Promise<{ a
             'Content-Type': 'application/x-www-form-urlencoded',
             'Accept': 'application/json'
         },
-        body
+        body,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT)
     });
 
     if (!response.ok) {
@@ -226,12 +246,21 @@ async function applyAuth(
 }
 
 async function parseResponse(response: Response): Promise<unknown> {
+    if (response.status === 204 || response.status === 205 || response.status === 304) return null;
     const contentType = response.headers.get('content-type') || '';
 
-    if (contentType.includes('application/json')) {
-        return response.json();
+    // application/json, application/problem+json, application/vnd.api+json, ...
+    if (contentType.includes('json')) {
+        // Empty or malformed bodies must not turn an HTTP error into a SyntaxError
+        const text = await response.text();
+        if (!text) return null;
+        try {
+            return JSON.parse(text);
+        } catch {
+            return text;
+        }
     }
-    if (contentType.includes('text/')) {
+    if (contentType.includes('text/') || contentType.includes('xml')) {
         return response.text();
     }
     return response.arrayBuffer();
@@ -301,7 +330,8 @@ export const ApiClient = {
             headers,
             body: options.body,
             timeout: options.timeout,
-            signal: options.signal
+            signal: options.signal,
+            retries: options.retries
         });
     },
 
@@ -319,36 +349,33 @@ export const ApiClient = {
             retries?: number;
         } = {}
     ): Promise<T> {
-        const { method = 'GET', headers = {}, body, timeout = REQUEST_TIMEOUT, retries = MAX_RETRIES } = options;
+        const { method = 'GET', headers = {}, body, timeout = REQUEST_TIMEOUT } = options;
+        const upperMethod = method.toUpperCase();
+        // A retried POST can create a record twice — non-idempotent methods retry only on request
+        const retries = options.retries ?? (IDEMPOTENT_METHODS.has(upperMethod) ? MAX_RETRIES : 0);
 
         const fetchOptions: RequestInit = {
-            method,
+            method: upperMethod,
             headers: {
                 'Content-Type': 'application/json',
                 'Accept': 'application/json',
                 ...headers
-            },
-            signal: options.signal
+            }
         };
 
-        if (body !== undefined && !['GET', 'HEAD'].includes(method)) {
+        if (body !== undefined && !['GET', 'HEAD'].includes(upperMethod)) {
             fetchOptions.body = typeof body === 'string' ? body : JSON.stringify(body);
         }
 
         let lastError: Error | null = null;
 
         for (let attempt = 0; attempt <= retries; attempt++) {
-            const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-            if (!options.signal) {
-                fetchOptions.signal = controller.signal;
-            }
+            // The per-attempt timeout applies even when the caller passes its own signal
+            const timeoutSignal = AbortSignal.timeout(timeout);
+            fetchOptions.signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
 
             try {
                 const response = await fetch(url, fetchOptions);
-                clearTimeout(timeoutId);
-
                 const data = await parseResponse(response);
 
                 if (!response.ok) {
@@ -356,23 +383,28 @@ export const ApiClient = {
                         `HTTP ${response.status}`,
                         response.status,
                         data,
-                        url
+                        url,
+                        retryAfterMs(response)
                     );
                 }
 
                 return data as T;
             } catch (error) {
-                clearTimeout(timeoutId);
                 lastError = error as Error;
 
-                // Don't retry client errors (4xx)
-                if (error instanceof ApiClientError && error.status >= 400 && error.status < 500) {
+                // Cancelled by the caller: stop immediately
+                if (options.signal?.aborted) throw error;
+
+                // Client errors are final — except 429, which asks us to come back later
+                if (error instanceof ApiClientError && error.status >= 400 && error.status < 500 && error.status !== 429) {
                     throw error;
                 }
 
-                // Retry with exponential backoff
+                // Retry with exponential backoff + jitter (or the server's Retry-After)
                 if (attempt < retries) {
-                    await new Promise(r => setTimeout(r, Math.min(1000 * Math.pow(2, attempt), 5000)));
+                    const backoff = Math.min(1000 * Math.pow(2, attempt), MAX_BACKOFF_MS) * (0.5 + Math.random() / 2);
+                    const delay = error instanceof ApiClientError && error.retryAfterMs !== undefined ? error.retryAfterMs : backoff;
+                    await new Promise(r => setTimeout(r, delay));
                 }
             }
         }

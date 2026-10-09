@@ -126,6 +126,19 @@ export function getPrimaryKey(modelName: string): string | string[] {
 }
 
 /**
+ * The Prisma selector name of a compound @@id / @@unique (`email_companyId`, or the
+ * schema's `name:` when the index declares one)
+ */
+export function compoundKeyName(modelName: string, fields: string[]): string {
+    const model = getModel(modelName);
+    const sameFields = (index?: { name?: string | null; fields: string[] } | null) =>
+        !!index && index.fields.length === fields.length && fields.every((f) => index.fields.includes(f));
+    const index = sameFields(model?.primaryKey) ? model!.primaryKey! : model?.uniqueIndexes?.find(sameFields);
+    // The selector follows the index's own field order: @@unique([b, a]) is `b_a`
+    return index ? (index.name || index.fields.join('_')) : fields.join('_');
+}
+
+/**
  * Get all relation fields for a model
  */
 export function getRelations(modelName: string): DMMFField[] {

@@ -129,4 +129,18 @@ describe('LanguageDict', () => {
             expect(LanguageDict.get('hello')).toBe('Hello');
         });
     });
+
+    describe('interpolation of non-string values', () => {
+        it('renders objects as JSON instead of [object Object]', () => {
+            const out = LanguageDict.get('hello_user', { name: { first: 'Ada' } }, 'en_US');
+            expect(out).toBe('Hello {"first":"Ada"}');
+            expect(LanguageDict.get('hello_user', { name: 42 }, 'en_US')).toBe('Hello 42');
+        });
+    });
+
+    describe('defaultLanguage', () => {
+        it('exposes the configured default', () => {
+            expect(typeof LanguageDict.defaultLanguage).toBe('string');
+        });
+    });
 });

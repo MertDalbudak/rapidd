@@ -47,6 +47,7 @@
     "auth_not_configured": "La autenticación no está configurada",
     "invalid_composite_key": "Clave compuesta inválida: se esperaban {expected} campos, se recibieron {received}",
     "invalid_composite_key_format": "Formato de clave compuesta inválido. Se espera un objeto o una cadena separada por tildes",
+    "invalid_id": "Valor no válido '{value}' para {field}",
     "no_permission_to_create": "Sin permiso para crear {model}",
     "no_permission_to_update": "Sin permiso para actualizar el registro",
     "no_permission_to_delete": "Sin permiso para eliminar el registro",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Condición de filtro no válida: '{condition}'",
     "unbalanced_filter_group": "Paréntesis o corchetes sin equilibrar en el filtro",
     "filter_group_too_deep": "Los grupos de filtro están anidados demasiado profundamente (máx. {max})",
-    "empty_filter_value": "La condición de filtro para '{field}' tiene un valor vacío"
+    "empty_filter_value": "La condición de filtro para '{field}' tiene un valor vacío",
+    "auth_provider_unavailable": "El proveedor de autenticación {provider} no está disponible",
+    "auth_provider_not_found": "Proveedor de autenticación {provider} no encontrado",
+    "auth_login_failed": "Error al iniciar sesión con {provider}",
+    "account_not_linked": "No hay ninguna cuenta vinculada a este inicio de sesión de {provider}",
+    "account_inactive": "La cuenta está inactiva",
+    "invalid_login_ticket": "Ticket de inicio de sesión no válido o caducado",
+    "session_expired": "La sesión ha caducado, inicie sesión de nuevo"
 }

@@ -47,6 +47,7 @@
     "auth_not_configured": "Authentication is not configured",
     "invalid_composite_key": "Invalid composite key: expected {expected} fields, received {received}",
     "invalid_composite_key_format": "Invalid composite key format. Expected an object or tilde-separated string",
+    "invalid_id": "Invalid value '{value}' for {field}",
     "no_permission_to_create": "No permission to create {model}",
     "no_permission_to_update": "No permission to update record",
     "no_permission_to_delete": "No permission to delete record",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Invalid filter condition: '{condition}'",
     "unbalanced_filter_group": "Unbalanced parentheses or brackets in filter",
     "filter_group_too_deep": "Filter groups are nested too deeply (max {max})",
-    "empty_filter_value": "Filter condition for '{field}' has an empty value"
+    "empty_filter_value": "Filter condition for '{field}' has an empty value",
+    "auth_provider_unavailable": "Authentication provider {provider} is unavailable",
+    "auth_provider_not_found": "Authentication provider {provider} not found",
+    "auth_login_failed": "Login with {provider} failed",
+    "account_not_linked": "No account is linked to this {provider} login",
+    "account_inactive": "Account is inactive",
+    "invalid_login_ticket": "Invalid or expired login ticket",
+    "session_expired": "Session expired, please log in again"
 }

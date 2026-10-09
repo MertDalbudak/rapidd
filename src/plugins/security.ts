@@ -11,7 +11,10 @@ const securityPlugin: FastifyPluginAsync = async (fastify) => {
     fastify.addHook('onSend', async (_request, reply) => {
         reply.header('X-Content-Type-Options', 'nosniff');
         reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-        reply.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        // API default; a handler serving HTML (e.g. a login page) may set its own policy
+        if (!reply.hasHeader('Content-Security-Policy')) {
+            reply.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+        }
         reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
 
         if (NODE_ENV === 'production') {

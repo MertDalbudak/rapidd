@@ -10,6 +10,7 @@ jest.mock('../../src/core/dmmf', () => ({
 }));
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     authPrisma: {},
     prisma: {},
     prismaTransaction: jest.fn(),

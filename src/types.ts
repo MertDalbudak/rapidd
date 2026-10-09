@@ -20,7 +20,7 @@ export interface RouteAuthConfig {
     customHeaderName?: string;
 }
 
-export interface AuthOptions {
+export interface AuthOptions extends AuthConfig {
     userModel?: string;
     userSelect?: Record<string, boolean> | null;
     userInclude?: Record<string, boolean | object> | null;
@@ -40,6 +40,232 @@ export interface AuthOptions {
     cookieSameSite?: 'strict' | 'lax' | 'none';
     cookieSecure?: boolean;
     customHeaderName?: string;
+}
+
+// =====================================================
+// AUTH PROVIDERS (identity sources)
+// =====================================================
+
+/**
+ * An identity asserted by an auth provider (LDAP, OIDC, WebDAV, ...) before it is
+ * mapped to an application user. Providers produce it; the identity resolver turns it
+ * into a RapiddUser (see AuthConfig.resolveUser / link / roles).
+ */
+export interface ExternalIdentity {
+    /** Name of the provider instance that authenticated the user (e.g. 'ldap', 'entra') */
+    provider: string;
+    /** Stable unique id at the provider: OIDC sub/oid, LDAP objectGUID/entryUUID/DN, WebDAV username */
+    subject: string;
+    username?: string;
+    email?: string;
+    name?: string;
+    /** Group memberships: LDAP group CNs, the OIDC `groups` claim */
+    groups: string[];
+    /** Roles asserted by the identity provider: OIDC `roles`, Keycloak realm/client roles */
+    roles: string[];
+    /** Raw claims / directory attributes as returned by the provider */
+    claims: Record<string, unknown>;
+    /** Set by providers that authenticate against the app's own user table — already resolved */
+    user?: RapiddUser;
+}
+
+/** State a redirect provider persists between the login redirect and its callback */
+export type AuthFlowState = Record<string, unknown>;
+
+/**
+ * An identity source. Implement any subset of the capabilities:
+ * - `authenticate`: username + password (local DB, LDAP/AD, WebDAV, custom)
+ * - `ownsToken` + `verifyToken`: bearer tokens issued by an external IdP (resource-server mode)
+ * - `beginLogin` + `completeLogin`: browser redirect login (OAuth2 / OpenID Connect)
+ */
+export interface AuthProvider {
+    /** Unique instance name — appears in routes (/auth/:name/login) and ExternalIdentity.provider */
+    readonly name: string;
+    /** Provider kind: 'local' | 'ldap' | 'webdav' | 'oidc' | a custom string */
+    readonly type: string;
+    /** Per-provider identity → user mapping, overriding AuthConfig.link / AuthConfig.roles */
+    readonly link?: AuthLinkConfig | false;
+    readonly roles?: RoleMappingConfig;
+    /** Startup hook (discovery, connectivity). Must not throw on transient outages. */
+    initialize?(): Promise<void>;
+    /** Verify username + password. Resolve null for wrong credentials; throw when the provider is unreachable. */
+    authenticate?(username: string, password: string): Promise<ExternalIdentity | null>;
+    /** Cheap pre-check: does this bearer token belong to this provider? `claims` is null for opaque tokens. */
+    ownsToken?(token: string, claims: Record<string, unknown> | null): boolean;
+    /** Validate a bearer token issued by this provider. Resolve null when invalid. */
+    verifyToken?(token: string): Promise<ExternalIdentity | null>;
+    /** Start a redirect login: the URL to send the browser to, plus state to hand back to completeLogin */
+    beginLogin?(options: { redirectUri: string }): Promise<{ url: string; state: string; flow: AuthFlowState }>;
+    /** Finish a redirect login from the callback query parameters */
+    completeLogin?(query: Record<string, string | undefined>, flow: AuthFlowState): Promise<ExternalIdentity>;
+    /**
+     * Re-check at token refresh that the identity's account still exists and is enabled
+     * (e.g. disabled in Active Directory). false ends the session; null = cannot tell.
+     */
+    revalidate?(identity: ExternalIdentity): Promise<boolean | null>;
+    /** Release connections / timers */
+    close?(): Promise<void>;
+}
+
+/**
+ * Link external identities to rows in the app's user table.
+ * `field` is the user-table column, `from` the identity attribute it must equal
+ * ('email' | 'username' | 'subject' | any claim name).
+ */
+export interface AuthLinkConfig {
+    field: string;
+    from: string;
+}
+
+/**
+ * Derive a role from the identity's groups/roles (used when there is no user-table row
+ * to take the role from, and offered to resolveUser/provision as `mapRole`).
+ * `map` keys are IdP group/role names; the FIRST entry the identity holds wins, so list
+ * the most privileged mapping first.
+ */
+export interface RoleMappingConfig {
+    map?: Record<string, string>;
+    /** Role when nothing matches (default null: identity has no role) */
+    default?: string | null;
+}
+
+export interface ResolveUserHelpers {
+    /** Find a user-table row (password field stripped) — null when there is no user table */
+    findUser(where: Record<string, unknown>): Promise<RapiddUser | null>;
+    /** Insert a user-table row and return it (password field stripped) */
+    createUser(data: Record<string, unknown>): Promise<RapiddUser>;
+    /** The role the configured role mapping assigns to this identity */
+    mapRole(identity: ExternalIdentity): string | null;
+}
+
+interface BaseProviderConfig {
+    /** Instance name (defaults to the type) — must be unique */
+    name?: string;
+    link?: AuthLinkConfig | false;
+    roles?: RoleMappingConfig;
+}
+
+export interface LocalProviderConfig extends BaseProviderConfig {
+    type: 'local';
+}
+
+export interface LdapProviderConfig extends BaseProviderConfig {
+    type: 'ldap';
+    /** ldap:// or ldaps:// URL; several are tried in order (failover) */
+    url: string | string[];
+    /** Direct bind without a service account: '{{username}}@corp.example.com' or 'uid={{username}},ou=people,dc=example,dc=com' */
+    bindTemplate?: string;
+    /** Service account for search-then-bind (recommended — supports login by email/sAMAccountName) */
+    bindDN?: string;
+    bindPassword?: string;
+    /** Search base for user lookups (required for search-then-bind) */
+    searchBase?: string;
+    /** User lookup filter; {{username}} is RFC 4515-escaped. Default matches sAMAccountName, userPrincipalName, uid, mail */
+    searchFilter?: string;
+    /** Attribute names (defaults suit Active Directory and OpenLDAP) */
+    attributes?: { username?: string; email?: string; name?: string; groups?: string };
+    /** Resolve nested group membership (Active Directory only — LDAP_MATCHING_RULE_IN_CHAIN) */
+    nestedGroups?: boolean;
+    /** Search groups instead of reading memberOf (servers without the memberOf overlay) */
+    groupSearchBase?: string;
+    /** Group filter; {{dn}} and {{username}} are escaped. Default: (|(member={{dn}})(uniqueMember={{dn}})(memberUid={{username}})) */
+    groupSearchFilter?: string;
+    /** Upgrade ldap:// connections with StartTLS */
+    startTLS?: boolean;
+    /** TLS options (ca, rejectUnauthorized, ...) for ldaps:// and StartTLS */
+    tlsOptions?: Record<string, unknown>;
+    /** Operation timeout in ms (default 5000) */
+    timeout?: number;
+}
+
+export interface WebdavProviderConfig extends BaseProviderConfig {
+    type: 'webdav';
+    /** WebDAV URL to authenticate against; may contain {{username}} (URL-encoded) */
+    url: string;
+    /** Request timeout in ms (default 5000) */
+    timeout?: number;
+}
+
+export interface OidcProviderConfig extends BaseProviderConfig {
+    type: 'oidc';
+    /** Issuer URL — discovery is loaded from <issuer>/.well-known/openid-configuration */
+    issuer?: string;
+    /**
+     * Explicit endpoints — override discovery, or replace it for plain OAuth2 servers
+     * without OpenID Connect (then identities come from the userinfo endpoint)
+     */
+    endpoints?: { authorization?: string; token?: string; userinfo?: string; jwks?: string; introspection?: string };
+    /** OAuth client id — required for redirect login, default expected audience */
+    clientId?: string;
+    /** Client secret (confidential clients; needed for token introspection) */
+    clientSecret?: string;
+    /** Expected `aud` of bearer access tokens (default: clientId) */
+    audience?: string | string[];
+    /** Scopes requested at login (default: openid profile email) */
+    scopes?: string[];
+    /** Scopes every accepted bearer token must carry (checked against `scp` / `scope`) */
+    requiredScopes?: string[];
+    /** Callback URL registered at the IdP (default: <PUBLIC_URL>/auth/<name>/callback) */
+    redirectUri?: string;
+    /** Accept access tokens issued by this IdP as bearer tokens (default: true) */
+    acceptBearer?: boolean;
+    /** Enable the redirect login routes (default: true when clientId is set) */
+    login?: boolean;
+    /** Validate opaque (non-JWT) bearer tokens via RFC 7662 introspection (needs clientSecret) */
+    introspection?: boolean;
+    /** Claim used as ExternalIdentity.subject (default 'sub'; Entra ID: 'oid' is stable across apps) */
+    subjectClaim?: string;
+    /** Also load the userinfo endpoint at login, even when an id_token is returned */
+    userinfo?: boolean;
+    /** Extra authorization request parameters (prompt, domain_hint, ...) */
+    authorizationParams?: Record<string, string>;
+    /** Accepted signature algorithms (default: RS*, PS*, ES*) */
+    algorithms?: string[];
+    /** Allowed clock skew in seconds (default 30) */
+    clockTolerance?: number;
+    /** Request timeout in ms for discovery/JWKS/token calls (default 5000) */
+    timeout?: number;
+}
+
+export type AuthProviderConfig =
+    | LocalProviderConfig
+    | LdapProviderConfig
+    | WebdavProviderConfig
+    | OidcProviderConfig;
+
+/**
+ * App-level auth configuration — the default export of src/config/auth.ts.
+ * Every field is optional; env vars (AUTH_PROVIDERS, LDAP_*, OIDC_*, WEBDAV_*) fill the gaps.
+ */
+export interface AuthConfig {
+    /** Identity providers, tried in order for password logins. Default: AUTH_PROVIDERS env, else ['local'] */
+    providers?: Array<AuthProviderConfig | AuthProvider>;
+    /** Link external identities to user-table rows (default { field: 'email', from: 'email' }); false disables */
+    link?: AuthLinkConfig | false;
+    /** Group/role → app role mapping for identities without a user-table row */
+    roles?: RoleMappingConfig;
+    /** Create a user-table row for an unknown external identity; return the row data, or null to reject */
+    provision?: (identity: ExternalIdentity) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>;
+    /** Full control: map any external identity to an app user (null rejects the login) */
+    resolveUser?: (identity: ExternalIdentity, helpers: ResolveUserHelpers) => Promise<RapiddUser | null> | RapiddUser | null;
+    /** Where redirect logins land when no ?redirect= is given (default: AUTH_LOGIN_REDIRECT, else '/') */
+    loginRedirect?: string;
+    /**
+     * Gate a user at login, at token refresh and when an external bearer token is first seen
+     * (e.g. reject deactivated accounts). Throw an ErrorResponse, or return false for a
+     * generic 403 `account_inactive`. A rejected refresh also revokes the session.
+     */
+    validateUser?: (user: RapiddUser, context: AuthEventContext) => void | boolean | Promise<void | boolean>;
+    /** Runs after every successful login (audit trail, last-login timestamps). Errors are logged, never fail the login. */
+    onLogin?: (user: RapiddUser, context: AuthEventContext) => void | Promise<void>;
+}
+
+export interface AuthEventContext {
+    event: 'login' | 'refresh' | 'token';
+    /** Name of the provider that authenticated the user */
+    provider: string;
+    /** The external identity (absent on refresh) */
+    identity?: ExternalIdentity;
 }
 
 // =====================================================
@@ -83,10 +309,17 @@ export interface MiddlewareContext {
     abort: boolean;
     skip: boolean;
     softDelete: boolean;
+    /**
+     * Per-operation scratch space shared by the operation's `before` and `after` hooks —
+     * e.g. capture the old row in `before`, diff against `ctx.result` in `after`.
+     */
+    state: Record<string, any>;
     data?: Record<string, unknown>;
     id?: string | number;
     result?: unknown;
     query?: string | Record<string, unknown>;
+    /** getMany: the server-side scope (GetManyOptions.where) */
+    where?: Record<string, unknown>;
     include?: string | Record<string, unknown>;
     take?: number;
     skip_offset?: number;
@@ -158,7 +391,8 @@ export interface DMMFField {
 export interface DMMFModel {
     name: string;
     fields: DMMFField[];
-    primaryKey?: { fields: string[] } | null;
+    primaryKey?: { name?: string | null; fields: string[] } | null;
+    uniqueIndexes?: { name?: string | null; fields: string[] }[];
     [key: string]: unknown;
 }
 
@@ -274,10 +508,20 @@ export interface RateLimitResult {
 // =====================================================
 
 export interface ISessionStore {
-    create(sessionId: string, data: Record<string, unknown>): Promise<void>;
+    create(sessionId: string, data: Record<string, unknown>, options?: { ttl?: number; userId?: string | number | null }): Promise<void>;
     get(sessionId: string): Promise<Record<string, unknown> | null>;
     delete(sessionId: string): Promise<void>;
     refresh(sessionId: string): Promise<void>;
+    /** Read and extend in one operation (optional — falls back to get + refresh) */
+    touch?(sessionId: string): Promise<Record<string, unknown> | null>;
+    /** Read and delete in one operation (optional — falls back to get + delete) */
+    take?(sessionId: string): Promise<Record<string, unknown> | null>;
+    /** Write only if the key exists — true when written (optional — falls back to get + create) */
+    replace?(sessionId: string, data: Record<string, unknown>, options?: { ttl?: number; userId?: string | number | null }): Promise<boolean>;
+    /** Write only if the key does not exist — true when written (optional — falls back to get + create) */
+    add?(sessionId: string, data: Record<string, unknown>, options?: { ttl?: number; userId?: string | number | null }): Promise<boolean>;
+    /** Delete every entry written with this userId (optional — needed for revokeUserSessions) */
+    deleteByUser?(userId: string | number): Promise<number>;
     isHealthy(): Promise<boolean>;
     destroy?(): void | Promise<void>;
 }
@@ -298,8 +542,16 @@ export interface ModelOptions {
 }
 
 export interface GetManyOptions {
-    /** Filter — the raw query string (?q=...) or a pre-built filter object */
-    q?: string | Record<string, any>;
+    /**
+     * Client filter — the query string (?q=...), or an object of field equality conditions
+     * (`{ courseId: '5' }`, parsed by field type). Validated against the ACL either way.
+     */
+    q?: string | string[] | Record<string, any>;
+    /**
+     * Server-side scope: a Prisma where AND-ed with the client filter and the ACL — e.g. the
+     * parent of a sub-route. Trusted as is: never put client input here unparsed.
+     */
+    where?: Record<string, unknown>;
     include?: string | Record<string, any>;
     limit?: number;
     offset?: number;
@@ -319,8 +571,12 @@ export interface GetManyResult<T = Record<string, unknown>> {
 export interface UpsertManyResult {
     created: number;
     updated: number;
+    /** New records the bulk insert skipped on a unique conflict (not individually identifiable) */
+    skipped: number;
+    /** One entry per failed record — or per failed bulk insert, with all of its `records` */
     failed: Array<{ record?: unknown; records?: unknown; error: Error }>;
     totalSuccess: number;
+    /** Records that failed (a failed bulk insert counts all of its records) */
     totalFailed: number;
 }
 
@@ -335,6 +591,13 @@ export interface UpsertManyOptions {
 // =====================================================
 
 declare module 'fastify' {
+    interface FastifyContextConfig {
+        /** false exempts the route from rate limiting (health probes, webhooks) */
+        rateLimit?: boolean;
+        /** false keeps the route out of the access log */
+        accessLog?: boolean;
+    }
+
     interface FastifyRequest {
         user: RapiddUser | null;
         language: string;
@@ -372,4 +635,23 @@ export interface RapiddOptions {
     cors?: Record<string, unknown>;
     /** Set false to disable rate limiting (default: enabled in production) */
     rateLimit?: boolean;
+    /**
+     * Extra Fastify plugins, registered after the core plugins (auth, RLS, rate limiting)
+     * and before the route loader. Pass `[plugin, options]` to give a plugin options.
+     */
+    plugins?: Array<RapiddPluginEntry>;
+    /**
+     * Called for every unexpected error (responses with status >= 500) and for process-level
+     * crashes — hook up Sentry, Datadog, etc. here. Must not throw.
+     */
+    errorReporter?: (error: unknown, request?: FastifyRequest) => void;
+    /** GET /health (liveness) and /health/ready (readiness); false disables. Env: HEALTH_ENABLED */
+    health?: boolean;
+    /** Auth options (providers, hooks, ...) — override src/config/auth.ts and env */
+    auth?: AuthOptions;
+    /** Install the uncaughtException/unhandledRejection logging handlers (default true) */
+    processHandlers?: boolean;
 }
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export type RapiddPluginEntry = ((...args: any[]) => any) | [(...args: any[]) => any, Record<string, unknown>];

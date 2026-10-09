@@ -14,6 +14,7 @@ const mockPrismaModel = {
 };
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: new Proxy({}, {
         get: (_target, prop) => {
             if (prop === '$transaction') return jest.fn((fn: any) => fn(new Proxy({}, {
@@ -652,6 +653,7 @@ describe('Fields parameter - Negative tests', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        mockPrismaModel.findUnique.mockReset();
         mockPrismaModel.findMany.mockResolvedValue([]);
         mockPrismaModel.count.mockResolvedValue(0);
     });
@@ -721,17 +723,24 @@ describe('Fields parameter - Negative tests', () => {
     });
 
     describe('permission denied', () => {
-        it('should return 403 when permission check fails (with fields)', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, name: 'Item' })
-                .mockResolvedValueOnce(null);
+        it('should return 403 when the record is outside the access filter (with fields)', async () => {
+            const restricted = await buildApp({ routesPath: TEMP_ROUTES, rateLimit: false });
+            registerItemRoutes(restricted, normalUser);
+            await restricted.ready();
+            try {
+                mockPrismaModel.findUnique
+                    .mockResolvedValueOnce(null)        // scoped lookup
+                    .mockResolvedValueOnce({ id: 1 });  // existence check
 
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items/1?fields=id,name',
-            });
+                const response = await restricted.inject({
+                    method: 'GET',
+                    url: '/api/v1/items/1?fields=id,name',
+                });
 
-            expect(response.statusCode).toBe(403);
+                expect(response.statusCode).toBe(403);
+            } finally {
+                await restricted.close();
+            }
         });
     });
 });
