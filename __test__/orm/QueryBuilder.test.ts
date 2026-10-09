@@ -863,9 +863,9 @@ describe('QueryBuilder (TypeScript)', () => {
         });
 
         it('should bypass the whitelist for the application role', () => {
-            const result: any = qb.update(1, { content: 'x', createdAt: '2024-01-01' }, createSystemUser());
+            const result: any = qb.update(1, { content: 'x', createdAt: '2024-01-01T10:00:00.000Z' }, createSystemUser());
             expect(result.content).toBe('x');
-            expect(result.createdAt).toBe('2024-01-01');
+            expect(result.createdAt).toBe('2024-01-01T10:00:00.000Z');
         });
     });
 
@@ -927,6 +927,51 @@ describe('QueryBuilder (TypeScript)', () => {
                 ],
             });
             expect(result).toBeDefined();
+        });
+    });
+
+    describe('errorHandler() — database errors through driver adapters', () => {
+        const adapterError = (cause: object) => Object.assign(new Error('db'), { name: 'DriverAdapterError', cause });
+
+        it('check constraints, invalid values and policy rejections are client errors', () => {
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'postgres', code: '23514', message: 'violates check constraint' })))
+                .toMatchObject({ status_code: 400, key: 'database_constraint_failed' });
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'postgres', code: '42501', message: 'new row violates row-level security policy' })))
+                .toMatchObject({ status_code: 403, key: 'no_permission' });
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'postgres', code: '22P02' }))).toMatchObject({ status_code: 400, key: 'invalid_value' });
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'postgres', code: '40P01' }))).toMatchObject({ status_code: 409, key: 'transaction_write_conflict' });
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'mysql', code: 3819, message: "Check constraint 'c' is violated." })))
+                .toMatchObject({ status_code: 400, key: 'database_constraint_failed' });
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'mysql', code: 1406 }))).toMatchObject({ status_code: 400, key: 'value_too_long' });
+            // Anything else stays a server error
+            expect(QueryBuilder.errorHandler(adapterError({ kind: 'postgres', code: '53300' })).status_code).toBe(500);
+        });
+
+        it('Prisma 7.10 reports them as P2039 with the driver error in meta — the same mapping', () => {
+            const wrapped = (cause: object) => Object.assign(new Error('Database error. Code: `23514`.'), { name: 'PrismaClientKnownRequestError', code: 'P2039',
+                meta: { modelName: 'reviews', driverAdapterError: { name: 'DriverAdapterError', cause } } });
+            expect(QueryBuilder.errorHandler(wrapped({ kind: 'postgres', code: '23514', originalCode: '23514' })))
+                .toMatchObject({ status_code: 400, key: 'database_constraint_failed' });
+            expect(QueryBuilder.errorHandler(wrapped({ kind: 'mysql', code: 1406 }))).toMatchObject({ status_code: 400, key: 'value_too_long' });
+            expect(QueryBuilder.errorHandler(wrapped({ kind: 'postgres', code: '53300' })).status_code).toBe(500);
+        });
+
+        it('duplicates name the field again (driver adapters report it in driverAdapterError)', () => {
+            const pg = Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { modelName: 'products',
+                driverAdapterError: { cause: { kind: 'UniqueConstraintViolation', constraint: { fields: ['sku'] } } } } });
+            expect(QueryBuilder.errorHandler(pg, { sku: 'SKU-1' })).toMatchObject({ status_code: 409, key: 'duplicate_entry', data: { field: 'sku', value: 'SKU-1' } });
+            const mysql = Object.assign(new Error('Unique constraint failed'), { code: 'P2002', meta: { modelName: 'Post',
+                driverAdapterError: { cause: { kind: 'UniqueConstraintViolation', constraint: { index: 'Post_slug_key' } } } } });
+            expect(QueryBuilder.errorHandler(mysql, { slug: 'a' })).toMatchObject({ key: 'duplicate_entry', data: { field: 'slug', value: 'a' } });
+        });
+
+        it('validation errors say which field and why', () => {
+            const err = Object.assign(new Error('Invalid `prisma.employees.create()` invocation:\n\n{ ... }\n\nInvalid value for argument `hired_on`: premature end of input. Expected ISO-8601 DateTime.'),
+                { name: 'PrismaClientValidationError' });
+            expect(QueryBuilder.errorHandler(err)).toMatchObject({ status_code: 400, key: 'data_validation_error',
+                message: 'Invalid value for argument `hired_on`: premature end of input. Expected ISO-8601 DateTime.', data: { field: 'hired_on' } });
+            const missing = Object.assign(new Error('...\n\nArgument `first_name` is missing.'), { name: 'PrismaClientValidationError' });
+            expect(QueryBuilder.errorHandler(missing)).toMatchObject({ data: { field: 'first_name' } });
         });
     });
 

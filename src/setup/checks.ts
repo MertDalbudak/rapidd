@@ -1,6 +1,6 @@
 import net from 'net';
 import tls from 'tls';
-import { detectProvider, parseMySQLConnectionString } from '../core/adapter';
+import { detectProvider, parseMySQLConnectionString, requireDriver } from '../core/adapter';
 import { createRedisClient } from '../core/redis';
 import { ldapConfigFromEnv, webdavConfigFromEnv, LdapProvider, WebdavProvider } from '../auth/providers';
 import type { CheckName, Values } from './catalog';
@@ -66,19 +66,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, what: string): Promise<
 export async function databaseInfo(url: string, timeoutMs = 5000): Promise<{ provider: string; version: string; database: string; tables: string[] }> {
     const provider = detectProvider(url);
     if (provider === 'mysql') {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const mariadb = require('mariadb');
-        const config = { ...parseMySQLConnectionString(url), connectTimeout: timeoutMs };
-        delete (config as any).connectionLimit;
-        const conn = await mariadb.createConnection(config);
-        try {
+        return withMySQL(url, async (conn) => {
             const [{ version }] = await conn.query('SELECT VERSION() AS version');
             const [{ db }] = await conn.query('SELECT DATABASE() AS db');
             const rows = await conn.query('SHOW TABLES');
             return { provider, version: String(version), database: String(db), tables: rows.map((r: any) => String(Object.values(r)[0])) };
-        } finally {
-            await conn.end().catch(() => undefined);
-        }
+        }, timeoutMs);
     }
     return withPostgres(url, async (client, schema) => {
         const { rows: [info] } = await client.query('SELECT version() AS version, current_database() AS database');
@@ -93,10 +86,22 @@ export async function databaseInfo(url: string, timeoutMs = 5000): Promise<{ pro
     }, timeoutMs);
 }
 
+/** Run fn with a MySQL/MariaDB connection */
+export async function withMySQL<T>(url: string, fn: (conn: any) => Promise<T>, timeoutMs = 5000): Promise<T> {
+    const mariadb = requireDriver('mariadb');
+    const config: Record<string, unknown> = { ...parseMySQLConnectionString(url), connectTimeout: timeoutMs };
+    delete config.connectionLimit;
+    const conn = await mariadb.createConnection(config);
+    try {
+        return await fn(conn);
+    } finally {
+        await conn.end().catch(() => undefined);
+    }
+}
+
 /** Run fn with a PostgreSQL connection; `schema` is Prisma's ?schema= (default public) */
 export async function withPostgres<T>(url: string, fn: (client: any, schema: string) => Promise<T>, timeoutMs = 5000): Promise<T> {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Client } = require('pg');
+    const { Client } = requireDriver('pg');
     // Prisma's ?schema= is not a libpq parameter — read it, and keep it away from pg
     const parsed = new URL(url);
     const schema = parsed.searchParams.get('schema') || 'public';

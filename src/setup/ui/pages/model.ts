@@ -22,6 +22,17 @@ export function installModelPage(R) {
         }
         if (['model', 'ratelimits', 'access', 'rls'].includes(S.page)) R.render();
         R.refreshChrome();
+        // MariaDB keeps JSON in LONGTEXT — columns the schema reads as String (asks the database)
+        if (S.page === 'model' && r.project.schema.provider === 'mysql' && r.models.length) {
+            R.api('POST', '/schema/json', R.payload()).then((j) => {
+                const next = j && j.__status < 400 && j.fields && j.fields.length ? j : null;
+                if (String(next && next.fields) === String(S.ui.json && S.ui.json.fields)) return;
+                S.ui.json = next;
+                if (S.page === 'model') R.render();
+            });
+        } else {
+            S.ui.json = null;
+        }
         return r;
     });
 
@@ -89,6 +100,109 @@ export function installModelPage(R) {
         return h('div', null, h('code', { text: model.route.url }), ' ', model.route.exists ? R.icon('check', 'ok-text') : R.badge('missing', 'warn'));
     }
 
+    // ── Relation names ───────────────────────────────────────────────────
+    const NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
+    /** Rename relation fields: read from a database they are named after the related table, and the API uses them */
+    function renameRelations(models) {
+        const names = {};
+        for (const m of models) {
+            names[m.name] = {};
+            for (const r of m.relationFields) names[m.name][r.name] = r.name;
+        }
+        let error = '';
+        const problem = (m, r) => {
+            const v = names[m.name][r.name];
+            if (!NAME.test(v)) return 'Letters, digits and _, starting with a letter';
+            const others = m.fields.map((f) => f.name).concat(m.relationFields.filter((o) => o !== r).map((o) => names[m.name][o.name]));
+            return others.includes(v) ? m.name + ' has another field named ' + v : '';
+        };
+        const changes = () => {
+            const out = {};
+            for (const m of models) for (const r of m.relationFields) {
+                if (names[m.name][r.name] !== r.name) (out[m.name] = out[m.name] || {})[r.name] = names[m.name][r.name];
+            }
+            return out;
+        };
+        const open = () => models.flatMap((m) => m.relationFields.filter((r) => r.suggestion && names[m.name][r.name] !== r.suggestion).map((r) => [m, r]));
+        const describe = (r) => (r.list ? 'rows of ' : 'one row of ') + r.target + (r.foreignKey.length ? ' · by ' + (r.owner ? '' : r.target + '.') + r.foreignKey.join(', ') : '');
+        const d = R.dialog({
+            title: models.length === 1 ? 'Relations of ' + models[0].name : 'Relation names', wide: true,
+            render: () => {
+                const renames = changes();
+                const count = Object.values(renames).reduce((n, c) => n + Object.keys(c).length, 0);
+                const invalid = models.some((m) => m.relationFields.some((r) => problem(m, r)));
+                return {
+                    body: [
+                        h('p', { class: 'muted', style: { marginTop: 0 }, text: 'These names are the API’s — in include=, fields= and filters. Read from a database, a relation is named after the related table; rename it to what it means. The database does not change, but requests and code that use an old name have to.' }),
+                        models.map((m) => h('div', { style: { marginTop: '12px' } },
+                            models.length > 1 ? h('b', { text: m.name }) : null,
+                            h('div', { class: 'table-wrap' }, h('table', { class: 'table' }, h('tbody', null, m.relationFields.map((r) => {
+                                const p = problem(m, r);
+                                const value = names[m.name][r.name];
+                                return h('tr', null,
+                                    h('td', { class: 'shrink' }, h('code', { text: r.name })),
+                                    h('td', null,
+                                        h('input', { class: 'input' + (p ? ' invalid' : ''), id: 'rel-' + m.name + '-' + r.name, value, spellcheck: 'false', 'aria-label': 'Name for ' + r.name,
+                                            oninput: (e) => { names[m.name][r.name] = e.target.value.trim(); d.update(); } }),
+                                        p ? h('div', { class: 'bad-text small', text: p }) : null),
+                                    h('td', { class: 'muted small', text: describe(r) }),
+                                    h('td', { class: 'shrink' }, r.suggestion && value !== r.suggestion
+                                        ? R.button(r.suggestion, { size: 'sm', kind: 'ghost', icon: 'edit', title: 'Use the suggested name', onClick: () => { names[m.name][r.name] = r.suggestion; d.update(); } })
+                                        : null));
+                            })))))),
+                        error ? R.notice('bad', 'Not renamed', h('pre', { class: 'code light', style: { marginTop: '8px' }, text: error })) : null,
+                    ],
+                    actions: [
+                        h('div', { class: 'left' }, R.button('Use all suggestions', { kind: 'ghost', size: 'sm', disabled: open().length === 0, onClick: () => {
+                            for (const [m, r] of open()) names[m.name][r.name] = r.suggestion;
+                            d.update();
+                        } })),
+                        R.button('Cancel', { onClick: () => d.close() }),
+                        R.button(count ? 'Rename ' + count : 'Rename', { kind: 'primary', busy: 'Renaming…', disabled: !count || invalid || !!S.ui.running, onClick: async () => {
+                            const acl = R.fileJson('acl', null);
+                            const r = await R.api('POST', '/schema/relations', R.payload({ renames, acl }));
+                            if (r.__status >= 400) {
+                                error = r.error || 'The schema could not be changed';
+                                d.update();
+                                return;
+                            }
+                            let note = '';
+                            if (r.acl && JSON.stringify(r.acl) !== JSON.stringify(acl)) {
+                                R.setFileJson('acl', r.acl);
+                                note = ' The access rules that use them are updated — save them under Review & start.';
+                            }
+                            R.toast(r.ok ? 'ok' : 'bad', r.message + note, note ? 8000 : undefined);
+                            S.ui.output = { name: 'generate', result: r };
+                            d.close();
+                            await R.loadProject();
+                        } }),
+                    ],
+                };
+            },
+        });
+    }
+
+    function relationsLink(m) {
+        const n = m.relationFields.length;
+        if (!n) return null;
+        const suggested = m.relationFields.some((r) => r.suggestion);
+        return [' · ', h('a', { href: '#', title: suggested ? 'Rename relations — clearer names are suggested' : 'Rename relations',
+            onclick: (e) => { e.preventDefault(); renameRelations([m]); } }, n + ' relation' + (n === 1 ? '' : 's'))];
+    }
+
+    async function typeJson() {
+        const r = await R.api('POST', '/schema/json', R.payload({ apply: true }));
+        if (r.__status >= 400) {
+            R.toast('bad', r.error || 'The schema could not be changed');
+            return;
+        }
+        R.toast(r.ok ? 'ok' : 'bad', r.message);
+        S.ui.output = { name: 'generate', result: r };
+        S.ui.json = null;
+        await R.loadProject();
+    }
+
     function schemaCard() {
         const p = S.project.project;
         const actions = S.project.actions;
@@ -125,6 +239,7 @@ export function installModelPage(R) {
         const chip = (id, label) => h('button', { type: 'button', class: 'chip' + (components[id] ? ' on' : ''), 'aria-pressed': String(!!components[id]),
             onclick: () => { components[id] = !components[id]; R.render(); } }, components[id] ? R.icon('check') : null, label);
         const nothing = !components.model && !components.route && !components.acl;
+        const suggested = models.filter((m) => m.relationFields.some((r) => r.suggestion));
         return R.card({
             title: 'Models & routes', icon: 'layers',
             description: 'Generated code: a model class (src/models) and a REST route (routes/api/v1) per model. Existing files are never overwritten.',
@@ -142,12 +257,16 @@ export function installModelPage(R) {
             ],
         },
         !build.installed ? h('div', { style: { padding: '14px 20px 0' } }, R.notice('warn', '@rapidd/build is not installed', h('span', null, 'Install the code generator: ', h('code', { text: 'npm install -D @rapidd/build' })))) : null,
+        S.ui.json ? h('div', { style: { padding: '14px 20px 0' } }, R.notice('warn', 'JSON read as text',
+            h('span', null, 'MariaDB keeps JSON in LONGTEXT columns, which Prisma reads as String — the API returns ', h('code', { text: S.ui.json.fields.join(', ') }), ' as text instead of JSON.'),
+            [R.button('Type as Json', { size: 'sm', kind: 'primary', busy: 'Typing…', disabled: !!S.ui.running, onClick: typeJson })])) : null,
         h('div', { class: 'toolbar', style: { padding: '14px 20px 0' } },
             R.search(S.ui.modelSearch, (v) => { S.ui.modelSearch = v; R.render(); }, 'Filter models', 'model-search'),
             R.button('Select models without code', { size: 'sm', kind: 'ghost', onClick: () => {
                 S.ui.selected = models.filter((m) => !m.modelFile.exists || (m.route.kind === 'route' && !m.route.exists)).map((m) => m.name);
                 R.render();
-            } })),
+            } }),
+            suggested.length ? R.button('Relation names', { size: 'sm', kind: 'ghost', icon: 'edit', title: 'Clearer names for relations read from the database', onClick: () => renameRelations(suggested) }) : null),
         h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
             h('thead', null, h('tr', null,
                 h('th', { class: 'shrink' }, h('input', { type: 'checkbox', 'aria-label': 'Select all', checked: allOn, onchange: (e) => {
@@ -158,7 +277,7 @@ export function installModelPage(R) {
                 h('th', { text: 'Model' }), h('th', { text: 'Key' }), h('th', { text: 'Model class' }), h('th', { text: 'REST route' }), h('th', { text: 'Access' }))),
             h('tbody', null, shown.map((m) => h('tr', { class: selected.has(m.name) ? 'selected' : '' },
                 h('td', { class: 'shrink' }, h('input', { type: 'checkbox', 'aria-label': 'Select ' + m.name, checked: selected.has(m.name), onchange: (e) => toggle(m.name, e.target.checked) })),
-                h('td', null, h('b', { text: m.name }), m.table !== m.name ? h('div', { class: 'sub', text: 'table ' + m.table }) : null, h('div', { class: 'sub', text: m.fields.length + ' fields' })),
+                h('td', null, h('b', { text: m.name }), m.table !== m.name ? h('div', { class: 'sub', text: 'table ' + m.table }) : null, h('div', { class: 'sub' }, m.fields.length + ' fields', relationsLink(m))),
                 h('td', null, h('code', { text: m.key.join(', ') || '—' })),
                 h('td', null, m.modelFile.exists ? h('span', { title: m.modelFile.path }, R.icon('check', 'ok-text'), ' ', h('code', { text: m.modelFile.path.replace(/^src\/models\//, '') })) : R.badge('missing', 'warn')),
                 h('td', null, route(m)),

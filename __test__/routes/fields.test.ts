@@ -658,54 +658,32 @@ describe('Fields parameter - Negative tests', () => {
         mockPrismaModel.count.mockResolvedValue(0);
     });
 
-    describe('relation not in include', () => {
-        it('should return 400 when using relation fields without include', async () => {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items?fields=id,category.name',
-            });
-
-            expect(response.statusCode).toBe(400);
-            const body = JSON.parse(response.payload);
-            expect(body.message).toContain('relation_not_included');
+    describe('relations named in fields', () => {
+        it('are included without include', async () => {
+            const response = await app.inject({ method: 'GET', url: '/api/v1/items?fields=id,category.name' });
+            expect(response.statusCode).toBe(200);
+            const call = mockPrismaModel.findMany.mock.calls[mockPrismaModel.findMany.mock.calls.length - 1][0];
+            expect(call.select.category.select.name).toBe(true);
         });
 
-        it('should return 400 when relation is not in include list', async () => {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items?fields=id,tags.name&include=category',
-            });
-
-            expect(response.statusCode).toBe(400);
-            const body = JSON.parse(response.payload);
-            expect(body.message).toContain('relation_not_included');
+        it('mix with include: listed relations and fields relations together', async () => {
+            const response = await app.inject({ method: 'GET', url: '/api/v1/items?fields=id,category.name,tags.name&include=category' });
+            expect(response.statusCode).toBe(200);
+            const call = mockPrismaModel.findMany.mock.calls[mockPrismaModel.findMany.mock.calls.length - 1][0];
+            expect(call.select.category.select.name).toBe(true);
+            expect(call.select.tags.select.name).toBe(true);
         });
 
-        it('should return 400 when one of multiple relations is missing from include', async () => {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items?fields=id,category.name,tags.name&include=category',
-            });
-
-            expect(response.statusCode).toBe(400);
+        it('work on GET /:id and for nested relations', async () => {
+            mockPrismaModel.findUnique.mockResolvedValue({ id: 1, category: { name: 'c' } });
+            expect((await app.inject({ method: 'GET', url: '/api/v1/items/1?fields=id,category.name' })).statusCode).toBe(200);
+            expect((await app.inject({ method: 'GET', url: '/api/v1/items?fields=id,category.parent.name' })).statusCode).toBe(200);
         });
 
-        it('should return 400 for relation fields on GET /:id without include', async () => {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items/1?fields=id,category.name',
-            });
-
+        it('an unknown relation is a 400', async () => {
+            const response = await app.inject({ method: 'GET', url: '/api/v1/items?fields=id,nope.name' });
             expect(response.statusCode).toBe(400);
-        });
-
-        it('should return 400 for deep nested relation without include', async () => {
-            const response = await app.inject({
-                method: 'GET',
-                url: '/api/v1/items?fields=id,category.parent.name',
-            });
-
-            expect(response.statusCode).toBe(400);
+            expect(JSON.parse(response.payload).key).toBe('relation_not_exist');
         });
     });
 

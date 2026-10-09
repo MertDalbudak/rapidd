@@ -47,7 +47,16 @@ start. The built-in Mailer is removed — apps use the mail library of their cho
 >     stopped the API open it, so a deployment that starts today keeps starting. For
 >     `npm run setup`, add `"setup": "tsx main.ts setup"` to the scripts of `package.json`.
 > 14. The Docker image sets `ENV_FILE=/app/data/.env` and declares `/app/data` a volume (where the
->     wizard saves its settings).
+>     wizard saves its settings). It installs the driver of one database only (see *Changed —
+>     Docker image*).
+> 15. **Write responses are the record**: create, update and upsert returned every first-level
+>     relation (a `PATCH` of a user with many posts answered 63 KB). They return the record alone
+>     now; `?include=` adds relations, as on reads, with the same access rules. Routes generated
+>     by `@rapidd/build` after 2.3.0 pass `?include=` on `POST`/`PATCH`; older routes return the
+>     record alone. Code that passes an `include` option to `create`/`update` keeps getting it.
+> 16. **Unknown relations are a 400**: `include=` and `fields=` naming something that is not a
+>     relation of the model answer `400 relation_not_exist` (an unknown `include` was ignored, so
+>     a typo went unnoticed).
 
 ### Added — authentication
 
@@ -98,8 +107,19 @@ start. The built-in Mailer is removed — apps use the mail library of their cho
   without an entry.
 - `${ENV_VAR}` / `${ENV_VAR:-default}` substitution in `config/app.json` — secrets out of the file.
 - `REDIS_URL` (`rediss://`), `REDIS_USERNAME`, `REDIS_TLS` — shared by sessions and rate limiting.
-- `TRUST_PROXY` accepts hop counts and IP/CIDR lists; `CORS_ALLOWED_HEADERS`; `BODY_LIMIT`;
-  `DEFAULT_LANGUAGE`; `PUBLIC_URL`; enumerated env vars are validated at startup.
+- `TRUST_PROXY` accepts the proxies' addresses (IPs, CIDRs, `private`, `cloudflare`, `loopback`,
+  ...) and hop counts. A hop is trusted only from a proxy address — private, or the listed ones
+  (`1,203.0.113.0/24`) — as Fastify 5.12+ requires: a client that reaches the server directly
+  cannot set its own IP. Invalid values stop the start with what is wrong.
+- Unset `TRUST_PROXY` trusts every proxy outside production too (2.x: none) — a development
+  server behind a tunnel or proxy sees the visitor's IP. Production keeps its default and warning.
+- **Behind Cloudflare** a hop count gives every visitor a Cloudflare address (its servers are
+  public): `TRUST_PROXY=private,cloudflare` trusts Cloudflare's published ranges and the proxies
+  on the machine or network. The setup wizard recognises Cloudflare (on its own request, or
+  `PUBLIC_URL` resolving to it), shows whom the API takes the visitor for and proposes the value —
+  filled in while unset; the API logs once when Cloudflare traffic arrives untrusted.
+- `CORS_ALLOWED_HEADERS`; `BODY_LIMIT`; `DEFAULT_LANGUAGE`; `PUBLIC_URL`; enumerated env vars are
+  validated at startup.
 - `ctx.state` in model middleware: one object shared by an operation's before and after hooks.
 
 ### Security — hardening from an adversarial review of the new auth layer
@@ -183,6 +203,18 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   `resetDMMF()`; side-effect-free `core/adapter` (`createAdapter` is still exported from
   `core/prisma`); the settings catalog `src/setup/catalog.ts`, kept in step with the code by a test.
 
+### Added — setup wizard: relation names, MariaDB JSON
+
+- **Relation names**: relations read from a database are named after tables (`other_employees`,
+  `Follow_Follow_followerIdToUser`) — and those names are the API's. *Data model & API* links
+  each model's relations to a rename dialog with suggestions (from the foreign key: `manager`,
+  `employees_by_manager_id`, `parent` / `children`, in the model's naming style). Renaming
+  rewrites `prisma/schema.prisma` (validated, `.bak` kept), generates the client, and updates the
+  staged access rules that use the relations.
+- **MariaDB JSON**: MariaDB stores JSON as LONGTEXT, which Prisma introspects as `String` — the
+  API returned JSON as text. *Read from the database* types those columns `Json` (found by their
+  `json_valid()` check); for a schema pulled before, the page offers **Type as Json**.
+
 ### Added — declarative access rules and RLS variables
 
 - **`config/acl.json`**: access rules per model and role — `create` true/false; `read`, `update`,
@@ -195,6 +227,66 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   of your own still replaces it.
 - `prepareServiceRequest(name, service, endpoint, options)` (ApiClient): the request of a service
   endpoint — URL, method, headers with authorization — for a service passed in.
+
+### Fixed — found by running PostgreSQL, MySQL 8 and MariaDB projects end to end
+
+- **PostgreSQL schemas other than `public`**: `?schema=` in `DATABASE_URL` was ignored by the
+  runtime — every query went to `public`. It now reaches the adapter; `connection_limit` and
+  `pool_timeout` size the pool (it was fixed at 10).
+- **MySQL 8**: the API could not connect once MySQL's authentication cache was empty (after a
+  server restart) — `caching_sha2_password` needs the server's RSA key without TLS, and requests
+  failed after a 10 s pool timeout. The key is fetched as Prisma's CLI does
+  (`allowPublicKeyRetrieval=false` turns it off). Prisma's MySQL URL parameters apply now —
+  `connection_limit`, `connect_timeout`, `socket_timeout`, `socket`, and **TLS** (`sslaccept`,
+  `sslcert`, `ssl=true`), which managed MySQL services require.
+- **Database errors are client errors**: check-constraint violations, invalid values and writes a
+  row-level security policy refuses answered 500 with the database's message. They map to
+  `400 database_constraint_failed` / `invalid_value` / `value_too_long` / ..., `403 no_permission`,
+  `409 transaction_write_conflict` (PostgreSQL and MySQL).
+- **Deletes under row-level security**: a delete a policy refused (row visible, not deletable)
+  answered `200 … successfully deleted` while the row stayed. Deletes now return `404` then.
+- Duplicate errors name the field again (`409 duplicate_entry`) — the field went missing with
+  Prisma 7's driver adapters ("A record with this  already exists").
+- Validation errors say which field and why ("Invalid value for argument `hired_on`: … Expected
+  ISO-8601 DateTime."), with `data.field`, instead of a bare "Data validation error".
+- **`DATE` columns** (`@db.Date`): date-only filters selected the wrong day on servers outside
+  UTC (`hired_on=2015-01-04` matched the 3rd); they are calendar days now. Date-only values
+  (`"2026-01-15"`) are accepted on create and update for `DateTime` fields.
+- **Array columns** (`String[]`): `q=tags=sale` answered 400 with Prisma internals; it tests
+  the elements now (`has`, `[a,b]` → `hasSome`, `not:`).
+- The startup line names the address and mode — "Server running on http://localhost:3000
+  (production)" — at the default log level it said only "Server running".
+- Setup wizard: a user table under another name (e.g. `employees`) is recognised as a candidate
+  and offered for `DB_USER_TABLE`, on the sign-in and first-user pages.
+- **Prisma 7.10** reports database errors as `P2039` — they answered 500 again; the mapping to
+  4xx covers them.
+
+### Changed — dependencies
+
+- Updated: `fastify` 5.12, Prisma 7.10 (`@prisma/client`, adapters, `@prisma/internals`, CLI),
+  `pg` 8.23, `@fastify/cookie` / `cors` / `multipart` / `static` (10.1.6), `@fastify/formbody` 9,
+  `dotenv` 18, `ioredis` 6, TypeScript 6, jest 30.5, ts-jest 29.4, tsx 4.23 — the version ranges in
+  `package.json` (and so in new projects) start there.
+- `ioredis` 6 speaks RESP3 by default: Rapidd's clients set `protocol: 2`, so replies — the rate
+  limiter's Lua script included — stay as they were and Redis servers before 6 keep working.
+- TypeScript 6 deprecates `moduleResolution: "node"`: `tsconfig.json` sets
+  `"ignoreDeprecations": "6.0"` (TypeScript 7 drops it — moving to `node16` needs file extensions
+  on the dynamic imports) and lists `types`, which TypeScript 6 no longer picks up by itself.
+- Not updated: TypeScript 7 (ts-jest supports < 7, and its package no longer has the compiler
+  API), Prisma 8 (a release candidate), `@types/node` 25+ (the types follow Node 22 / 24).
+
+### Changed — Docker image
+
+- **One database driver, no build tools.** The image installs the driver of the datasource
+  provider in `prisma/schema.prisma` — `@prisma/adapter-pg` + `pg`, or `@prisma/adapter-mariadb` +
+  `mariadb` — (`--build-arg DATABASE_PROVIDER=postgresql|mysql` overrides it), no
+  `devDependencies`, none of the Prisma CLI, Studio and TypeScript that npm installed as optional
+  peers of `@prisma/client`, and the query compiler of that database only. The review projects'
+  images went from 712 MB to 432 MB (`node_modules` 342 → 132 MB); both pass their API suites. The
+  Prisma client is generated in the build stage.
+- An image pointed at the other database says so — the setup wizard reports the mismatch, or with
+  `SETUP_WIZARD=off` the server exits with "@prisma/adapter-mariadb is not installed, so
+  MySQL/MariaDB databases can't be used" — instead of "Cannot find module".
 
 ### Fixed — packaging
 
@@ -288,6 +380,8 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
 - Relation processing edits one working copy instead of copying the payload once per key.
 - New: `getMany({ where })` — a trusted server-side scope AND-ed with the client filter and ACL;
   `model.parseKey(field, value)`; DMMF helper `compoundKeyName()`.
+- `fields=posts.title` includes `posts` by itself — `include=posts` is no longer required (sending
+  both is fine).
 
 ### Removed
 

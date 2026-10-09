@@ -648,10 +648,11 @@ describe('include parameter', () => {
             expect(call.include.tags).toBeDefined();
         });
 
-        it('should silently ignore non-existent relation in include', async () => {
+        it('rejects a relation the model does not have', async () => {
             const response = await app.inject({ method: 'GET', url: '/api/v1/products?include=nonexistent' });
-            // Unknown relations are silently ignored (not found in relatedObjects)
-            expect(response.statusCode).toBe(200);
+            expect(response.statusCode).toBe(400);
+            expect(JSON.parse(response.payload)).toMatchObject({ key: 'relation_not_exist', data: { relation: 'nonexistent' } });
+            expect((await app.inject({ method: 'GET', url: '/api/v1/products?include=category,nonexistent' })).statusCode).toBe(400);
         });
 
         it('should handle include with whitespace', async () => {
@@ -692,14 +693,10 @@ describe('include parameter', () => {
             expect(dataCall.include.tags).toBeDefined();
         });
 
-        it('should silently ignore non-existent relation on single record', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, name: 'Product' })
-                .mockResolvedValueOnce({ id: 1 });
-
+        it('rejects a relation the model does not have on single record', async () => {
             const response = await app.inject({ method: 'GET', url: '/api/v1/products/1?include=nonexistent' });
-            // Unknown relations are silently ignored
-            expect(response.statusCode).toBe(200);
+            expect(response.statusCode).toBe(400);
+            expect(JSON.parse(response.payload).key).toBe('relation_not_exist');
         });
     });
 });

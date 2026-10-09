@@ -129,7 +129,7 @@ export class RedisStore extends ISessionStore {
     async deleteByUser(userId: string | number): Promise<number> {
         const client = this._ensureClient();
         const userKey = this._userKey(userId);
-        const members = await client.zrange(userKey, 0, -1);
+        const members = await client.zrange(userKey, '0', '-1');
         if (members.length === 0) return 0;
         // ZREM only the members we saw: a session created concurrently stays indexed
         const [[, deleted]] = (await client.pipeline()

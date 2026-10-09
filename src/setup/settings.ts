@@ -7,6 +7,7 @@ import type { EnvLayout } from './envfile';
 import { rolesFromEnv } from '../auth/identity';
 import { detectProvider } from '../core/adapter';
 import type { ProjectInfo } from './project';
+import { trustProxyError } from '../core/trustProxy';
 
 /**
  * The settings model shared by both setup front-ends: sections for this project,
@@ -175,7 +176,10 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
             const external = providers.some((p) => p !== 'local');
             const modelled = Array.isArray(project?.schema?.models) && project!.schema!.models.length > 0;
             if (!external && modelled && project?.userModel === null && !values.DB_USER_TABLE) {
-                return [null, 'There is no user table, so nobody can sign in and the API refuses every request — choose none for an API without sign-in, or add a user table'];
+                const candidates = project?.userModelCandidates ?? [];
+                return [null, candidates.length
+                    ? `No user table detected, so nobody can sign in and the API refuses every request — ${candidates.join(' or ')} looks like one: set it as the user table (DB_USER_TABLE), or choose none for an API without sign-in`
+                    : 'There is no user table, so nobody can sign in and the API refuses every request — choose none for an API without sign-in, or add a user table'];
             }
             return [null, null];
         }
@@ -190,8 +194,11 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
             if (bad.length) return [`Not an origin: ${bad.join(', ')}`, null];
             return [null, production && listItems(value).includes('*') ? 'Allows every website to call the API with credentials' : null];
         }
-        case 'TRUST_PROXY':
-            return [null, production && !value ? 'Unset in production trusts every proxy — set the hop count or proxy addresses' : null];
+        case 'TRUST_PROXY': {
+            const error = value ? trustProxyError(value) : null;
+            if (error) return [error, null];
+            return [null, production && !value ? 'Unset in production trusts every proxy — set the proxies’ addresses or a hop count' : null];
+        }
         case 'AUTH_ROLE_MAP':
             if (!value) return [null, null];
             try { rolesFromEnv({ AUTH_ROLE_MAP: value }); return [null, null]; } catch (err) { return [(err as Error).message.replace(/^\[Auth\]\s*/, ''), null]; }
@@ -238,7 +245,7 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
  * so a deployment that starts now is never sent into setup by a stricter rule.
  */
 const BOOT_BLOCKERS = new Set(['DATABASE_URL', 'API_TIMEZONE', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'AUTH_PROVIDERS',
-    'AUTH_ROLE_MAP', 'LDAP_URL', 'LDAP_BIND_TEMPLATE', 'LDAP_TLS_CA_FILE', 'OIDC_ISSUER', 'WEBDAV_URL']);
+    'AUTH_ROLE_MAP', 'LDAP_URL', 'LDAP_BIND_TEMPLATE', 'LDAP_TLS_CA_FILE', 'OIDC_ISSUER', 'WEBDAV_URL', 'TRUST_PROXY']);
 
 export function validate(values: Values, sections: Section[] = buildSections(), project?: Partial<ProjectInfo>): Validation {
     const result: Validation = { errors: {}, warnings: {}, blockers: [], visible: [], required: [] };

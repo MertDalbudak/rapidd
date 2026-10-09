@@ -49,7 +49,8 @@ import { providerConfigsFromEnv } from '../../src/auth/providers';
 import { anonymousUser, isSystemUser } from '../../src/core/user';
 import { aclFromRules } from '../../src/core/aclRules';
 
-const ROUTES = path.join(__dirname, '__temp_routes_no_sign_in__');
+// Per run: the IDE's watcher may run this file at the same time
+const ROUTES = fs.mkdtempSync(path.join(__dirname, '__temp_routes_no_sign_in_'));
 const saved = { ...process.env };
 
 beforeAll(() => {

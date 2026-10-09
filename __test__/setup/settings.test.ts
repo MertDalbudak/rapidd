@@ -44,6 +44,16 @@ describe('validate', () => {
         expect(v.blockers.sort()).toEqual(['API_TIMEZONE', 'DATABASE_URL']);
     });
 
+    it('TRUST_PROXY: addresses and a hop count are fine; what is no address stops the start', () => {
+        for (const ok of ['true', 'false', '1', '2,10.0.0.0/8', 'loopback, uniquelocal', '10.0.0.0/8,::1', 'private,cloudflare']) {
+            expect(validate({ DATABASE_URL: DB, TRUST_PROXY: ok }, sections).errors.TRUST_PROXY).toBeUndefined();
+        }
+        const bad = validate({ DATABASE_URL: DB, TRUST_PROXY: '1,proxy.internal' }, sections);
+        expect(bad.errors.TRUST_PROXY).toBe('invalid IP address: proxy.internal — use IPs, CIDRs, private, cloudflare, loopback, linklocal or uniquelocal');
+        expect(bad.blockers).toEqual(['TRUST_PROXY']);
+        expect(validate({ DATABASE_URL: DB, TRUST_PROXY: '1,2' }, sections).errors.TRUST_PROXY).toBe('one hop count, not 2 (1, 2)');
+    });
+
     it('a URL for another database than the schema is an error', () => {
         const v = validate({ DATABASE_URL: 'mysql://u:p@h/db' }, sections, { schema: { provider: 'postgresql' } as any });
         expect(v.errors.DATABASE_URL).toMatch(/schema is for postgresql/);

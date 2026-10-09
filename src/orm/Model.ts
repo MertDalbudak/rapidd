@@ -391,6 +391,20 @@ class Model {
     }
 
     /**
+     * The relations a write returns: none by default — the record alone; the API's include
+     * string (`?include=posts`, `ALL`) when given, with the same access rules as reads. A Prisma
+     * include object (code) passes through.
+     */
+    #writeInclude(include: unknown): Record<string, any> | undefined {
+        if (typeof include === 'string') {
+            if (include.trim() === '') return undefined;
+            const clause = this.include(include);
+            return Object.keys(clause).length > 0 ? clause : undefined;
+        }
+        return include && typeof include === 'object' ? include as Record<string, any> : undefined;
+    }
+
+    /**
      * Internal method to create a new record
      */
     _create = async (data: Record<string, any>, options: Record<string, any> = {}): Promise<any> => {
@@ -418,11 +432,13 @@ class Model {
 
         // CREATE — apply the ACL omit clause so write responses don't leak hidden fields (e.g. password)
         const createOmit = this._omit();
+        const { include: createInclude, ...createOptions } = (beforeCtx.options || options) as Record<string, any>;
+        const createRelations = this.#writeInclude(createInclude);
         const result = await this.prisma.create({
             'data': transformedData,
-            'include': this.include('ALL'),
+            ...(createRelations ? { include: createRelations } : {}),
             ...(createOmit && Object.keys(createOmit).length > 0 ? { omit: createOmit } : {}),
-            ...(beforeCtx.options || options)
+            ...createOptions
         });
 
         // Execute after middleware
@@ -465,12 +481,14 @@ class Model {
         const transformedData = this._queryUpdate(parentId as string | number, updateData);
 
         const updateOmit = this._omit();
+        const { include: updateInclude, ...updateOptions } = (beforeCtx.options || options) as Record<string, any>;
+        const updateRelations = this.#writeInclude(updateInclude);
         const result = await this.prisma.update({
             'where': this.#mergeAclIntoUniqueWhere(whereId, updateFilter),
             'data': transformedData,
-            'include': this.include('ALL'),
+            ...(updateRelations ? { include: updateRelations } : {}),
             ...(updateOmit && Object.keys(updateOmit).length > 0 ? { omit: updateOmit } : {}),
-            ...(beforeCtx.options || options)
+            ...updateOptions
         });
 
         if (!result) {
@@ -524,13 +542,15 @@ class Model {
         const whereClause = this.#mergeAclIntoUniqueWhere(whereId, updateFilter);
 
         const upsertOmit = this._omit();
+        const { include: upsertInclude, ...upsertOptions } = (beforeCtx.options || options) as Record<string, any>;
+        const upsertRelations = this.#writeInclude(upsertInclude);
         const result = await this.prisma.upsert({
             'where': whereClause,
             'create': createData,
             'update': updateData,
-            'include': this.include('ALL'),
+            ...(upsertRelations ? { include: upsertRelations } : {}),
             ...(upsertOmit && Object.keys(upsertOmit).length > 0 ? { omit: upsertOmit } : {}),
-            ...(beforeCtx.options || options)
+            ...upsertOptions
         });
 
         // Execute after middleware
@@ -811,9 +831,17 @@ class Model {
             return afterCtx.result || result;
         }
 
+        // Scalar columns only: Prisma then deletes with RETURNING and notices a row that a
+        // row-level security policy shows but does not let delete. Selecting relations makes it
+        // read the row first and run a DELETE whose affected-row count nobody checks — the
+        // request reported success while the row stayed.
+        const scalars: Record<string, boolean> = {};
+        for (const [name, field] of Object.entries(this.fields)) {
+            if ((field as { kind?: string }).kind !== 'object') scalars[name] = true;
+        }
         const result = await this.prisma.delete({
             'where': this.#mergeAclIntoUniqueWhere(whereId, deleteFilter),
-            'select': this.select(),
+            'select': scalars,
             ...(beforeCtx.options || options)
         });
 

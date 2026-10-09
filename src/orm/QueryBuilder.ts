@@ -111,6 +111,71 @@ const PRISMA_ERROR_MAP: Record<string, PrismaErrorInfo> = {
     P2034: { status: 409, message: 'transaction_write_conflict' },
 };
 
+/** Prisma's filter operators — reported as "argument" in validation errors, but not fields */
+const PRISMA_OPERATORS = new Set(['equals', 'in', 'notIn', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'not',
+    'has', 'hasSome', 'hasEvery', 'isEmpty', 'mode', 'some', 'every', 'none', 'is', 'isNot', 'AND', 'OR', 'NOT', 'where', 'data', 'select', 'include']);
+
+/**
+ * The timezone a date-only filter value is read in: DATE columns hold calendar days (Prisma
+ * represents them as UTC midnight) — UTC; timestamps — API_TIMEZONE, else the server's zone.
+ */
+function dateZone(field?: DMMFField): string | undefined {
+    return isDateColumn(field) ? 'UTC' : filterTimeZone();
+}
+
+/**
+ * A date-only value ("2026-01-15") written to a DateTime field: Prisma accepts full ISO
+ * datetimes only. A DATE column gets that day; a timestamp the start of the day in the filter
+ * timezone (API_TIMEZONE, else the server's) — as date-only filters read it.
+ */
+function writeDate(field: DMMFField, value: unknown): unknown {
+    if (field.type !== 'DateTime' || typeof value !== 'string') return value;
+    const day = dayRange(value, isDateColumn(field) ? 'UTC' : filterTimeZone());
+    return day ? day.gte : value;
+}
+
+/** `DateTime @db.Date` — a calendar day without a time */
+function isDateColumn(field?: DMMFField): boolean {
+    return Array.isArray(field?.nativeType) && String(field!.nativeType[0]).toLowerCase() === 'date';
+}
+
+/** Unique-constraint field from a driver adapter's report: `sku`, or MySQL's index name `Post_slug_key` → `slug` */
+function uniqueFieldName(target: string, modelName: string): string {
+    return target.replace(new RegExp(`^${modelName}_`), '').replace(/_key$/, '');
+}
+
+/**
+ * Database errors Prisma passes on unclassified (driver adapters report check constraints,
+ * invalid values and row-level security rejections as DriverAdapterError): they are client
+ * errors, not 500s.
+ */
+function databaseErrorInfo(cause: any): PrismaErrorInfo | null {
+    if (!cause || typeof cause !== 'object') return null;
+    const code = String(cause.code ?? cause.originalCode ?? '');
+    if (cause.kind === 'postgres') {
+        // 42501: a row-level security policy (WITH CHECK) or a missing grant refused the write
+        if (code === '42501') return { status: 403, message: 'no_permission' };
+        if (code === '23P01') return { status: 409, message: 'database_constraint_failed' };
+        if (code === '23502') return { status: 400, message: 'null_constraint_violation' };
+        if (code.startsWith('23')) return { status: 400, message: 'database_constraint_failed' };
+        if (code === '22001') return { status: 400, message: 'value_too_long' };
+        if (code === '22003') return { status: 400, message: 'value_out_of_range' };
+        if (code.startsWith('22')) return { status: 400, message: 'invalid_value' };
+        if (code === '40001' || code === '40P01') return { status: 409, message: 'transaction_write_conflict' };
+    }
+    if (cause.kind === 'mysql') {
+        switch (Number(code)) {
+            case 3819: return { status: 400, message: 'database_constraint_failed' };
+            case 1048: case 1364: return { status: 400, message: 'null_constraint_violation' };
+            case 1406: return { status: 400, message: 'value_too_long' };
+            case 1264: case 1690: return { status: 400, message: 'value_out_of_range' };
+            case 1292: case 1366: return { status: 400, message: 'invalid_value' };
+            case 1213: case 1205: return { status: 409, message: 'transaction_write_conflict' };
+        }
+    }
+    return null;
+}
+
 /**
  * QueryBuilder - Builds Prisma queries with relation handling, filtering, and ACL support
  *
@@ -584,6 +649,20 @@ class QueryBuilder {
             this.#assertQueryableField(fieldName, modelName, user);
         }
 
+        // Scalar list columns (PostgreSQL arrays) are tested by element: tags=a holds a,
+        // tags=[a,b] holds any of them; not: negates
+        if (field.isList && field.kind !== 'object') {
+            const negated = value.startsWith('not:');
+            const raw = negated ? value.substring(4) : value;
+            const type = this.#resolveFilterType(field);
+            const condition = raw.startsWith('[') && raw.endsWith(']')
+                ? { hasSome: this.#coerceArrayValues(this.#parseArrayValue(raw), fieldName, type) }
+                : { has: this.#coerceArrayValues([raw], fieldName, type)[0] };
+            if (negated) filter.NOT = (filter.NOT || []).concat([{ [fieldName]: condition }]);
+            else filter[fieldName] = condition;
+            return;
+        }
+
         // Handle not: prefix (negation)
         if (value.startsWith('not:')) {
             this.#applyNegatedFilter(filter, fieldName, value.substring(4), field);
@@ -650,7 +729,7 @@ class QueryBuilder {
 
         // not:between:
         if (value.startsWith('between:')) {
-            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType);
+            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType, dateZone(field));
             return;
         }
 
@@ -664,7 +743,7 @@ class QueryBuilder {
                 return;
             }
             case 'DateTime':
-                filter[fieldName] = { not: this.#buildDateCondition(fieldName, value) };
+                filter[fieldName] = { not: this.#buildDateCondition(fieldName, value, field) };
                 return;
             case 'Boolean':
                 filter[fieldName] = { not: this.#parseBooleanValue(fieldName, value) };
@@ -694,7 +773,7 @@ class QueryBuilder {
     /**
      * Apply not:between: filter
      */
-    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null): void {
+    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null, zone: string | undefined = filterTimeZone()): void {
         const [start, end] = rangeValue.split(';').map((v: string) => v.trim());
 
         if (!start || !end) {
@@ -717,9 +796,13 @@ class QueryBuilder {
                 ],
             }]);
         } else if (fieldType === 'DateTime' || fieldType === null) {
-            const startDate = new Date(start);
-            const endDate = new Date(end);
-            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            // The same days as between: — date-only values in the filter timezone
+            let startDate: Date;
+            let endDate: Date;
+            try {
+                startDate = this.#parseDate(start, zone);
+                endDate = this.#parseDate(end, zone);
+            } catch {
                 throw new ErrorResponse(400, "invalid_date_range", { start, end });
             }
             filter.NOT = (filter.NOT || []).concat([{
@@ -767,7 +850,7 @@ class QueryBuilder {
                 return;
             }
             case 'DateTime':
-                filter[fieldName] = this.#buildDateCondition(fieldName, value);
+                filter[fieldName] = this.#buildDateCondition(fieldName, value, field);
                 return;
             case 'Boolean':
                 filter[fieldName] = { equals: this.#parseBooleanValue(fieldName, value) };
@@ -815,8 +898,9 @@ class QueryBuilder {
      * Supports date operators (before:/after:/from:/to:/on:/between:), plain datetimes,
      * and date-only values (which match the entire day).
      */
-    #buildDateCondition(fieldName: string, value: string): Record<string, any> {
-        const opFilter = this.#filterDateTime(value);
+    #buildDateCondition(fieldName: string, value: string, field?: DMMFField): Record<string, any> {
+        const zone = dateZone(field);
+        const opFilter = this.#filterDateTime(value, zone);
         if (opFilter) {
             return opFilter;
         }
@@ -828,14 +912,14 @@ class QueryBuilder {
 
         let date: Date;
         try {
-            date = this.#parseDate(value);
+            date = this.#parseDate(value, zone);
         } catch {
             throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value, expected: 'date' });
         }
 
         // Date-only values match the entire day (same semantics as 'on:')
         if (FILTER_PATTERNS.DATE_ONLY.test(value)) {
-            return this.#calendarDay(value, date);
+            return this.#calendarDay(value, date, zone);
         }
         return { equals: date };
     }
@@ -993,7 +1077,7 @@ class QueryBuilder {
     /**
      * Parse date/datetime filter operators
      */
-    #filterDateTime(value: string): Record<string, Date | Record<string, Date>> | null {
+    #filterDateTime(value: string, zone: string | undefined = filterTimeZone()): Record<string, Date | Record<string, Date>> | null {
         const foundOperator = FILTER_PATTERNS.DATE_OPS.find((op: string) => value.startsWith(op));
         if (!foundOperator) {
             return null;
@@ -1012,13 +1096,13 @@ class QueryBuilder {
 
             // Handle simple date operators
             if (simpleOperatorMap[foundOperator]) {
-                const date = this.#parseDate(operatorValue);
+                const date = this.#parseDate(operatorValue, zone);
                 return { [simpleOperatorMap[foundOperator]]: date };
             }
 
             // Handle 'on:' - match entire day
             if (foundOperator === 'on:') {
-                return this.#calendarDay(operatorValue, this.#parseDate(operatorValue));
+                return this.#calendarDay(operatorValue, this.#parseDate(operatorValue, zone), zone);
             }
 
             // Handle 'between:'
@@ -1033,8 +1117,8 @@ class QueryBuilder {
                     return null;
                 }
 
-                const startDate = this.#parseDate(start);
-                const endDate = this.#parseDate(end);
+                const startDate = this.#parseDate(start, zone);
+                const endDate = this.#parseDate(end, zone);
                 return { gte: startDate, lte: endDate };
             }
 
@@ -1046,11 +1130,10 @@ class QueryBuilder {
     }
 
     /**
-     * Parse a date string and validate it. With API_TIMEZONE set, a date-only value means
-     * the start of that day in the configured zone (instead of UTC midnight).
+     * Parse a date string and validate it. With a zone (API_TIMEZONE, or UTC for DATE columns),
+     * a date-only value means the start of that day in the zone (instead of UTC midnight).
      */
-    #parseDate(dateStr: string): Date {
-        const zone = filterTimeZone();
+    #parseDate(dateStr: string, zone: string | undefined = filterTimeZone()): Date {
         if (zone) {
             const day = dayRange(dateStr, zone);
             if (day) return day.gte;
@@ -1067,8 +1150,7 @@ class QueryBuilder {
      * from the string itself; a datetime selects the day that contains it — both in
      * API_TIMEZONE when set, else in the server's timezone.
      */
-    #calendarDay(value: string, parsed: Date): { gte: Date; lt: Date } {
-        const zone = filterTimeZone();
+    #calendarDay(value: string, parsed: Date, zone: string | undefined = filterTimeZone()): { gte: Date; lt: Date } {
         const fromString = dayRange(value, zone);
         if (fromString) return fromString;
         if (!zone) {
@@ -1237,7 +1319,9 @@ class QueryBuilder {
 
             for (const [relationName, paths] of Object.entries(pathsByRelation)) {
                 const childRelation = childRelationships.find((r: RelationConfig) => r.name === relationName);
-                if (!childRelation) continue;
+                if (!childRelation) {
+                    throw new ErrorResponse(400, "relation_not_exist", { relation: relationName, modelName: relation.object });
+                }
 
                 const childPaths = (paths as string[]).filter((p: string) => p !== '');
                 const childInclude = childPaths.length > 0
@@ -1318,6 +1402,13 @@ class QueryBuilder {
                         deepIncludes[topLevel].push(parts.slice(1).join('.'));
                     }
                 });
+
+                // A misspelt relation must not silently return less than asked for
+                for (const name of topLevelIncludes) {
+                    if (!this.relatedObjects.some((r: RelationConfig) => r.name === name)) {
+                        throw new ErrorResponse(400, "relation_not_exist", { relation: name, modelName: this.name });
+                    }
+                }
 
                 // Build include object for each top-level relation
                 this.relatedObjects.forEach((curr: RelationConfig) => {
@@ -1567,15 +1658,9 @@ class QueryBuilder {
             }
         }
 
-        // Validate: every relation referenced in fields must be in the include set
-        for (const relationName of relations.keys()) {
-            if (!availableRelations.has(relationName)) {
-                throw new ErrorResponse(400, "relation_not_included", {
-                    relation: relationName,
-                    hint: `Add '${relationName}' to the include parameter`,
-                });
-            }
-        }
+        // A relation named in fields (posts.title) is included — no need to list it in include
+        // as well; listing it there too is the same relation (a set)
+        for (const relationName of relations.keys()) availableRelations.add(relationName);
 
         // Build select object
         const select: Record<string, any> = {};
@@ -1590,10 +1675,10 @@ class QueryBuilder {
             }
         }
 
-        // Add relations from the include param
+        // Add relations from the include param and the fields
         for (const relationName of availableRelations) {
             const rel = this.getRelationByName(relationName);
-            if (!rel) continue;
+            if (!rel) throw new ErrorResponse(400, "relation_not_exist", { relation: relationName, modelName: this.name });
 
             // Get ACL content for this relation (where, omit)
             const { content, denied } = this.#buildBaseIncludeContent(rel, user, this.name);
@@ -1744,6 +1829,7 @@ class QueryBuilder {
             if (field == null || isRelationField) {
                 this.#processCreateRelation(result, key, user);
             } else {
+                result[key] = writeDate(field, result[key]);
                 // Check if this scalar field is a FK that should become a connect
                 this.#processForeignKeyField(result, key, user, false);
             }
@@ -2113,6 +2199,7 @@ class QueryBuilder {
             if (field == null || isRelationField) {
                 this.#processUpdateRelation(result, key, id, user);
             } else {
+                result[key] = writeDate(field, result[key]);
                 // Check if this scalar field is a FK that should become a connect/disconnect
                 this.#processForeignKeyField(result, key, user, true);
             }
@@ -2823,6 +2910,10 @@ class QueryBuilder {
             message = error.message || String(error);
         }
 
+        // The database's own error behind a driver adapter failure: thrown as is (Prisma 7.8), or
+        // as the generic P2039 "Database error" (7.10)
+        const databaseError = databaseErrorInfo(error?.name === 'DriverAdapterError' ? error.cause : error?.meta?.driverAdapterError?.cause);
+
         // Handle Prisma error codes (PrismaClientKnownRequestError)
         if (error?.code && PRISMA_ERROR_MAP[error.code]) {
             const errorInfo = PRISMA_ERROR_MAP[error.code];
@@ -2830,10 +2921,12 @@ class QueryBuilder {
 
             // Handle dynamic messages (e.g., P2002 duplicate)
             if (error.code === 'P2002') {
-                const target = error.meta?.target;
+                // Driver adapters (Prisma 7) report the constraint in driverAdapterError, not meta.target
+                const constraint = error.meta?.driverAdapterError?.cause?.constraint;
+                const target = error.meta?.target ?? constraint?.fields ?? constraint?.index;
                 const modelName = error.meta?.modelName || '';
-                // target can be string (MySQL constraint name) or string[] (field names)
-                const fields = Array.isArray(target) ? target : (target ? [target] : []);
+                // target can be string (MySQL index name) or string[] (field names)
+                const fields = (Array.isArray(target) ? target : (target ? [target] : [])).map((f: unknown) => uniqueFieldName(String(f), modelName));
                 const field = fields.join(', ');
                 // Try to find the value from the data passed to errorHandler
                 const value = fields.length === 1 && data[fields[0]] !== undefined
@@ -2847,14 +2940,22 @@ class QueryBuilder {
                 message = LanguageDict.get(key, null, language);
             }
         }
+        else if (databaseError) {
+            statusCode = databaseError.status;
+            key = databaseError.message!;
+            message = LanguageDict.get(key, null, language);
+        }
         // Handle PrismaClientValidationError — invalid arguments, type mismatches
         else if (error?.name === 'PrismaClientValidationError' || error?.constructor?.name === 'PrismaClientValidationError') {
             statusCode = 400;
             key = 'data_validation_error';
-            // Extract the useful part: "Argument `equals`: Invalid value provided. Expected Int, provided String."
-            const rawMessage = error.message || '';
-            const argMatch = rawMessage.match(/Argument\s+`[^`]+`:\s*.+$/m);
-            message = argMatch ? argMatch[0] : LanguageDict.get(key, null, language);
+            // Prisma ends the message with the reason — "Invalid value for argument `hired_on`:
+            // premature end of input. Expected ISO-8601 DateTime." / "Argument `name` is missing."
+            const reason = String(error.message || '').split('\n').map((l: string) => l.trim()).filter(Boolean).pop() || '';
+            const field = /argument `([^`]+)`/i.exec(reason)?.[1];
+            message = /argument/i.test(reason) ? reason : LanguageDict.get(key, null, language);
+            // A filter operator (equals, in, ...) is not the field a client can fix
+            if (field && !PRISMA_OPERATORS.has(field)) errorData = { field };
         }
         // Handle PrismaClientInitializationError — connection/config issues
         else if (error?.name === 'PrismaClientInitializationError' || error?.constructor?.name === 'PrismaClientInitializationError') {

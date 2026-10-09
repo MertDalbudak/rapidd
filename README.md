@@ -242,7 +242,7 @@ NODE_ENV=production
 JWT_SECRET=your-secret-here          # Required — server won't start without it
 JWT_REFRESH_SECRET=your-refresh-secret
 ALLOWED_ORIGINS=yourdomain.com
-TRUST_PROXY=1                        # your proxy's hop count or IP/CIDR
+TRUST_PROXY=1                        # one proxy at a private address, or the proxies' IPs/CIDRs
 REDIS_URL=rediss://cache.example.com:6380
 LOG_FORMAT=json
 ```

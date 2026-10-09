@@ -3,6 +3,8 @@
     "target": "ES2024",
     "module": "commonjs",
     "moduleResolution": "node",
+    "ignoreDeprecations": "6.0",
+    "types": ["node"],
     "lib": ["ES2024"],
     "outDir": "dist",
     "rootDir": ".",

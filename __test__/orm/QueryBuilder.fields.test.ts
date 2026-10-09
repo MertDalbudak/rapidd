@@ -428,28 +428,21 @@ describe('QueryBuilder - buildFieldSelection()', () => {
     // ── Validation errors ────────────────────────────────
 
     describe('validation errors', () => {
-        it('should throw when relation in fields is not in include', () => {
-            expect(() => {
-                qb.buildFieldSelection('id,user.name', '', adminUser);
-            }).toThrow('relation_not_included');
+        it('includes a relation named in fields without include', () => {
+            const result = qb.buildFieldSelection('id,user.name', '', adminUser);
+            expect(result.select!.user).toBeDefined();
+            expect(result.select!.user.select.name).toBe(true);
         });
 
-        it('should throw with correct data for missing relation', () => {
-            try {
-                qb.buildFieldSelection('id,user.name', '', adminUser);
-                fail('Should have thrown');
-            } catch (err: any) {
-                expect(err.status_code).toBe(400);
-                expect(err.data.relation).toBe('user');
-                expect(err.data.hint).toContain('user');
-                expect(err.data.hint).toContain('include');
-            }
+        it('fields with or without include=<relation>: the same selection, no clash', () => {
+            expect(qb.buildFieldSelection('id,user.name', '', adminUser)).toEqual(qb.buildFieldSelection('id,user.name', 'user', adminUser));
+            const both = qb.buildFieldSelection('id,user.name,attachments.url', 'user', adminUser);
+            expect(both.select!.user.select.name).toBe(true);
+            expect(both.select!.attachments.select.url).toBe(true);
         });
 
-        it('should throw when one of multiple relations is not included', () => {
-            expect(() => {
-                qb.buildFieldSelection('id,user.name,attachments.url', 'user', adminUser);
-            }).toThrow('relation_not_included');
+        it('an unknown relation in fields is a 400', () => {
+            expect(() => qb.buildFieldSelection('id,nope.name', '', adminUser)).toThrow('relation_not_exist');
         });
 
         it('should not throw when relation is properly included', () => {
@@ -530,11 +523,9 @@ describe('QueryBuilder - buildFieldSelection()', () => {
             expect(result.select).toEqual({ id: true, content: true });
         });
 
-        it('should handle include param as an object and throw for relation fields', () => {
-            // Relations from object include are not parsed
-            expect(() => {
-                qb.buildFieldSelection('id,user.name', { user: true } as any, adminUser);
-            }).toThrow('relation_not_included');
+        it('should handle include param as an object — relations come from the fields', () => {
+            const result = qb.buildFieldSelection('id,user.name', { user: true } as any, adminUser);
+            expect(result.select!.user.select.name).toBe(true);
         });
 
         it('should handle many fields', () => {

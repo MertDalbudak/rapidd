@@ -59,6 +59,8 @@ export interface ProjectInfo {
     locales: string[];
     tools: { prisma: boolean; rapiddBuild: boolean };
     userModel: UserModelInfo | null;
+    /** Without a detected user table: tables that look like one (for DB_USER_TABLE) */
+    userModelCandidates: string[];
 }
 
 const USER_MODEL_NAMES = ['user', 'users', 'account', 'accounts'];
@@ -211,6 +213,18 @@ async function parseSchema(source: string): Promise<SchemaInfo> {
     }
 }
 
+/**
+ * Tables that look like users — a password column and a unique text identifier — for
+ * DB_USER_TABLE when the table is not called user, users, account or accounts
+ */
+export function userModelCandidates(dmmf: DMMF): string[] {
+    return dmmf.datamodel.models.filter((m) => {
+        const scalars = m.fields.filter((f) => f.kind === 'scalar');
+        return scalars.some((f) => PASSWORD_FIELD_NAMES.includes(f.name.toLowerCase()))
+            && scalars.some((f) => f.isUnique && f.type === 'String' && !f.isId);
+    }).map((m) => m.name);
+}
+
 /** The user model and what a first user needs, from env overrides or detection (as Auth does) */
 export function describeUserModel(dmmf: DMMF, env: Record<string, string | undefined> = process.env): UserModelInfo | null {
     const models = dmmf.datamodel.models;
@@ -351,5 +365,6 @@ export async function inspectProject(
         locales,
         tools: { prisma: !!findBin('prisma', root), rapiddBuild: !!findBin('@rapidd/build', root) },
         userModel: schema.dmmf ? describeUserModel(schema.dmmf, env) : null,
+        userModelCandidates: schema.dmmf && !describeUserModel(schema.dmmf, env) ? userModelCandidates(schema.dmmf) : [],
     };
 }

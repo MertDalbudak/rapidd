@@ -140,7 +140,7 @@ function createProject() {
         },
         engines: corePkg.engines || { node: '^22.12.0 || >=24.0.0' },
         dependencies: pick(coreDeps, [
-            '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/static',
+            '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/proxy-addr', '@fastify/static',
             '@prisma/adapter-mariadb', '@prisma/adapter-pg', '@prisma/client', '@prisma/internals',
             'bcrypt', 'dotenv', 'fastify', 'fastify-plugin',
             'ioredis', 'jsonwebtoken', 'pg',

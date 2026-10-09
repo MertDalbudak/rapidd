@@ -61,8 +61,9 @@ export async function startServer(options: StartOptions = {}): Promise<FastifyIn
     process.once('SIGINT', () => void shutdown('SIGINT'));
 
     await app.listen({ port, host });
-    Logger.log('Server running', { host, port });
-    Logger.log('Environment', { env: getEnv('NODE_ENV') });
+    // In the message itself: the default log level (essential) prints no data arguments
+    const shownHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
+    Logger.log(`Server running on http://${shownHost}:${port} (${getEnv('NODE_ENV')})`, { host, port });
 
     // Warn if running compiled build with development NODE_ENV
     if (process.argv[1]?.includes('/dist/') && getEnv('NODE_ENV') === 'development') {

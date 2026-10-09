@@ -14,6 +14,7 @@ import { disconnectAll, prisma, getAcl } from './core/prisma';
 import { auditAcl } from './core/acl';
 import { validateEnv } from './core/env';
 import { parseAllowedOrigins, isOriginAllowed } from './core/origins';
+import { parseTrustProxy, trustProxyOption, isCloudflare } from './core/trustProxy';
 import { env } from './utils';
 import { Logger } from './utils/Logger';
 
@@ -52,18 +53,8 @@ LanguageDict.initialize(process.env.STRINGS_PATH, DEFAULT_LANGUAGE);
 
 // ─── Helpers ────────────────────────────────────────
 
-/**
- * TRUST_PROXY: true | false | <hop count> | <comma-separated IPs/CIDRs>.
- * Unset → trust everything in production (backward compatible), nothing elsewhere.
- */
-export function parseTrustProxy(value: string | undefined, production: boolean): boolean | number | string[] {
-    const v = value?.trim();
-    if (!v) return production;
-    if (v === 'true') return true;
-    if (v === 'false') return false;
-    if (/^\d+$/.test(v)) return parseInt(v, 10);
-    return v.split(',').map((s) => s.trim()).filter(Boolean);
-}
+/** TRUST_PROXY: see core/trustProxy */
+export { parseTrustProxy };
 
 const REQUEST_ID_HEADER = (process.env.REQUEST_ID_HEADER || 'x-request-id').toLowerCase();
 /** Incoming ids are reused for end-to-end correlation — but only when they are log-safe */
@@ -130,7 +121,7 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
         // Rapidd has its own request/access logger (Logger.request) — Fastify's pino
         // would log every request a second time. Opt back in with FASTIFY_LOGGER=true.
         logger: process.env.FASTIFY_LOGGER === 'true',
-        trustProxy: parseTrustProxy(process.env.TRUST_PROXY, production),
+        trustProxy: trustProxyOption(parseTrustProxy(process.env.TRUST_PROXY)),
         requestIdHeader: false,
         genReqId: (req) => {
             const incoming = req.headers[REQUEST_ID_HEADER];
@@ -144,6 +135,15 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
         routerOptions: {
             caseSensitive: true,
         },
+    });
+
+    // Behind Cloudflare without trusting it every visitor is a Cloudflare server — said once
+    let cloudflareUntrusted = false;
+    app.addHook('onRequest', async (request) => {
+        if (!cloudflareUntrusted && request.headers['cf-ray'] && isCloudflare(request.ip)) {
+            cloudflareUntrusted = true;
+            Logger.warn(`Requests come through Cloudflare, but TRUST_PROXY does not trust it: every visitor looks like a Cloudflare server (${request.ip}) — one rate limit for all visitors behind it. Set TRUST_PROXY=private,cloudflare.`);
+        }
     });
 
     // ── Graceful close ──────────────────────────────

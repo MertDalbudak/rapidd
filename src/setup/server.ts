@@ -16,6 +16,10 @@ import { CONFIG_FILES, isConfigFileId, readConfigText, validateConfigFile, write
 import type { ConfigFileId } from './files';
 import { modelsOverview, aclContext, routePrefixes } from './models';
 import { rlsStatus, rlsStatements, applyRls, RlsSpecError } from './rls';
+import { renameRelations, renameInRules, jsonTextColumns, typeJsonColumns, writeSchema, SchemaEditError } from './schema';
+import { proxyView } from './proxy';
+import type { ProxyView } from './proxy';
+import type { Renames } from './schema';
 import type { RlsOperation } from './rls';
 import { testService } from './services';
 import { setupReasons } from './index';
@@ -93,6 +97,8 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
     for (const key of ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'COOKIE_SECRET']) {
         if (!process.env[key]) suggested[key] = generateSecret();
     }
+    // TRUST_PROXY behind Cloudflare: suggested once per run while unset — cleared, it stays cleared
+    let proxySuggested = false;
 
     const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, trustProxy: false });
 
@@ -215,10 +221,16 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             }
         })();
 
-        api.get('/state', async () => {
+        api.get('/state', async (request) => {
             const { project, sections } = await context();
             const current = currentValues(sections);
             const secrets = secretKeys(sections);
+            let proxy = await proxyOf(request, merged(sections, suggested));
+            if (!proxySuggested && proxy.proposal && current.TRUST_PROXY && current.TRUST_PROXY.value === '' && !current.TRUST_PROXY.locked) {
+                suggested.TRUST_PROXY = proxy.proposal;
+                proxySuggested = true;
+                proxy = await proxyOf(request, merged(sections, suggested));
+            }
             const values = merged(sections, suggested);
             return {
                 app: appName,
@@ -235,7 +247,8 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
                 }])),
                 suggested,
                 drivers: drivers(sections),
-                validation: validate(values, sections, project),
+                validation: withProxy(validate(values, sections, project), proxy),
+                proxy,
                 files: Object.fromEntries((Object.keys(CONFIG_FILES) as ConfigFileId[]).map((id) => [id, readConfigText(root, id)])),
                 project,
             };
@@ -253,8 +266,10 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const files = filesOf(request);
             const { project, sections } = await context(files);
             const values = merged(sections, changesOf(request));
+            const proxy = await proxyOf(request, values);
             return {
-                validation: validate(values, sections, project),
+                validation: withProxy(validate(values, sections, project), proxy),
+                proxy,
                 fileProblems: await fileProblems(files),
                 // With a staged config/app.json the ${ENV} references — and so the sections — may differ
                 sections: files.app !== undefined
@@ -262,6 +277,17 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
                     : sections.map((s) => ({ id: s.id, visible: matches(s.when, values) })),
             };
         });
+
+        /** How this page's request came in, and the client IP the API makes of it with TRUST_PROXY */
+        async function proxyOf(request: FastifyRequest, values: Values): Promise<ProxyView> {
+            return proxyView({ peer: request.raw.socket.remoteAddress ?? request.ip, headers: request.headers }, values);
+        }
+
+        /** Behind Cloudflare without trusting it: said under TRUST_PROXY and on the review */
+        function withProxy<V extends { errors: Record<string, string>; warnings: Record<string, string> }>(validation: V, proxy: ProxyView): V {
+            if (proxy.message && !validation.errors.TRUST_PROXY) validation.warnings.TRUST_PROXY = proxy.message;
+            return validation;
+        }
 
         api.post('/check/:name', async (request, reply) => {
             const name = (request.params as { name: string }).name as CheckName;
@@ -297,6 +323,71 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             forgetConfigModules();
             Logger.log(`Setup: ${result.message}`);
             return result;
+        });
+
+        /** The schema rewritten, then the Prisma client generated for it */
+        const schemaChange = async (request: FastifyRequest, change: (source: string, dmmf: NonNullable<Awaited<ReturnType<typeof readSchema>>['dmmf']>) => Promise<string> | string) => {
+            const { sections } = await context();
+            const values = merged(sections, changesOf(request));
+            const { dmmf } = await readSchema(root);
+            if (!dmmf) return { error: 'Fix the errors in prisma/schema.prisma first' };
+            try {
+                const source = fs.readFileSync(path.join(root, 'prisma', 'schema.prisma'), 'utf8');
+                await writeSchema(root, await change(source, dmmf));
+            } catch (err) {
+                if (err instanceof SchemaEditError) return { error: err.message };
+                throw err;
+            }
+            const generated = await runAction('generate', values, root);
+            forgetConfigModules();
+            return { dmmf, generated };
+        };
+
+        /** Relation fields renamed — introspection names them after models; the staged access rules follow */
+        api.post('/schema/relations', async (request, reply) => {
+            const body = (request.body ?? {}) as { renames?: unknown; acl?: unknown };
+            const renames = body.renames as Renames;
+            const valid = !!renames && typeof renames === 'object' && Object.values(renames).every((map) =>
+                !!map && typeof map === 'object' && Object.values(map).every((name) => typeof name === 'string'));
+            if (!valid) return reply.code(400).send({ error: 'renames: { "<model>": { "<relation>": "<new name>" } }' });
+            const count = Object.values(renames).reduce((n, map) => n + Object.entries(map).filter(([from, to]) => from !== to).length, 0);
+            const result = await schemaChange(request, (source, dmmf) => renameRelations(source, dmmf, renames));
+            if ('error' in result) return reply.code(400).send(result);
+            Logger.log(`Setup: ${count} relation field(s) renamed in prisma/schema.prisma`);
+            const what = `${count} relation${count === 1 ? '' : 's'} renamed`;
+            return {
+                ok: result.generated.ok,
+                message: result.generated.ok ? `${what} — Prisma client generated` : `${what}; ${result.generated.message}`,
+                output: result.generated.output,
+                ...(body.acl && typeof body.acl === 'object' ? { acl: renameInRules(body.acl, result.dmmf, renames) } : {}),
+            };
+        });
+
+        /** JSON columns MariaDB stores as LONGTEXT and the schema types as String: listed, or typed Json (apply) */
+        api.post('/schema/json', async (request, reply) => {
+            const apply = (request.body as { apply?: unknown } | undefined)?.apply === true;
+            const { sections } = await context();
+            const url = merged(sections, changesOf(request)).DATABASE_URL;
+            const { dmmf } = await readSchema(root);
+            if (!dmmf || !url) return { fields: [] };
+            let columns;
+            try {
+                columns = await jsonTextColumns(url);
+            } catch (err) {
+                return { fields: [], error: `Cannot read the database: ${(err as Error).message}` };
+            }
+            const source = fs.readFileSync(path.join(root, 'prisma', 'schema.prisma'), 'utf8');
+            const { fields } = typeJsonColumns(source, dmmf, columns);
+            if (!apply || fields.length === 0) return { fields };
+            const result = await schemaChange(request, (current, latest) => typeJsonColumns(current, latest, columns).source);
+            if ('error' in result) return reply.code(400).send(result);
+            Logger.log(`Setup: typed Json in prisma/schema.prisma — ${fields.join(', ')}`);
+            return {
+                fields,
+                ok: result.generated.ok,
+                message: result.generated.ok ? `${fields.length} JSON column${fields.length === 1 ? '' : 's'} typed Json — Prisma client generated` : result.generated.message,
+                output: result.generated.output,
+            };
         });
 
         /** What the access rule editor needs: models, fields, code-owned models, roles, user attributes */

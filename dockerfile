@@ -1,10 +1,19 @@
-# Stage 1: Install all dependencies and build TypeScript
+# The image holds what the server loads, for one database: the datasource provider in
+# prisma/schema.prisma decides the driver (postgresql → @prisma/adapter-pg + pg,
+# mysql → @prisma/adapter-mariadb + mariadb). `--build-arg DATABASE_PROVIDER=postgresql|mysql`
+# overrides it.
+
+# Stage 1: Install all dependencies, generate the Prisma client, build TypeScript
 FROM node:current-alpine AS builder
 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
 RUN npm ci --no-audit --no-fund
+
+# The Prisma CLI of the lockfile writes the client to prisma/client
+COPY prisma ./prisma
+RUN npx prisma generate --generator client
 
 COPY tsconfig.json ./
 COPY main.ts ./
@@ -13,20 +22,30 @@ COPY routes ./routes
 
 RUN npx tsc
 
-# Stage 2: Production dependencies + Prisma client
+# Stage 2: Production dependencies — the driver of one database, no build tools
 FROM node:current-alpine AS deps
+
+ARG DATABASE_PROVIDER
 
 WORKDIR /app
 
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --no-audit --no-fund && npm cache clean --force
+COPY prisma/schema.prisma ./prisma/schema.prisma
 
-COPY prisma ./prisma
-RUN npx prisma generate --generator client && \
-    find node_modules/.prisma -name '*.node' ! -name 'libquery_engine*' -delete 2>/dev/null; \
-    find node_modules/@prisma/engines -type f -name '*.node' ! -name 'libquery_engine*' -delete 2>/dev/null; \
-    rm -rf node_modules/prisma node_modules/@types 2>/dev/null; \
-    true
+# Without devDependencies npm also leaves out what @prisma/client lists as optional peers (the
+# Prisma CLI with Studio, TypeScript). The generated client carries its own query compiler, so
+# the copies in @prisma/client for other databases are removed.
+RUN provider="${DATABASE_PROVIDER:-$(sed -n '/^datasource/,/}/s/^[[:space:]]*provider[[:space:]]*=[[:space:]]*"\([a-z]*\)".*/\1/p' prisma/schema.prisma)}" && \
+    case "$provider" in \
+        postgresql) unused='dependencies.@prisma/adapter-mariadb' ;; \
+        mysql) unused='dependencies.@prisma/adapter-pg dependencies.pg' ;; \
+        *) echo "Database provider '$provider' is not supported: set the datasource provider in prisma/schema.prisma to postgresql or mysql, or build with --build-arg DATABASE_PROVIDER=postgresql|mysql" >&2; exit 1 ;; \
+    esac && \
+    echo "Database: $provider" && \
+    npm pkg delete devDependencies $unused && \
+    npm ci --omit=dev --no-audit --no-fund && \
+    npm cache clean --force && \
+    find node_modules/@prisma/client/runtime -name 'query_compiler_*' ! -name "*.$provider.*" -delete
 
 # Stage 3: Runtime (minimal)
 FROM node:current-alpine AS runtime
@@ -38,12 +57,12 @@ RUN addgroup -g 1001 -S nodejs && \
 
 WORKDIR /app
 
-# Production node_modules with Prisma client
+# Production node_modules; package.json lists what is installed
 COPY --from=deps --chown=rapidd:nodejs /app/node_modules ./node_modules
 COPY --from=deps --chown=rapidd:nodejs /app/package.json ./package.json
 
 # Prisma schema + generated client
-COPY --from=deps --chown=rapidd:nodejs /app/prisma ./prisma
+COPY --from=builder --chown=rapidd:nodejs /app/prisma ./prisma
 
 # Compiled TypeScript output
 COPY --from=builder --chown=rapidd:nodejs /app/dist ./dist

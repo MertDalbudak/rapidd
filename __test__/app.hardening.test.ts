@@ -47,8 +47,10 @@ jest.mock('../src/core/i18n', () => ({
 import fp from 'fastify-plugin';
 import { buildApp, parseTrustProxy, markShuttingDown } from '../src/app';
 import { ErrorResponse } from '../src/core/errors';
+import { Logger } from '../src/utils/Logger';
 
-const ROUTES = path.join(__dirname, '__temp_routes_hardening__');
+// Per run: the IDE's watcher may run this file at the same time
+const ROUTES = fs.mkdtempSync(path.join(__dirname, '__temp_routes_hardening_'));
 
 beforeAll(() => {
     fs.mkdirSync(path.join(ROUTES, 'api'), { recursive: true });
@@ -56,6 +58,7 @@ beforeAll(() => {
         module.exports = async function (fastify) {
             fastify.get('/', async () => { throw new Error('kaboom'); });
             fastify.get('/denied', async () => { throw new (require(${JSON.stringify(path.join(__dirname, '../src/core/errors'))}).ErrorResponse)(403, 'no_permission'); });
+            fastify.get('/ip', async (request) => ({ ip: request.ip }));
         };
     `);
     process.env.ROUTES_PATH = ROUTES;
@@ -300,16 +303,85 @@ describe('rate limiting runs before authentication', () => {
     });
 });
 
+describe('TRUST_PROXY', () => {
+    const ipWith = async (trustProxy: string, forwardedFor: string, remoteAddress = '127.0.0.1') => {
+        process.env.TRUST_PROXY = trustProxy;
+        const app = await build();
+        const res = await app.inject({ method: 'GET', url: '/api/boom/ip', remoteAddress, headers: { 'x-forwarded-for': forwardedFor } });
+        await app.close();
+        return res.json().ip;
+    };
+
+    it('a hop count trusts that many proxies at private or loopback addresses', async () => {
+        expect(await ipWith('1', '198.51.100.7, 203.0.113.9')).toBe('203.0.113.9');
+        expect(await ipWith('1', '198.51.100.7, 203.0.113.9', '10.1.2.3')).toBe('203.0.113.9');
+        expect(await ipWith('2', '198.51.100.7, 10.0.0.2')).toBe('198.51.100.7');
+        // The second hop is a public address — not a proxy
+        expect(await ipWith('2', '198.51.100.7, 203.0.113.9')).toBe('203.0.113.9');
+    });
+
+    it('a client that reaches the server directly cannot set its IP (what Fastify 5.12 guards against)', async () => {
+        expect(await ipWith('1', '1.2.3.4', '203.0.113.50')).toBe('203.0.113.50');
+        // ...unless its address is listed as a proxy
+        expect(await ipWith('1,203.0.113.0/24', '1.2.3.4', '203.0.113.50')).toBe('1.2.3.4');
+        expect(await ipWith('1,203.0.113.0/24', '1.2.3.4')).toBe('127.0.0.1');
+    });
+
+    it('addresses trust those proxies only; false trusts none, true every one', async () => {
+        expect(await ipWith('127.0.0.1', '203.0.113.9')).toBe('203.0.113.9');
+        expect(await ipWith('loopback', '203.0.113.9')).toBe('203.0.113.9');
+        expect(await ipWith('10.0.0.0/8', '203.0.113.9')).toBe('127.0.0.1');
+        expect(await ipWith('false', '203.0.113.9')).toBe('127.0.0.1');
+        expect(await ipWith('true', '1.2.3.4', '203.0.113.50')).toBe('1.2.3.4');
+    });
+
+    it('behind Cloudflare without trusting it: said once, with the fix', async () => {
+        const warn = jest.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+        try {
+            process.env.TRUST_PROXY = '1';
+            const app = await build();
+            for (let i = 0; i < 3; i++) {
+                const res = await app.inject({ method: 'GET', url: '/api/boom/ip', remoteAddress: '127.0.0.1', headers: { 'x-forwarded-for': '203.0.113.9, 172.68.1.10', 'cf-ray': 'x' } });
+                expect(res.json().ip).toBe('172.68.1.10');
+            }
+            await app.close();
+            const said = warn.mock.calls.filter(([m]) => String(m).startsWith('Requests come through Cloudflare'));
+            expect(said).toHaveLength(1);
+            expect(said[0][0]).toContain('Set TRUST_PROXY=private,cloudflare');
+
+            warn.mockClear();
+            process.env.TRUST_PROXY = 'private,cloudflare';
+            const trusted = await build();
+            const res = await trusted.inject({ method: 'GET', url: '/api/boom/ip', headers: { 'x-forwarded-for': '203.0.113.9, 172.68.1.10', 'cf-ray': 'x' } });
+            expect(res.json().ip).toBe('203.0.113.9');
+            await trusted.close();
+            expect(warn.mock.calls.some(([m]) => String(m).startsWith('Requests come through Cloudflare'))).toBe(false);
+        } finally {
+            warn.mockRestore();
+        }
+    });
+
+    it('a value that is no address stops the start with what is wrong', async () => {
+        process.env.TRUST_PROXY = '1,nonsense';
+        await expect(build()).rejects.toThrow('TRUST_PROXY: invalid IP address: nonsense');
+    });
+});
+
 describe('parseTrustProxy', () => {
     it.each([
         [undefined, true, true],
-        [undefined, false, false],
+        [undefined, false, true],
         ['', true, true],
         ['true', false, true],
         ['false', true, false],
-        ['2', true, 2],
+        ['2', true, { hops: 2, addresses: ['private'] }],
+        ['1, 10.0.0.0/8', true, { hops: 1, addresses: ['10.0.0.0/8'] }],
         ['10.0.0.0/8, 127.0.0.1', true, ['10.0.0.0/8', '127.0.0.1']],
     ])('%p (production=%p) → %p', (value, production, expected) => {
         expect(parseTrustProxy(value as string | undefined, production as boolean)).toEqual(expected);
+    });
+
+    it('takes one hop count', () => {
+        expect(() => parseTrustProxy('1,2', true)).toThrow('TRUST_PROXY: one hop count, not 2 (1, 2)');
     });
 });

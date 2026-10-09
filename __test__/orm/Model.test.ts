@@ -615,6 +615,21 @@ describe('Model', () => {
             expect(result).toEqual({ id: 1 });
         });
 
+        it('selects scalar columns only — so a delete a row-level security policy refuses is noticed', async () => {
+            mockPrismaModel.delete.mockResolvedValue({ id: 1 });
+            const fields = jest.spyOn(model, 'fields', 'get').mockReturnValue({
+                id: { name: 'id', kind: 'scalar', type: 'Int', isId: true },
+                title: { name: 'title', kind: 'scalar', type: 'String' },
+                author: { name: 'author', kind: 'object', type: 'users' },
+            });
+            try {
+                await model.delete(1);
+                expect(mockPrismaModel.delete).toHaveBeenLastCalledWith(expect.objectContaining({ select: { id: true, title: true } }));
+            } finally {
+                fields.mockRestore();
+            }
+        });
+
         it('should throw 403 when delete filter is false', async () => {
             (getAcl as jest.Mock).mockReturnValue({
                 model: { posts: { getDeleteFilter: () => false } }

@@ -1,8 +1,10 @@
 import fs from 'fs';
+import path from 'path';
 import { spawn } from 'child_process';
-import { findBin, inspectProject, alignSchemaProvider, cliDatabaseUrl } from './project';
+import { findBin, inspectProject, alignSchemaProvider, cliDatabaseUrl, readSchema } from './project';
 import { detectProvider } from '../core/adapter';
 import { databaseInfo } from './checks';
+import { jsonTextColumns, typeJsonColumns, writeSchema } from './schema';
 import type { Values } from './catalog';
 
 /**
@@ -10,7 +12,8 @@ import type { Values } from './catalog';
  * damage an existing database or schema:
  *
  * - generate  prisma generate                      always safe
- * - pull      prisma db pull                       only while the schema has no models
+ * - pull      prisma db pull                       only while the schema has no models; MariaDB's JSON
+ *                                                  columns are typed Json afterwards
  * - push      prisma db push                       only while the database has none of the schema's tables
  * - migrate   prisma migrate deploy                only when prisma/migrations exists
  * - build     rapidd build (models, routes)        never overwrites existing files
@@ -188,5 +191,22 @@ export async function runAction(name: ActionName, values: Values, root: string =
     const { code, output } = await run(prisma, args, root, env, timeout);
     const label = `prisma ${args.join(' ')}`;
     const note = aligned.changed ? `prisma/schema.prisma: datasource provider set to ${aligned.to} (was ${aligned.from}) to match the database\n\n` : '';
-    return { ok: code === 0, message: code === 0 ? `${label} finished` : `${label} failed (exit ${code})`, output: (note + output).trim() };
+    const json = name === 'pull' && code === 0 && values.DATABASE_URL ? await typeJsonAfterPull(root, values.DATABASE_URL) : '';
+    return { ok: code === 0, message: code === 0 ? `${label} finished` : `${label} failed (exit ${code})`, output: (note + output).trim() + json };
+}
+
+/** After a pull: JSON columns MariaDB stores as LONGTEXT typed Json — a note for the output */
+async function typeJsonAfterPull(root: string, url: string): Promise<string> {
+    if (detectProvider(url) !== 'mysql') return '';
+    try {
+        const { dmmf } = await readSchema(root);
+        if (!dmmf) return '';
+        const source = fs.readFileSync(path.join(root, 'prisma', 'schema.prisma'), 'utf8');
+        const { source: typed, fields } = typeJsonColumns(source, dmmf, await jsonTextColumns(url));
+        if (!fields.length) return '';
+        await writeSchema(root, typed);
+        return `\n\nprisma/schema.prisma: typed Json — ${fields.join(', ')} (MariaDB stores JSON as LONGTEXT, which Prisma reads as String)`;
+    } catch (err) {
+        return `\n\nJSON columns were not typed: ${(err as Error).message}`;
+    }
 }

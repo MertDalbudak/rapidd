@@ -9,6 +9,7 @@ const mockPrismaModel = {
     create: jest.fn(),
     update: jest.fn(),
     delete: jest.fn(),
+    upsert: jest.fn(),
     count: jest.fn(),
 };
 
@@ -175,10 +176,12 @@ describe('Model - Field Selection', () => {
             expect(result.meta).toEqual({ take: 10, skip: 0, total: 1 });
         });
 
-        it('should throw for relation not in include', async () => {
-            await expect(
-                model.getMany({ limit: 10, sortBy: 'id', fields: 'id,author.name' })
-            ).rejects.toThrow('relation_not_included');
+        it('includes the relation named in fields', async () => {
+            mockPrismaModel.findMany.mockResolvedValue([]);
+            mockPrismaModel.count.mockResolvedValue(0);
+            await model.getMany({ limit: 10, sortBy: 'id', fields: 'id,author.name' });
+            const dataCall = mockPrismaModel.findMany.mock.calls[mockPrismaModel.findMany.mock.calls.length - 1][0];
+            expect(dataCall.select.author.select.name).toBe(true);
         });
 
         it('should exclude ACL-omitted fields from select for non-admin', async () => {
@@ -244,10 +247,11 @@ describe('Model - Field Selection', () => {
             expect(dataCall.select.author.select.name).toBe(true);
         });
 
-        it('should throw for relation not in include', async () => {
-            await expect(
-                model.get(1, '', {}, 'id,author.name')
-            ).rejects.toThrow('relation_not_included');
+        it('includes the relation named in fields', async () => {
+            mockPrismaModel.findUnique.mockResolvedValue({ id: 1, author: { name: 'A' } });
+            await model.get(1, '', {}, 'id,author.name');
+            const dataCall = mockPrismaModel.findUnique.mock.calls[mockPrismaModel.findUnique.mock.calls.length - 1][0];
+            expect(dataCall.select.author.select.name).toBe(true);
         });
 
         it('should throw 404 when record not found', async () => {
@@ -414,6 +418,49 @@ describe('Model - Field Selection', () => {
             expect(findManyCall.select.id).toBe(true);
             expect(findManyCall.select.author).toBeDefined();
             expect(findManyCall.select.comments).toBeDefined();
+        });
+    });
+
+    // ── Write responses: the record, relations only on request ──
+
+    describe('write responses and include', () => {
+        beforeEach(() => {
+            model = new Model('posts', { user: normalUser });
+            mockPrismaModel.create.mockResolvedValue({ id: 1 });
+            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.upsert.mockResolvedValue({ id: 1 });
+        });
+
+        it('create, update and upsert return the record without relations by default', async () => {
+            await model.create({ title: 'T', authorId: 42 });
+            await model.update(1, { title: 'T' });
+            await model.upsert({ id: 1, title: 'T', authorId: 42 });
+            expect(mockPrismaModel.create.mock.calls[0][0]).not.toHaveProperty('include');
+            expect(mockPrismaModel.update.mock.calls[0][0]).not.toHaveProperty('include');
+            expect(mockPrismaModel.upsert.mock.calls[0][0]).not.toHaveProperty('include');
+            await model.create({ title: 'T', authorId: 42 }, { include: '' });
+            expect(mockPrismaModel.create.mock.calls[1][0]).not.toHaveProperty('include');
+        });
+
+        it('a request include string is processed like on reads (access rules, hidden fields)', async () => {
+            await model.create({ title: 'T', authorId: 42 }, { include: 'author' });
+            const call = mockPrismaModel.create.mock.calls[0][0];
+            expect(Object.keys(call.include)).toEqual(['author']);
+            expect(call.include.author.omit).toEqual({ password: true });
+            expect(call.omit).toEqual({ draft_notes: true });
+
+            await model.update(1, { title: 'T' }, { include: 'ALL' });
+            expect(Object.keys(mockPrismaModel.update.mock.calls[0][0].include).sort()).toEqual(['author', 'comments']);
+        });
+
+        it('a Prisma include object from code passes through', async () => {
+            await model.upsert({ id: 1, title: 'T', authorId: 42 }, 'id', { include: { comments: true } });
+            expect(mockPrismaModel.upsert.mock.calls[0][0].include).toEqual({ comments: true });
+        });
+
+        it('an unknown relation is a 400 before anything is written', async () => {
+            await expect(model.create({ title: 'T', authorId: 42 }, { include: 'nope' })).rejects.toMatchObject({ status_code: 400, message: 'relation_not_exist' });
+            expect(mockPrismaModel.create).not.toHaveBeenCalled();
         });
     });
 });

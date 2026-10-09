@@ -4,6 +4,7 @@ import { isRulesEntry } from '../core/aclRules';
 import { describeUserModel } from './project';
 import { listItems } from './catalog';
 import { ANONYMOUS_ROLE } from '../core/user';
+import { relationFields, type RelationField } from './schema';
 import type { DMMF, DMMFField, DMMFModel } from '../types';
 
 /**
@@ -31,6 +32,8 @@ export interface ModelOverview {
     fields: ModelField[];
     /** Relation fields: name → related model */
     relations: Record<string, string>;
+    /** The relation fields in detail, with a clearer name where introspection's is not one */
+    relationFields: RelationField[];
     /** src/models/<Class>.ts */
     modelFile: { path: string; exists: boolean };
     /** Its REST route: a file of its own, nested under its parents (a join table), or none */
@@ -117,6 +120,7 @@ export function modelsOverview(root: string, dmmf: DMMF | null, code: string[] =
                 isRequired: f.isRequired,
             })),
             relations: Object.fromEntries(model.fields.filter((f) => f.kind === 'object').map((f) => [f.name, f.type])),
+            relationFields: dmmf ? relationFields(dmmf, model) : [],
             modelFile: { path: modelFile, exists: fs.existsSync(path.join(root, modelFile)) },
             route: routeOf(root, model),
             code: code.includes(model.name),

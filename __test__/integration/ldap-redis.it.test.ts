@@ -108,7 +108,7 @@ run('RedisStore ↔ Redis', () => {
         const client = (store as any).client;
         await client.zadd((store as any)._userKey(1), Date.now() - 1000, 'expired-member');
         await store.create('s1b', { id: 1 }, { userId: 1 });
-        expect(await client.zrange((store as any)._userKey(1), 0, -1)).not.toContain('expired-member');
+        expect(await client.zrange((store as any)._userKey(1), '0', '-1')).not.toContain('expired-member');
 
         await store.create('s2', { id: 2 }, { userId: 2 });
         expect(await store.deleteByUser(1)).toBe(3); // s1, rt:s1, s1b

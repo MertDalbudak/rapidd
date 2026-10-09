@@ -181,25 +181,35 @@ export function installComponents(R) {
             } }) : null);
     };
 
-    R.field = (setting) => {
+    /** Where a field's value comes from: the environment, a suggestion, a change, the env file */
+    function metaBadges(setting) {
         const info = R.info(setting.key);
-        const required = S.validation && S.validation.required.includes(setting.key);
         const meta = [];
         if (info.locked) meta.push(R.badge('Set by the environment — change it there', 'warn', 'lock'));
         else if (R.changed(setting.key)) {
             const generated = S.state.suggested[setting.key] && S.changes[setting.key] === S.state.suggested[setting.key];
-            meta.push(R.badge(generated ? 'Generated — saved with the setup' : 'Changed', 'brand'));
+            meta.push(R.badge(generated ? (R.isSecret(setting) ? 'Generated' : 'Suggested') + ' — saved with the setup' : 'Changed', 'brand'));
         } else if (info.source === 'file') meta.push(R.badge('Saved in ' + S.state.envFile.display));
         if (setting.default && !info.locked) meta.push(R.badge('Default: ' + setting.default, 'outline'));
+        return meta;
+    }
+
+    R.field = (setting) => {
+        const required = S.validation && S.validation.required.includes(setting.key);
+        const meta = metaBadges(setting);
         return h('div', { class: 'field' + (R.changed(setting.key) ? ' changed' : ''), 'data-key': setting.key },
             h('div', null,
                 h('label', { class: 'name', for: 'f-' + setting.key }, setting.label, required ? h('span', { class: 'req', title: 'Required', text: '*' }) : null),
                 h('span', { class: 'key', text: setting.key })),
             h('div', null, R.fieldInput(setting),
                 setting.help ? h('div', { class: 'help', text: setting.help }) : null,
-                meta.length ? h('div', { class: 'meta' }, meta) : null,
-                h('div', { class: 'msg', 'data-msg': setting.key })));
+                h('div', { class: 'meta', 'data-meta': setting.key, hidden: meta.length === 0 }, meta),
+                h('div', { class: 'msg', 'data-msg': setting.key }),
+                R.fieldHints[setting.key] ? h('div', { 'data-hint': setting.key }, R.fieldHints[setting.key]()) : null));
     };
+
+    /** Extra guidance under a field, refreshed with every evaluation: key → () => elements */
+    R.fieldHints = {};
 
     R.updateMessages = () => {
         if (!S.validation) return;
@@ -214,6 +224,17 @@ export function installComponents(R) {
             if (input && input.classList) input.classList.toggle('invalid', !!error);
         }
         for (const el of document.querySelectorAll('.field[data-key]')) el.classList.toggle('changed', R.changed(el.getAttribute('data-key')));
+        for (const el of document.querySelectorAll('[data-meta]')) {
+            const setting = R.setting(el.getAttribute('data-meta'));
+            const meta = setting ? metaBadges(setting) : [];
+            el.replaceChildren(...meta);
+            el.hidden = meta.length === 0;
+        }
+        for (const el of document.querySelectorAll('[data-hint]')) {
+            const hint = R.fieldHints[el.getAttribute('data-hint')];
+            el.replaceChildren();
+            if (hint) R.append(el, [hint()]);
+        }
     };
 
     /** The connection test of a section (database, redis, ldap, oidc, webdav) */

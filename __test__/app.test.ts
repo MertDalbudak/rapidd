@@ -72,7 +72,8 @@ jest.mock('../src/auth/stores/index', () => ({
 import { buildApp } from '../src/app';
 
 // Create temp routes directory for testing
-const TEMP_ROUTES = path.join(__dirname, '__temp_routes__');
+// Per run: the IDE's watcher may run this file at the same time
+const TEMP_ROUTES = fs.mkdtempSync(path.join(__dirname, '__temp_routes_'));
 
 beforeAll(() => {
     // Create temp route files

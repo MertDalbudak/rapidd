@@ -60,7 +60,7 @@ export interface EnvConfig {
     RLS_NAMESPACE: string;
 
     // Proxy
-    TRUST_PROXY?: boolean;
+    TRUST_PROXY?: string;
 
     // Pagination
     PAGINATION_MODE: 'offset' | 'page';

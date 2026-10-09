@@ -105,6 +105,40 @@ describe('data model overview', () => {
     });
 });
 
+describe('user table under another name', () => {
+    it('tables with a password column and a unique text identifier are suggested', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rapidd-wizard-users-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'prisma'));
+            fs.writeFileSync(path.join(dir, 'prisma', 'schema.prisma'), `datasource db {
+  provider = "mysql"
+}
+model employees {
+  id       Int    @id
+  email    String @unique
+  password String
+}
+model projects {
+  id   Int    @id
+  name String @unique
+}
+`);
+            const { inspectProject, userModelCandidates } = await import('../../src/setup/project');
+            const { validate, buildSections } = await import('../../src/setup/settings');
+            const project = await inspectProject(dir, { DATABASE_URL: 'mysql://u:p@h/db' });
+            expect(project.userModel).toBeNull();
+            expect(project.userModelCandidates).toEqual(['employees']);
+            expect(userModelCandidates((await readSchema(dir)).dmmf!)).toEqual(['employees']);
+            const warning = validate({ DATABASE_URL: 'mysql://u:p@h/db' }, buildSections(), project).warnings.AUTH_PROVIDERS;
+            expect(warning).toMatch(/employees looks like one: set it as the user table \(DB_USER_TABLE\)/);
+            // Once chosen, nothing to suggest
+            expect((await inspectProject(dir, { DATABASE_URL: 'mysql://u:p@h/db', DB_USER_TABLE: 'employees' })).userModelCandidates).toEqual([]);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
 describe('rapidd build runs', () => {
     const all = ['user', 'order', 'product'];
     const modern = { installed: true, modelList: true, skipGenerate: true };
@@ -124,7 +158,7 @@ describe('rapidd build runs', () => {
 
 describe('row-level security SQL', () => {
     const models: ModelOverview[] = [{
-        name: 'post', table: 'Post"s', key: ['id'], relations: {}, sensitive: [], code: false,
+        name: 'post', table: 'Post"s', key: ['id'], relations: {}, relationFields: [], sensitive: [], code: false,
         modelFile: { path: '', exists: false }, route: { kind: 'route', url: '/api/v1/post', file: null, exists: false },
         fields: [
             { name: 'id', column: 'id', type: 'Int', kind: 'scalar', isList: false, isId: true, isRequired: true },

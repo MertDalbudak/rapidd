@@ -51,6 +51,7 @@ export const STYLES = `
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text); }
 body { font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+[hidden] { display: none !important; }
 a { color: var(--brand); text-decoration: none; }
 a:hover { text-decoration: underline; }
 button, input, select, textarea { font: inherit; color: inherit; }
@@ -229,6 +230,7 @@ table.table { width: 100%; border-collapse: collapse; font-size: 13.5px; }
 .table td.shrink, .table th.shrink { width: 1%; white-space: nowrap; }
 .table td.num { text-align: right; font-variant-numeric: tabular-nums; }
 .table .sub { color: var(--text-3); font-size: 12px; }
+.table .sub a { color: inherit; } .table .sub a:hover { color: var(--brand); }
 .table tr.selected td { background: var(--brand-soft); }
 .table td .input { min-width: 90px; }
 

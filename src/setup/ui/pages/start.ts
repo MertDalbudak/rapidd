@@ -130,8 +130,12 @@ export function installStartPages(R) {
                         + (closed ? 'closed (ACL_DEFAULT=deny).' : 'open to everyone who reaches the API.'),
                     [R.button('Access control', { size: 'sm', icon: 'shield', onClick: () => R.go('access') }),
                         R.info('AUTH_PROVIDERS').locked ? null : R.button('Turn sign-in on', { size: 'sm', kind: 'ghost', onClick: () => R.setValue('AUTH_PROVIDERS', '', true) })]));
-            } else if (S.state.project.userModel === null && providers.includes('local')) {
-                out.push(R.notice('info', 'No user table found', 'Local sign-in needs a table such as user or account with a password column. Without one, sign-in comes from external providers only — set the table under Users, or run the API without sign-in.', [noSignIn]));
+            } else if (S.state.project.userModel === null && providers.includes('local') && !R.hasValue('DB_USER_TABLE')) {
+                const candidates = S.state.project.userModelCandidates || [];
+                out.push(R.notice('info', 'No user table found', candidates.length
+                    ? 'Local sign-in needs a table with a password column. ' + candidates.join(' or ') + (candidates.length === 1 ? ' looks like one.' : ' look like one.')
+                    : 'Local sign-in needs a table such as user or account with a password column. Without one, sign-in comes from external providers only — set the table under Users, or run the API without sign-in.',
+                candidates.map((c) => R.button('Use ' + c, { size: 'sm', kind: 'primary', icon: 'user', onClick: () => R.setValue('DB_USER_TABLE', c, true) })).concat([noSignIn])));
             }
             for (const id of AUTH_SECTIONS) {
                 const section = R.section(id);
@@ -161,7 +165,8 @@ export function installStartPages(R) {
             const result = S.ui.adminResult;
             if (result && result.ok) return out.concat(R.notice('ok', result.message, 'Sign in with it once the API runs.'), R.pager('signin', 'access'));
             if (!a.available) {
-                return out.concat(R.notice(/already/.test(a.reason || '') ? 'ok' : 'warn', a.reason, null, [R.button('Check again', { size: 'sm', icon: 'refresh', onClick: loadAdmin })]), R.pager('signin', 'access'));
+                const use = (a.candidates || []).map((c) => R.button('Use ' + c + ' as the user table', { size: 'sm', kind: 'primary', icon: 'user', onClick: () => { R.setValue('DB_USER_TABLE', c, true); S.admin = null; setTimeout(loadAdmin, 400); } }));
+                return out.concat(R.notice(/already/.test(a.reason || '') ? 'ok' : 'warn', a.reason, null, use.concat([R.button('Check again', { size: 'sm', icon: 'refresh', onClick: loadAdmin })])), R.pager('signin', 'access'));
             }
             const errors = (result && result.errors) || {};
             const fields = a.model.fields.map((f) => {
@@ -206,6 +211,31 @@ export function installStartPages(R) {
             return out;
         },
     });
+
+    // ── Trusted proxies ──────────────────────────────────────────────────
+    /** How this page came in — Cloudflare, a proxy on this machine — and who the API takes the visitor for */
+    R.fieldHints.TRUST_PROXY = () => {
+        const p = S.proxy;
+        if (!p) return null;
+        const out = [];
+        // What is wrong is the field's warning (the review lists it too) — here: the way in, and the fix
+        const fix = p.proposal && R.value('TRUST_PROXY') !== p.proposal;
+        if (p.chain.length > 1) {
+            const route = p.chain.slice().reverse().map((hop, i) => (i === 0 ? 'you ' + hop.address : hop.kind + ' ' + hop.address)).concat(['API']).join(' → ');
+            out.push(h('div', { class: 'help', text: 'This page came in: ' + route + (p.seenAs && !fix ? '. With this setting the API takes you for ' + p.seenAs + '.' : '.') }));
+        }
+        if (fix) {
+            out.push(h('div', { class: 'row', style: { marginTop: '8px' } }, R.info('TRUST_PROXY').locked
+                ? h('span', { class: 'muted small', text: 'Set in the environment — change it there.' })
+                : R.button('Use ' + p.proposal, { size: 'sm', kind: 'primary', icon: 'check', onClick: () => R.setValue('TRUST_PROXY', p.proposal, true) })));
+        }
+        if (p.replacedForwardedFor) {
+            out.push(h('div', { style: { marginTop: '8px' } }, R.notice('warn', 'The visitor’s address is lost on this machine',
+                h('span', null, 'The proxy in front of the API replaces X-Forwarded-For with Cloudflare’s address instead of adding to it. nginx: ',
+                    h('code', { text: 'proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' })))));
+        }
+        return out;
+    };
 
     // ── Environment ──────────────────────────────────────────────────────
     R.page({

@@ -244,6 +244,7 @@ export function installCore(R) {
         const r = await R.api('POST', '/evaluate', R.payload());
         if (mine !== sequence || !r.validation) return;
         S.validation = r.validation;
+        S.proxy = r.proxy || null;
         S.fileProblems = r.fileProblems || {};
         if (r.sections.length && r.sections[0].settings) S.state.sections = r.sections;
         for (const s of r.sections) S.visible[s.id] = s.visible;
@@ -552,6 +553,7 @@ export function installCore(R) {
         for (const k in st.suggested) if (!R.changed(k)) S.changes[k] = st.suggested[k];
         for (const s of st.sections) S.visible[s.id] = s.visible;
         S.validation = st.validation;
+        S.proxy = st.proxy || null;
         await R.evaluate();
         R.render();
     };

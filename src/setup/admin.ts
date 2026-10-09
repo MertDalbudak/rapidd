@@ -2,7 +2,7 @@ import path from 'path';
 import bcrypt from 'bcrypt';
 import { createAdapter } from '../core/adapter';
 import { parseScalar } from '../orm/values';
-import { readSchema, describeUserModel } from './project';
+import { readSchema, describeUserModel, userModelCandidates } from './project';
 import type { UserModelInfo } from './project';
 import { listItems } from './catalog';
 import type { Values } from './catalog';
@@ -35,6 +35,8 @@ function openClient(values: Values, root: string): { client: any; close: () => P
 export interface AdminStatus {
     available: boolean;
     reason?: string;
+    /** Tables that look like users, when none is detected */
+    candidates?: string[];
     model?: UserModelInfo;
     users?: number;
 }
@@ -45,7 +47,10 @@ export async function adminStatus(values: Values, root: string = process.cwd()):
     const schema = await readSchema(root);
     if (!schema.dmmf) return { available: false, reason: schema.exists ? 'The Prisma schema cannot be read' : 'There is no Prisma schema yet' };
     const model = describeUserModel(schema.dmmf, values);
-    if (!model) return { available: false, reason: 'No user table detected (user, users, account, accounts — or set DB_USER_TABLE)' };
+    if (!model) {
+        const candidates = userModelCandidates(schema.dmmf);
+        return { available: false, reason: `No user table detected (user, users, account, accounts — or set DB_USER_TABLE)${candidates.length ? ` — ${candidates.join(' or ')} looks like one` : ''}`, candidates };
+    }
     if (!model.passwordField) return { available: false, reason: `${model.model} has no password column`, model };
     if (!values.DATABASE_URL) return { available: false, reason: 'Set the database connection first', model };
 

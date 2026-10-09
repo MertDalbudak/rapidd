@@ -141,6 +141,29 @@ describe('HTTP setup wizard', () => {
             expect(r.sections.find((s: any) => s.id === 'ldap').visible).toBe(true);
         });
 
+        it('behind Cloudflare: TRUST_PROXY suggested while unset, the reason under the field and on the review', async () => {
+            delete process.env.TRUST_PROXY;
+            // In production: elsewhere trusting every proxy (unset) is fine
+            process.env.NODE_ENV = 'production';
+            await start();
+            // visitor → Cloudflare → nginx on this machine (inject's peer: 127.0.0.1)
+            const cf = { ...bearer, 'x-forwarded-for': '203.0.113.9, 172.68.1.10', 'cf-ray': '8c1e2a3b4c5d6e7f-FRA' };
+            const state = (await wizard.app.inject({ method: 'GET', url: '/setup/api/state', headers: cf })).json();
+            expect(state.suggested.TRUST_PROXY).toBe('private,cloudflare');
+            expect(state.proxy).toMatchObject({ cloudflare: { via: 'request' }, seenAs: '203.0.113.9', proposal: null });
+            expect(state.validation.warnings.TRUST_PROXY).toBeUndefined();
+
+            const hops = (await wizard.app.inject({ method: 'POST', url: '/setup/api/evaluate', headers: cf, payload: { changes: { TRUST_PROXY: '1' } } })).json();
+            expect(hops.proxy).toMatchObject({ seenAs: '172.68.1.10', proposal: 'private,cloudflare', seenAsWithProposal: '203.0.113.9' });
+            expect(hops.validation.warnings.TRUST_PROXY).toMatch(/^This page came through Cloudflare\. The API sees visitors as Cloudflare's servers/);
+
+            // Saved — here cleared: not suggested again in this run
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/save', headers: cf, payload: { changes: { TRUST_PROXY: '' } } })).statusCode).toBe(200);
+            expect((await wizard.app.inject({ method: 'GET', url: '/setup/api/state', headers: cf })).json().suggested.TRUST_PROXY).toBeUndefined();
+            // Without Cloudflare nothing is suggested
+            expect((await wizard.app.inject({ method: 'GET', url: '/setup/api/state', headers: bearer })).json().proxy.cloudflare).toBeNull();
+        });
+
         it('save: refuses invalid changes; writes valid ones to ENV_FILE', async () => {
             await start();
             const bad = await wizard.app.inject({ method: 'POST', url: '/setup/api/save', headers: bearer, payload: { changes: { PORT: 'x' } } });

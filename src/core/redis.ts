@@ -15,10 +15,14 @@ export function isRedisConfigured(): boolean {
  *   A database number in the URL wins over the per-purpose `db` passed here.
  * - `REDIS_USERNAME` / `REDIS_PASSWORD` for Redis 6+ ACL users.
  * - `REDIS_TLS=true` enables TLS for host/port configs (managed Redis on Azure/AWS/GCP).
+ * - RESP2 (`protocol: 2`), as before ioredis 6.
  * - `env` defaults to process.env (the setup wizard passes the settings being edited).
  */
 export function createRedisClient(options: RedisOptions = {}, env: NodeJS.ProcessEnv = process.env): Redis {
     const shared: RedisOptions = {
+        // ioredis 6 speaks RESP3 by default: RESP2 keeps the replies (Lua scripts included) as
+        // they were, and works with servers before Redis 6
+        protocol: 2,
         ...(env.REDIS_USERNAME ? { username: env.REDIS_USERNAME } : {}),
         ...(env.REDIS_PASSWORD ? { password: env.REDIS_PASSWORD } : {}),
         ...(env.REDIS_TLS === 'true' ? { tls: {} } : {}),
