@@ -12,6 +12,14 @@ export const DENY_ALL: ModelAcl = Object.freeze({
 
 const RAW_MODELS = Symbol('rapidd.acl.rawModels');
 
+/**
+ * The ACL in effect: the rules of config/acl.json for the models they list, and the entries
+ * of src/config/acl.ts on top — a code entry takes its model over.
+ */
+export function mergeAclRules(code: AclConfig | null | undefined, rules: Record<string, ModelAcl>): AclConfig {
+    return { ...(code ?? {}), model: { ...rules, ...(code?.model ?? {}) } };
+}
+
 function isModelName(name: string): boolean {
     const dmmf = getDMMFSync();
     // Before the schema is loaded, treat any non-prototype key as a model (fail closed)
@@ -56,7 +64,7 @@ export function auditAcl(acl: AclConfig, mode: string | undefined = process.env.
         if (mode === 'deny') {
             Logger.log(`ACL: ${missing.length} model(s) without an ACL entry are denied (ACL_DEFAULT=deny)`, { models: missing });
         } else {
-            Logger.warn(`ACL: ${missing.length} model(s) have no ACL entry and are UNRESTRICTED for every authenticated user: ${missing.join(', ')}. Add entries in src/config/acl.ts, or set ACL_DEFAULT=deny.`);
+            Logger.warn(`ACL: ${missing.length} model(s) have no ACL entry and are UNRESTRICTED for every authenticated user: ${missing.join(', ')}. Add access rules in the setup wizard (config/acl.json) or src/config/acl.ts, or set ACL_DEFAULT=deny.`);
         }
     }
     return missing;

@@ -2,7 +2,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import dotenv from 'dotenv';
-import { formatEnvValue, updateEnvContent, writeEnvFile, loadEnvFile, valueSource, reloadEnvFile, readEnvFile } from '../../src/setup/envfile';
+import { formatEnvValue, updateEnvContent, writeEnvFile, loadEnvFile, valueSource, readEnvFile } from '../../src/setup/envfile';
 import type { EnvLayout } from '../../src/setup/envfile';
 
 describe('formatEnvValue — dotenv reads back exactly the same string', () => {
@@ -147,14 +147,8 @@ describe('env file on disk', () => {
             expect(valueSource('RAPIDD_T_FILE')).toBe('file');
             expect(valueSource('RAPIDD_T_BOTH')).toBe('environment');
             expect(valueSource('RAPIDD_T_NONE')).toBe('unset');
-
-            const other = path.join(dir, 'other.env');
-            fs.writeFileSync(other, 'RAPIDD_T_OTHER=x\n');
-            reloadEnvFile(other);
-            expect(process.env.RAPIDD_T_FILE).toBeUndefined();
-            expect(process.env.RAPIDD_T_OTHER).toBe('x');
         } finally {
-            for (const k of ['RAPIDD_T_FILE', 'RAPIDD_T_BOTH', 'RAPIDD_T_OTHER', 'ENV_FILE']) delete process.env[k];
+            for (const k of ['RAPIDD_T_FILE', 'RAPIDD_T_BOTH']) delete process.env[k];
         }
     });
 

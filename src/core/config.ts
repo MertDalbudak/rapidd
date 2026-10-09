@@ -12,20 +12,20 @@ const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
  * or a secret store instead of a committed JSON file. Unset variables without a default
  * become '' and are reported once.
  */
-export function substituteEnv<T>(value: T, missing: Set<string> = new Set()): T {
+export function substituteEnv<T>(value: T, missing: Set<string> = new Set(), source: Record<string, string | undefined> = process.env): T {
     if (typeof value === 'string') {
         return value.replace(ENV_REF, (_match, name: string, fallback: string | undefined) => {
-            const env = process.env[name];
+            const env = source[name];
             if (env !== undefined && env !== '') return env;
             if (fallback !== undefined) return fallback;
             missing.add(name);
             return '';
         }) as T;
     }
-    if (Array.isArray(value)) return value.map((v) => substituteEnv(v, missing)) as T;
+    if (Array.isArray(value)) return value.map((v) => substituteEnv(v, missing, source)) as T;
     if (value && typeof value === 'object') {
         const out: Record<string, unknown> = {};
-        for (const [key, v] of Object.entries(value)) out[key] = substituteEnv(v, missing);
+        for (const [key, v] of Object.entries(value)) out[key] = substituteEnv(v, missing, source);
         return out as T;
     }
     return value;

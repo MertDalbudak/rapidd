@@ -266,6 +266,50 @@ async function parseResponse(response: Response): Promise<unknown> {
     return response.arrayBuffer();
 }
 
+/** A service endpoint call, ready to send: URL, method and headers (authorization applied) */
+export interface PreparedRequest {
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+}
+
+/**
+ * Build the request for an endpoint of a service — the configuration is passed in, so a
+ * service that is not (yet) in config/app.json can be called too (the setup wizard tests
+ * services before they are saved). `serviceName` keys the OAuth2 token cache.
+ */
+export async function prepareServiceRequest(
+    serviceName: string,
+    service: ServiceConfig,
+    endpointName: string,
+    options: RequestOptions = {}
+): Promise<PreparedRequest> {
+    const endpoint = service.endpoints?.[endpointName];
+    if (!endpoint) {
+        const available = Object.keys(service.endpoints || {}).join(', ') || 'none';
+        throw new Error(`Endpoint '${endpointName}' not found in '${serviceName}'. Available: ${available}`);
+    }
+
+    const resolvedPath = resolvePath(endpoint.path, options.params);
+    const url = buildUrl(service, resolvedPath, {
+        ...(endpoint.queries || {}),
+        ...(options.queries || {})
+    });
+
+    const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'Accept': 'application/json',
+        ...(service.headers || {}),
+        ...(endpoint.headers || {}),
+        ...(options.headers || {})
+    };
+
+    if (service.authorization) {
+        await applyAuth(headers, serviceName, service.authorization);
+    }
+    return { url, method: (endpoint.method || 'GET').toUpperCase(), headers };
+}
+
 // ── Main API ─────────────────────────────────────────────────────────────────
 
 /**
@@ -299,34 +343,9 @@ export const ApiClient = {
         endpointName: string,
         options: RequestOptions = {}
     ): Promise<T> {
-        const service = getService(serviceName);
-        const endpoint = service.endpoints?.[endpointName];
-
-        if (!endpoint) {
-            const available = Object.keys(service.endpoints || {}).join(', ') || 'none';
-            throw new Error(`Endpoint '${endpointName}' not found in '${serviceName}'. Available: ${available}`);
-        }
-
-        const resolvedPath = resolvePath(endpoint.path, options.params);
-        const url = buildUrl(service, resolvedPath, {
-            ...(endpoint.queries || {}),
-            ...(options.queries || {})
-        });
-
-        const headers: Record<string, string> = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
-            ...(service.headers || {}),
-            ...(endpoint.headers || {}),
-            ...(options.headers || {})
-        };
-
-        if (service.authorization) {
-            await applyAuth(headers, serviceName, service.authorization);
-        }
-
+        const { url, method, headers } = await prepareServiceRequest(serviceName, getService(serviceName), endpointName, options);
         return this.fetch<T>(url, {
-            method: endpoint.method || 'GET',
+            method,
             headers,
             body: options.body,
             timeout: options.timeout,

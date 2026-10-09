@@ -152,8 +152,11 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
             try { new URL(value); } catch { return ['Not a valid URL — URL-encode special characters in the password (@ → %40)', null]; }
             const schemaProvider = project?.schema?.provider;
             const urlProvider = detectProvider(value);
-            if (key === 'DATABASE_URL' && schemaProvider && schemaProvider !== urlProvider && !(schemaProvider === 'mysql' && urlProvider === 'mysql')) {
-                return [`The Prisma schema is for ${schemaProvider}, this is a ${urlProvider} database`, null];
+            if (key === 'DATABASE_URL' && schemaProvider && schemaProvider !== urlProvider) {
+                // A schema without models yet is switched over on save; one with models is a real mismatch
+                return Array.isArray(project?.schema?.models) && project!.schema!.models.length === 0
+                    ? [null, `The schema is set up for ${schemaProvider} — saving switches it to ${urlProvider}`]
+                    : [`The Prisma schema is for ${schemaProvider}, this is a ${urlProvider} database`, null];
             }
             return [null, null];
         }

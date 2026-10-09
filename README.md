@@ -40,9 +40,9 @@ npm run dev                 # not configured yet → opens the setup wizard
 ```
 
 The console prints a link to the **setup wizard**: connect and test the database, read the
-schema from it (or create the tables from yours), generate the Prisma client, models, routes and
-ACL, create the first user — then the API starts, in the same process. Prefer the terminal?
-`npm run setup` does the same, and `npm run setup -- --show / --check / --set / --export` script it.
+schema from it (or create the tables from yours), generate the Prisma client, models and routes,
+set up sign-in, access rules, row-level security, rate limits and the external APIs you call,
+create the first user — then the API starts, in the same process.
 
 Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
 
@@ -139,7 +139,22 @@ Multi-identifier login lets users authenticate with any unique field (email, use
 
 ## Access Control
 
-Define per-model rules in `src/config/acl.ts`. Enforced on every CRUD operation, relation include, and field selection.
+Rules per model and role in `config/acl.json` — edited in the setup wizard, generated with defaults by `rapidd build`. Enforced on every CRUD operation, relation include, and field selection.
+
+```json
+{
+    "models": {
+        "posts": {
+            "create": { "GUEST": false, "*": true },
+            "read":   { "ADMIN": "all", "*": { "where": { "authorId": "$user.id" } } },
+            "delete": { "ADMIN": "all" },
+            "hide":   { "*": ["internalNotes"], "ADMIN": [] }
+        }
+    }
+}
+```
+
+Anything a rule cannot express goes into `src/config/acl.ts` — an entry there takes its model over:
 
 ```typescript
 const acl: AclConfig = {
@@ -237,9 +252,6 @@ npm run build && npm start
 # or Docker
 docker build -t my-api . && docker run -p 3000:3000 --env-file .env my-api
 ```
-
-`npm run setup -- --check` tests the database, Redis and identity providers before a rollout;
-`npm run setup -- --export kubernetes` writes the configuration as a Kubernetes Secret.
 
 **Security defaults in production:** HSTS, Content-Security-Policy, X-Content-Type-Options, Referrer-Policy, and CORS with explicit origin whitelisting — all enabled automatically.
 

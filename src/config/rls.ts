@@ -1,14 +1,17 @@
 import type { RlsContextFn } from '../types';
+import { rlsFromConfig } from '../core/rlsRules';
 
 /**
  * RLS (Row-Level Security) variable mapping.
  *
- * Return the SQL session variables to set before each database query.
- * Keys become variable names (e.g. `app.current_user_id`), values are set per-request.
- * Return null for a key to skip it. Return an empty object to disable RLS.
+ * The SQL session variables set before each database query — keys become variable names
+ * (e.g. `app.current_user_id`). By default they come from config/rls.json, which the setup
+ * wizard edits: `{ "variables": { "current_user_id": "user.id" } }` (values: `user.<attribute>`
+ * or `header.<name>`).
  *
- * The `request` parameter is the full Fastify request object — you can read
- * from request.user, request.headers, request.body, or any custom property.
+ * For anything else, replace it with your own function. The `request` parameter is the full
+ * Fastify request object — read request.user, request.headers, request.body, or any custom
+ * property. Return null for a key to skip it; an empty object sets no variables.
  *
  * @example
  * // User-based isolation
@@ -31,8 +34,6 @@ import type { RlsContextFn } from '../types';
  *     current_department_id: request.user?.departmentId ?? null,
  * });
  */
-const rlsContext: RlsContextFn = (request) => {
-    return {};
-};
+const rlsContext: RlsContextFn = rlsFromConfig();
 
 export default rlsContext;

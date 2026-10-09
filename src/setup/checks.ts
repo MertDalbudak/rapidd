@@ -80,15 +80,7 @@ export async function databaseInfo(url: string, timeoutMs = 5000): Promise<{ pro
             await conn.end().catch(() => undefined);
         }
     }
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { Client } = require('pg');
-    // Prisma's ?schema= is not a libpq parameter — read it, and keep it away from pg
-    const parsed = new URL(url);
-    const schema = parsed.searchParams.get('schema') || 'public';
-    parsed.searchParams.delete('schema');
-    const client = new Client({ connectionString: parsed.toString(), connectionTimeoutMillis: timeoutMs });
-    await client.connect();
-    try {
+    return withPostgres(url, async (client, schema) => {
         const { rows: [info] } = await client.query('SELECT version() AS version, current_database() AS database');
         const { rows } = await client.query(
             "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name", [schema]);
@@ -98,6 +90,21 @@ export async function databaseInfo(url: string, timeoutMs = 5000): Promise<{ pro
             database: `${info.database} (schema ${schema})`,
             tables: rows.map((r: any) => r.table_name),
         };
+    }, timeoutMs);
+}
+
+/** Run fn with a PostgreSQL connection; `schema` is Prisma's ?schema= (default public) */
+export async function withPostgres<T>(url: string, fn: (client: any, schema: string) => Promise<T>, timeoutMs = 5000): Promise<T> {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { Client } = require('pg');
+    // Prisma's ?schema= is not a libpq parameter — read it, and keep it away from pg
+    const parsed = new URL(url);
+    const schema = parsed.searchParams.get('schema') || 'public';
+    parsed.searchParams.delete('schema');
+    const client = new Client({ connectionString: parsed.toString(), connectionTimeoutMillis: timeoutMs, query_timeout: 30_000 });
+    await client.connect();
+    try {
+        return await fn(client, schema);
     } finally {
         await client.end().catch(() => undefined);
     }

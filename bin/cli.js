@@ -13,7 +13,6 @@ if (!command) {
     console.log('Usage: npx rapidd <command>\n');
     console.log('Commands:');
     console.log('  create-project   Scaffold a new Rapidd project in the current directory');
-    console.log('  setup            Configure the project — in the terminal, or --web in the browser');
     console.log('  build            Generate models, routes & ACL from Prisma schema (@rapidd/build)');
     process.exit(0);
 }
@@ -49,18 +48,6 @@ if (COMMANDS[command]) {
         process.exit(1);
     }
     run(buildBin, args);
-} else if (command === 'setup') {
-    // The project's own entry point runs the setup (main.ts setup / dist/main.js setup)
-    const cwd = process.cwd();
-    const tsx = resolveBin('tsx', cwd);
-    if (fs.existsSync(path.join(cwd, 'main.ts')) && tsx) {
-        run(tsx, [path.join(cwd, 'main.ts'), 'setup', ...args.slice(1)]);
-    } else if (fs.existsSync(path.join(cwd, 'dist', 'main.js'))) {
-        run(path.join(cwd, 'dist', 'main.js'), ['setup', ...args.slice(1)]);
-    } else {
-        console.error('No Rapidd project here (main.ts with tsx installed, or dist/main.js).');
-        process.exit(1);
-    }
 } else {
     console.error(`Unknown command: ${command}`);
     process.exit(1);
@@ -149,7 +136,6 @@ function createProject() {
             start: 'node dist/main.js',
             dev: 'tsx watch main.ts',
             build: 'tsc',
-            setup: 'tsx main.ts setup',
         },
         engines: corePkg.engines || { node: '^22.12.0 || >=24.0.0' },
         dependencies: pick(coreDeps, [
@@ -173,8 +159,7 @@ function createProject() {
 
     console.log('Project created. Next steps:\n');
     console.log('  npm install');
-    console.log('  npm run dev      # opens the setup wizard in the browser on first start');
-    console.log('  # or configure in the terminal: npm run setup\n');
+    console.log('  npm run dev      # opens the setup wizard in the browser on first start\n');
 }
 
 function copyDir(src, dest, rel, skipNames, skipPaths) {

@@ -2,13 +2,14 @@ import fs from 'fs';
 import path from 'path';
 import { SECTIONS } from './catalog';
 import { validate, plainValues, currentValues } from './settings';
-import { inspectProject } from './project';
+import { inspectProject, clientProvider } from './project';
 import { Logger } from '../utils/Logger';
+import { ACL_RULES_FILE, loadAclRules } from '../core/aclRules';
+import { RLS_RULES_FILE, loadRlsRules } from '../core/rlsRules';
 
 /**
- * Setup entry points used by main.ts:
- * - firstBoot(): while the API cannot start, serve the setup wizard; returns once configured
- * - runSetupCommand(): `npm run setup` — the same setup in the terminal (or --web)
+ * Setup entry point used by main.ts — firstBoot(): while the API cannot start, serve the setup
+ * wizard; returns once it is configured.
  */
 
 export interface SetupReason {
@@ -43,34 +44,43 @@ export async function setupReasons(root: string = process.cwd()): Promise<SetupR
         clientReady = false;
     }
     if (!clientReady) reasons.push({ key: 'prisma/client', message: 'The Prisma client has not been generated' });
+    else if (provider && clientProvider(root) && clientProvider(root) !== provider) {
+        reasons.push({ key: 'prisma/client', message: `The Prisma client was generated for ${clientProvider(root)} — generate it again for ${provider}` });
+    }
+
+    // Rules files the API refuses to start with (they never fail open)
+    for (const [file, load] of [[ACL_RULES_FILE, loadAclRules], [RLS_RULES_FILE, loadRlsRules]] as const) {
+        try {
+            load(path.join(root, file));
+        } catch (err) {
+            reasons.push({ key: file, message: (err as Error).message.replace(path.join(root, file), file) });
+        }
+    }
     return reasons;
 }
 
-/** SETUP_WIZARD: auto (default) — serve the wizard while the API cannot start; off — fail as before */
-export function wizardEnabled(): boolean {
-    return (process.env.SETUP_WIZARD || 'auto').toLowerCase() !== 'off';
+export type WizardMode = 'auto' | 'on' | 'off';
+
+/**
+ * SETUP_WIZARD: auto (default) — serve the wizard while the API cannot start; on — at every
+ * start, before the API (to change the access rules, services, ...); off — never
+ */
+export function wizardMode(): WizardMode {
+    const mode = (process.env.SETUP_WIZARD || 'auto').toLowerCase();
+    return mode === 'on' || mode === 'off' ? mode : 'auto';
 }
 
 /**
- * First boot: when the API cannot start, serve the setup wizard (HTTP) until the
- * configuration is complete, then return — main.ts goes on to start the API in the same
- * process. Returns immediately when nothing is missing or SETUP_WIZARD=off.
+ * Boot: when the API cannot start (or SETUP_WIZARD=on), serve the setup wizard (HTTP) until
+ * it is finished, then return — main.ts goes on to start the API in the same process.
+ * Returns immediately when nothing is missing, or with SETUP_WIZARD=off.
  */
 export async function firstBoot(): Promise<void> {
+    const mode = wizardMode();
+    if (mode === 'off') return;
     const reasons = await setupReasons();
-    if (reasons.length === 0 || !wizardEnabled()) return;
+    if (reasons.length === 0 && mode !== 'on') return;
     const { runWebWizard } = await import('./server');
-    await runWebWizard({ mode: 'first-boot', reasons });
+    await runWebWizard({ reasons, mode });
     Logger.configure();
 }
-
-/** `npm run setup [-- options]` — see `npm run setup -- --help`. Returns the exit code. */
-export async function runSetupCommand(argv: string[]): Promise<number> {
-    const { runCli } = await import('./cli');
-    return runCli(argv);
-}
-
-export { buildSections, validate, saveSettings, exportSettings } from './settings';
-export { runCheck } from './checks';
-export { inspectProject } from './project';
-export { SECTIONS } from './catalog';

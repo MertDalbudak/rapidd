@@ -36,14 +36,6 @@ export function loadEnvFile(file: string = envFilePath()): string[] {
     return applied;
 }
 
-/** Switch to another env file: forget what the previous one supplied, then load this one */
-export function reloadEnvFile(file: string): string[] {
-    for (const key of _fromFile) delete process.env[key];
-    _fromFile.clear();
-    process.env.ENV_FILE = file;
-    return loadEnvFile(path.resolve(file));
-}
-
 /** Where a setting's current value comes from */
 export function valueSource(key: string): 'file' | 'environment' | 'unset' {
     if (_fromFile.has(key)) return 'file';

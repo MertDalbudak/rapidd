@@ -10,8 +10,8 @@ do **not** reach existing projects via `npm update` — see the linked section f
 
 Enterprise sign-in (LDAP / Active Directory, OpenID Connect / OAuth2, WebDAV), hardened sessions,
 and the operational basics production deployments need: health checks, graceful shutdown, request
-ids, structured logs. A setup wizard — in the browser on first start, or `npm run setup` — shows and
-configures everything. The built-in Mailer is removed — apps use the mail library of their choice.
+ids, structured logs. A setup wizard in the browser shows and configures everything on first
+start. The built-in Mailer is removed — apps use the mail library of their choice.
 
 > **Read before upgrading — breaking or client-visible changes:**
 > 1. **Mailer removed** (`src/utils/Mailer.ts`, `templates/`, `config/app.json` → `emails`, and the
@@ -130,25 +130,42 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
 
 ### Added — setup wizard
 
-- **First-boot wizard in the browser**: while the API cannot start, `npm run dev` / `npm start`
-  serve it instead (link with a setup password in the console) and start the API in the same
-  process when it is done. Every setting the API reads — with its real default, help text, source
-  (env file / environment / default) and validation — grouped by area; LDAP / OIDC / WebDAV pages
-  appear when the provider is enabled.
+- **A setup wizard in the browser** (Rapidd-branded, light and dark): while the API cannot start,
+  `npm run dev` / `npm start` serve it instead (link with a setup password in the console) and
+  start the API in the same process when it is done. `SETUP_WIZARD=on` opens it at every start —
+  to change access rules, services or rate limits of a configured project; `off` exits as before.
+- **Settings**: every setting the API reads — with its real default, help text, source (env file /
+  environment / default) and validation — on guided pages (Database, Sign-in, …) and complete,
+  searchable, by group under *Environment*. LDAP / OIDC / WebDAV appear when enabled.
 - **Connection tests**: database (version, tables), Redis, LDAP (each server, the service account,
   a test sign-in showing the mapped identity), OIDC (discovery, signing keys, the redirect URI to
   register), WebDAV — failures explained ("Authentication failed — check user name and password").
-- **Schema & code**: generate the Prisma client, `db pull`, create tables, `migrate deploy`,
-  `rapidd build` — each guarded (no pull over existing models, no push into a database that has
-  the tables). **First user**: created from a form that follows the user model, only while the
-  table is empty.
-- **Config files** (`config/app.json`, `config/rate-limit.json`) with JSON validation; `${NAME}`
-  references in `app.json` become settings. **Exports**: `.env`, docker compose, Kubernetes
-  Secret, shell.
-- **`npm run setup`** — the same in the terminal, plus scriptable `--show`, `--check` (exit code 1
-  on failure), `--set` / `--unset`, `--generate-secrets`, `--export`, `--web`; `npx rapidd setup`.
+- **Data model & API**: the schema's actions (`db pull`, create tables, `migrate deploy`,
+  `prisma generate`) — each guarded (no pull over existing models, no push into a database that has
+  the tables) — and every model with its generated model class, REST route (own, nested for join
+  tables, none) and access rules. Generate model classes, routes and default access rules for the
+  selected models; works with older `@rapidd/build` versions (one model per run).
+- **Access control** editor for `config/acl.json`: per model and role create / read / update /
+  delete (all rows, no rows, a filter such as `user_id = $user.id`), hidden and writable fields,
+  presets (own rows, read-only, administrators only, no access), `ACL_DEFAULT`, the role field.
+  Models defined in `src/config/acl.ts` are shown read-only.
+- **Row-level security**: whether policies can work (superuser / `BYPASSRLS`, table owners without
+  `FORCE`, sign-in without a bypassing `DATABASE_URL_ADMIN`, RLS off with policies, tables without a
+  policy), the session variables (`config/rls.json`), and every table with its policies — turn RLS
+  on/off, force it, drop policies, and a policy builder (columns equal variables, an optional bypass
+  value) that shows the SQL before it runs. SQL is generated on the server from names checked
+  against the schema.
+- **Rate limits** editor (`config/rate-limit.json`) with route suggestions and a check which rule
+  applies to a path. **Services** editor for ApiClient (`config/app.json`): base URL, authorization
+  with credentials kept in the environment as `${NAME}`, default headers and parameters, endpoints,
+  and a test call per endpoint with the unsaved configuration.
+- **Review & start**: settings and config files are staged until saved; the review shows every
+  setting change and each file as a diff, then writes them together — nothing while one is invalid.
+  **First user** from a form that follows the user model, only while the table is empty.
+  **Exports**: `.env`, docker compose, Kubernetes Secret, shell.
 - Env file handling: `ENV_FILE` (default `.env`), atomic writes with `0600` permissions and a
   `.bak` backup, in-place updates that keep comments and order, quoting verified against dotenv.
+  Config files are written atomically too (`0644`, `.bak`).
 - Security: a setup password (random per start, or `SETUP_PASSWORD`) exchanged for an `HttpOnly` /
   `SameSite=Strict` cookie, a header required against cross-site requests, lockout after 10 wrong
   passwords, CSP with nonces and no external resources,
@@ -157,9 +174,27 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   `resetDMMF()`; side-effect-free `core/adapter` (`createAdapter` is still exported from
   `core/prisma`); the settings catalog `src/setup/catalog.ts`, kept in step with the code by a test.
 
+### Added — declarative access rules and RLS variables
+
+- **`config/acl.json`**: access rules per model and role — `create` true/false; `read`, `update`,
+  `delete` as `"all"`, `"none"` or `{ "where": … }` with `"$user.<attribute>"` values; `hide` and
+  `write` field lists (`"all"`: no restriction); `"*"` for every other role. Applied automatically:
+  an entry in `src/config/acl.ts` takes its model over. Fail closed (missing rule, role or user
+  attribute grants nothing); an unusable file stops the API instead of failing open.
+- **`config/rls.json`**: the RLS session variables from the signed-in user (`user.<attribute>`) or a
+  header (`header.<name>`). The default `src/config/rls.ts` loads it (`rlsFromConfig()`); a function
+  of your own still replaces it.
+- `prepareServiceRequest(name, service, endpoint, options)` (ApiClient): the request of a service
+  endpoint — URL, method, headers with authorization — for a service passed in.
+
+### Fixed — packaging
+
+- The published package now contains `src/setup/` — `main.ts` imports it, so a project created
+  from the package could not start.
+
 ### Changed — configuration layout
 
-- `.env.example` is grouped — SERVER, DATA STORES, AUTHENTICATION, SECURITY, API, OPERATIONS.
+- `.env.example` is grouped — SERVER, DATA STORES, SECURITY, API, OPERATIONS, AUTHENTICATION.
   Every `AUTH_*`, `JWT_*`, `DB_USER_*`, `LDAP_*`, `OIDC_*` and `WEBDAV_*` variable sits under
   AUTHENTICATION, ordered in subsections: providers, tokens, sessions, session transport, user
   table, external identities, then LDAP / OIDC / WebDAV (`AUTH_LOGIN_REDIRECT` moved next to OIDC).
@@ -167,7 +202,7 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   `COOKIE_SECRET` for auth cookies). CORS & cookies, rate limiting and access control (ACL and
   row-level security, before in separate places) form SECURITY; the ApiClient's timeouts moved out
   of the API settings into their own section. No variable or value changed.
-- The setup wizard, `npm run setup -- --show` and the Configuration wiki follow the same groups;
+- The setup wizard and the Configuration wiki follow the same groups;
   the wizard writes new settings into that structure. A test fails when `.env.example` and the
   settings catalog disagree.
 

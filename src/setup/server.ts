@@ -1,33 +1,43 @@
 import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 import Fastify, { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import { buildSections, currentValues, plainValues, validate, saveSettings, exportSettings, generateSecret, mask, drivers, secretKeys } from './settings';
 import type { ExportFormat } from './settings';
 import { matches } from './catalog';
 import type { CheckName, Values } from './catalog';
 import { runCheck, CHECK_NAMES } from './checks';
-import { inspectProject, readConfigFile } from './project';
-import { runAction, actionBlocker } from './actions';
-import type { ActionName } from './actions';
+import { inspectProject, alignSchemaProvider, readSchema, forgetConfigModules } from './project';
+import { runAction, actionBlocker, buildSupport } from './actions';
+import type { ActionName, BuildOptions } from './actions';
 import { adminStatus, createFirstUser } from './admin';
-import { envFilePath, writeEnvFile } from './envfile';
+import { envFilePath } from './envfile';
+import { CONFIG_FILES, isConfigFileId, readConfigText, validateConfigFile, writeConfigFiles } from './files';
+import type { ConfigFileId } from './files';
+import { modelsOverview, aclContext, routePrefixes } from './models';
+import { rlsStatus, rlsStatements, applyRls, RlsSpecError } from './rls';
+import type { RlsOperation } from './rls';
+import { testService } from './services';
 import { setupReasons } from './index';
-import type { SetupReason } from './index';
+import type { SetupReason, WizardMode } from './index';
 import { wizardPage, passwordPage } from './ui';
+import { LOGO_PNG } from './ui/logo';
+import { resetAppConfig } from '../core/config';
 import { Logger } from '../utils/Logger';
-import path from 'path';
-import fs from 'fs';
 
 /**
- * The setup wizard over HTTP. Access needs the setup password printed to the console
- * (or SETUP_PASSWORD): /setup?password=… exchanges it for an HttpOnly session cookie; API calls
- * also need the X-Rapidd-Setup header (no cross-site request can set it), or
+ * The setup wizard over HTTP — served on first boot while the API cannot start; finishing it
+ * hands over to the API in the same process. Access needs the setup password printed to the
+ * console (or SETUP_PASSWORD): /setup?password=… exchanges it for an HttpOnly session cookie;
+ * API calls also need the X-Rapidd-Setup header (no cross-site request can set it), or
  * `Authorization: Bearer <password>` for scripted installs.
  */
 
 export interface WizardOptions {
-    /** first-boot: finishing hands over to the API in this process · explicit: finishing ends the wizard */
-    mode: 'first-boot' | 'explicit';
+    /** Why the API cannot start (printed with the link) */
     reasons?: SetupReason[];
+    /** on: opened although the API could start (SETUP_WIZARD=on) */
+    mode?: WizardMode;
     host?: string;
     port?: number;
     /** The setup password (default: SETUP_PASSWORD, else random per start) */
@@ -47,7 +57,7 @@ export interface WizardHandle {
 
 const COOKIE = 'rapidd_setup';
 const ACTIONS: ActionName[] = ['generate', 'pull', 'push', 'migrate', 'build'];
-const FILES: Record<string, string> = { app: 'config/app.json', rateLimit: 'config/rate-limit.json' };
+type StagedFiles = Partial<Record<ConfigFileId, string>>;
 const MAX_FAILURES = 10;
 const LOCKOUT_MS = 15 * 60_000;
 
@@ -74,12 +84,10 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
     const failures = new Map<string, { count: number; until: number }>();
     let finish!: () => void;
     const finished = new Promise<void>((resolve) => { finish = resolve; });
-    // Secrets suggested for this run (first boot): fresh, so a click-through setup is secure
+    // Secrets suggested for this run: fresh, so a click-through setup is secure
     const suggested: Record<string, string> = {};
-    if (options.mode === 'first-boot') {
-        for (const key of ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'COOKIE_SECRET']) {
-            if (!process.env[key]) suggested[key] = generateSecret();
-        }
+    for (const key of ['JWT_SECRET', 'JWT_REFRESH_SECRET', 'COOKIE_SECRET']) {
+        if (!process.env[key]) suggested[key] = generateSecret();
     }
 
     const app = Fastify({ logger: false, bodyLimit: 2 * 1024 * 1024, trustProxy: false });
@@ -118,6 +126,8 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
     app.get('/health', async () => ({ status: 'setup' }));
     app.get('/health/ready', async (_request, reply) => reply.code(503).send({ status: 'setup_required' }));
     app.get('/', async (_request, reply) => reply.redirect('/setup'));
+    // Public: the sign-in page shows it too
+    app.get('/setup/assets/logo.png', async (_request, reply) => reply.type('image/png').header('Cache-Control', 'public, max-age=86400').send(LOGO_PNG));
 
     app.get('/setup', async (request, reply) => {
         const query = request.query as { password?: string };
@@ -153,8 +163,17 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             }
         });
 
-        const context = async () => {
-            const project = await inspectProject(root, plainValues(currentValues(buildSections())));
+        /** Staged config files of a request: known ids, text only */
+        const filesOf = (request: FastifyRequest): StagedFiles => {
+            const files = (request.body as any)?.files;
+            const out: StagedFiles = {};
+            if (files && typeof files === 'object') {
+                for (const [id, text] of Object.entries(files)) if (isConfigFileId(id) && typeof text === 'string') out[id] = text;
+            }
+            return out;
+        };
+        const context = async (files: StagedFiles = {}) => {
+            const project = await inspectProject(root, plainValues(currentValues(buildSections())), { app: files.app });
             return { project, sections: buildSections(project) };
         };
         /** Current values with the client's changes applied (keys set by the real environment stay) */
@@ -169,6 +188,28 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return values;
         };
         const changesOf = (request: FastifyRequest): Values => ((request.body as any)?.changes ?? {}) as Values;
+        /** Field names per model — rules files are checked against them */
+        const schemaFields = async (): Promise<Record<string, string[]> | undefined> => {
+            const { dmmf } = await readSchema(root);
+            return dmmf ? Object.fromEntries(dmmf.datamodel.models.map((m) => [m.name, m.fields.map((f) => f.name)])) : undefined;
+        };
+        const fileProblems = async (files: StagedFiles): Promise<Partial<Record<ConfigFileId, string[]>>> => {
+            const fields = await schemaFields();
+            const problems: Partial<Record<ConfigFileId, string[]>> = {};
+            for (const [id, text] of Object.entries(files) as [ConfigFileId, string][]) {
+                const found = validateConfigFile(id, text, fields);
+                if (found.length) problems[id] = found;
+            }
+            return problems;
+        };
+        const appName = (() => {
+            try {
+                const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+                return { name: String(pkg.name ?? path.basename(root)), version: pkg.version ? String(pkg.version) : null };
+            } catch {
+                return { name: path.basename(root), version: null };
+            }
+        })();
 
         api.get('/state', async () => {
             const { project, sections } = await context();
@@ -176,8 +217,9 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const secrets = secretKeys(sections);
             const values = merged(sections, suggested);
             return {
-                mode: options.mode,
-                reasons: options.mode === 'first-boot' ? await setupReasons(root) : [],
+                app: appName,
+                mode: options.mode ?? 'auto',
+                reasons: await setupReasons(root),
                 envFile: project.envFile,
                 container: project.container,
                 sections: sections.map((s) => ({ ...s, visible: matches(s.when, values) })),
@@ -190,6 +232,7 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
                 suggested,
                 drivers: drivers(sections),
                 validation: validate(values, sections, project),
+                files: Object.fromEntries((Object.keys(CONFIG_FILES) as ConfigFileId[]).map((id) => [id, readConfigText(root, id)])),
                 project,
             };
         });
@@ -197,15 +240,23 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
         // A saved secret, on request (the state only carries masked values)
         api.post('/reveal', async (request, reply) => {
             const key = String((request.body as any)?.key ?? '');
-            const { sections } = await context();
+            const { sections } = await context(filesOf(request));
             if (!sections.some((s) => s.settings.some((x) => x.key === key))) return reply.code(404).send({ error: 'Unknown setting' });
             return { key, value: process.env[key] ?? '' };
         });
 
         api.post('/evaluate', async (request) => {
-            const { project, sections } = await context();
+            const files = filesOf(request);
+            const { project, sections } = await context(files);
             const values = merged(sections, changesOf(request));
-            return { validation: validate(values, sections, project), sections: sections.map((s) => ({ id: s.id, visible: matches(s.when, values) })) };
+            return {
+                validation: validate(values, sections, project),
+                fileProblems: await fileProblems(files),
+                // With a staged config/app.json the ${ENV} references — and so the sections — may differ
+                sections: files.app !== undefined
+                    ? sections.map((s) => ({ ...s, visible: matches(s.when, values) }))
+                    : sections.map((s) => ({ id: s.id, visible: matches(s.when, values) })),
+            };
         });
 
         api.post('/check/:name', async (request, reply) => {
@@ -216,13 +267,16 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return runCheck(name, merged(sections, changesOf(request)), { username: body.username, password: body.password });
         });
 
+        /** The schema, generated code per model, and what the actions can do */
         api.post('/project', async (request) => {
             const { sections } = await context();
             const values = merged(sections, changesOf(request));
             const project = await inspectProject(root, values);
+            const { dmmf } = await readSchema(root);
+            const models = modelsOverview(root, dmmf);
             const actions: Record<string, string | null> = {};
             for (const name of ACTIONS) actions[name] = await actionBlocker(name, values, root);
-            return { project, actions };
+            return { project, actions, models, build: await buildSupport(root), routes: routePrefixes(models) };
         });
 
         api.post('/action/:name', async (request, reply) => {
@@ -230,9 +284,66 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             if (!ACTIONS.includes(name)) return reply.code(404).send({ error: 'Unknown action' });
             const { sections } = await context();
             const values = merged(sections, changesOf(request));
-            const result = await runAction(name, values, root);
+            const body = ((request.body as any)?.build ?? {}) as BuildOptions;
+            const build: BuildOptions = {
+                models: Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : undefined,
+                components: Array.isArray(body.components) ? body.components.filter((c) => c === 'model' || c === 'route') : undefined,
+            };
+            const result = await runAction(name, values, root, build);
+            forgetConfigModules();
             Logger.log(`Setup: ${result.message}`);
             return result;
+        });
+
+        /** What the access rule editor needs: models, fields, code-owned models, roles, user attributes */
+        api.post('/acl/context', async (request) => {
+            const { sections } = await context();
+            const values = merged(sections, changesOf(request));
+            const { dmmf } = await readSchema(root);
+            const roleField = String((request.body as any)?.roleField || 'role');
+            return aclContext(root, dmmf, values, roleField);
+        });
+
+        /** Row-level security as the database enforces it */
+        api.post('/rls', async (request) => {
+            const { sections } = await context();
+            const values = merged(sections, changesOf(request));
+            const project = await inspectProject(root, values);
+            const { dmmf } = await readSchema(root);
+            return { ...(await rlsStatus(values, modelsOverview(root, dmmf), project.userModel?.model ?? null)), variablesSource: project.rls.source };
+        });
+
+        /** The SQL of a row-level security change — preview (apply: false) or run it */
+        const rlsChange = async (request: FastifyRequest, reply: FastifyReply, apply: boolean) => {
+            const { sections } = await context();
+            const values = merged(sections, changesOf(request));
+            const { dmmf } = await readSchema(root);
+            const operation = (request.body as any)?.operation as RlsOperation;
+            let statements: string[];
+            try {
+                if (!operation || typeof operation !== 'object') throw new RlsSpecError('Which change?');
+                statements = rlsStatements(operation, modelsOverview(root, dmmf), values);
+            } catch (err) {
+                if (!(err instanceof RlsSpecError)) throw err;
+                return reply.code(400).send({ error: err.message });
+            }
+            if (!apply) return { statements };
+            const result = await applyRls(statements, values);
+            if (result.ok) Logger.log(`Setup: row-level security — ${statements.map((x) => x.split('\n')[0]).join(' · ')}`);
+            return { ...result, statements };
+        };
+        api.post('/rls/sql', (request, reply) => rlsChange(request, reply, false));
+        api.post('/rls/apply', (request, reply) => rlsChange(request, reply, true));
+
+        /** A test call of a service endpoint, with the unsaved configuration */
+        api.post('/services/test', async (request) => {
+            const body = (request.body ?? {}) as { service?: string; endpoint?: string; params?: Record<string, unknown> };
+            const files = filesOf(request);
+            const { sections } = await context(files);
+            const values = merged(sections, changesOf(request));
+            const params = Object.fromEntries(Object.entries(body.params ?? {}).map(([k, v]) => [k, String(v ?? '')]));
+            const text = files.app ?? readConfigText(root, 'app') ?? '{}';
+            return testService(text, String(body.service ?? ''), String(body.endpoint ?? ''), params, values);
         });
 
         api.post('/admin/status', async (request) => {
@@ -248,57 +359,54 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return result;
         });
 
-        api.get('/file/:id', async (request, reply) => {
-            const rel = FILES[(request.params as { id: string }).id];
-            if (!rel) return reply.code(404).send({ error: 'Unknown file' });
-            return readConfigFile(root, rel);
-        });
-
-        api.put('/file/:id', async (request, reply) => {
-            const rel = FILES[(request.params as { id: string }).id];
-            if (!rel) return reply.code(404).send({ error: 'Unknown file' });
-            const content = String((request.body as any)?.content ?? '');
-            try {
-                const parsed = JSON.parse(content);
-                if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('must be a JSON object');
-            } catch (err) {
-                return reply.code(400).send({ error: `Invalid JSON: ${(err as Error).message}` });
-            }
-            const file = path.join(root, rel);
-            writeEnvFile(file, content.endsWith('\n') ? content : `${content}\n`);
-            fs.chmodSync(file, 0o644); // a config file, not a secret store
-            Logger.log(`Setup: wrote ${rel}`);
-            return readConfigFile(root, rel);
-        });
-
         api.post('/export', async (request, reply) => {
             const format = ((request.body as any)?.format ?? 'env') as ExportFormat;
             if (!['env', 'compose', 'kubernetes', 'shell'].includes(format)) return reply.code(400).send({ error: 'Unknown format' });
-            const { sections } = await context();
+            const { sections } = await context(filesOf(request));
             const values = merged(sections, changesOf(request));
             const keys = new Set(sections.flatMap((s) => s.settings.map((x) => x.key)));
             return { text: exportSettings(Object.fromEntries(Object.entries(values).filter(([k]) => keys.has(k))), format, sections) };
         });
 
+        /** Write the env changes and the staged config files — everything validated first */
         const save = async (request: FastifyRequest, reply: FastifyReply) => {
-            const { project, sections } = await context();
+            const files = filesOf(request);
+            const { project, sections } = await context(files);
             const changes = changesOf(request);
             const values = merged(sections, changes);
             const validation = validate(values, sections, project);
             const invalid = Object.keys(changes).filter((k) => validation.errors[k]);
-            if (invalid.length > 0) {
+            const problems = await fileProblems(files);
+            if (invalid.length > 0 || Object.keys(problems).length > 0) {
                 reply.code(400);
-                return { error: 'Some values are invalid', validation };
+                return { error: invalid.length ? 'Some values are invalid' : 'Some files are invalid', validation, fileProblems: problems };
             }
             try {
                 const result = saveSettings(changes, sections, envFilePath());
                 for (const key of Object.keys(changes)) delete suggested[key];
-                Logger.log(`Setup: saved ${result.written.length + result.removed.length} setting(s) to ${result.file}`);
-                return { saved: result, validation: validate(merged(sections), sections, project) };
+                if (result.written.length + result.removed.length > 0) {
+                    Logger.log(`Setup: saved ${result.written.length + result.removed.length} setting(s) to ${result.file}`);
+                }
+                const written = writeConfigFiles(root, files);
+                if (written.length > 0) Logger.log(`Setup: wrote ${written.join(', ')}`);
+                // The API must read what was just written — not modules or config loaded before
+                forgetConfigModules();
+                resetAppConfig();
+                // A fresh schema follows the database it now points to (the scaffold says postgresql)
+                const schema = 'DATABASE_URL' in changes ? alignSchemaProvider(root, process.env.DATABASE_URL) : { changed: false };
+                if (schema.changed) Logger.log(`Setup: prisma/schema.prisma datasource provider set to ${schema.to}`);
+                const after = await context();
+                return {
+                    saved: result,
+                    files: written,
+                    texts: Object.fromEntries((Object.keys(CONFIG_FILES) as ConfigFileId[]).map((id) => [id, readConfigText(root, id)])),
+                    schema,
+                    validation: validate(merged(after.sections), after.sections, after.project),
+                };
             } catch (err: any) {
                 reply.code(500);
                 return { error: err?.code === 'EACCES' || err?.code === 'EROFS'
-                    ? `Cannot write ${envFilePath()} (${err.code}) — set ENV_FILE to a writable path, or copy the export into your environment`
+                    ? `Cannot write ${err?.path ?? envFilePath()} (${err.code}) — set ENV_FILE to a writable path, or copy the export into your environment`
                     : `Saving failed: ${err?.message || err}` };
             }
         };
@@ -307,19 +415,20 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
 
         api.post('/finish', async (request, reply) => {
             // Never start with throwaway secrets: generated ones still unset are saved too
-            const body = (request.body ?? {}) as { changes?: Values };
+            const body = (request.body ?? {}) as { changes?: Values; files?: StagedFiles };
             body.changes = { ...Object.fromEntries(Object.entries(suggested).filter(([k]) => !process.env[k])), ...(body.changes ?? {}) };
             (request as any).body = body;
-            if (Object.keys(changesOf(request)).length > 0) {
+            if (Object.keys(changesOf(request)).length > 0 || Object.keys(filesOf(request)).length > 0) {
                 const saved = await save(request, reply);
                 if (reply.statusCode >= 400) return saved;
             }
-            const reasons = options.mode === 'first-boot' ? await setupReasons(root) : [];
+            const reasons = await setupReasons(root);
             if (reasons.length > 0) {
                 return reply.code(409).send({ error: 'The API still cannot start', reasons });
             }
+            forgetConfigModules();
             const port = Number(process.env.PORT || 3000);
-            reply.send({ ok: true, mode: options.mode, port });
+            reply.send({ ok: true, port });
             // Hand over after the response is out
             setImmediate(finish);
             return reply;
@@ -346,11 +455,12 @@ export async function runWebWizard(options: WizardOptions): Promise<void> {
     const announce = options.announce ?? ((url: string, password: string) => {
         const lines = [
             '',
-            options.mode === 'first-boot' ? '  Rapidd is not configured yet — the setup wizard is running.' : '  Rapidd setup wizard',
+            options.reasons?.length || options.mode !== 'on'
+                ? '  Rapidd is not configured yet — the setup wizard is running.'
+                : '  SETUP_WIZARD=on — the setup wizard is running; the API starts when you finish it.',
             ...(options.reasons ?? []).map((r) => `    · ${r.key}: ${r.message}`),
             '',
             `  Open:  ${url}?password=${encodeURIComponent(password)}`,
-            '  (or run `npm run setup` in a terminal)',
             '',
         ];
         // Printed, not logged: the password must not end up in log files or aggregators

@@ -1,6 +1,10 @@
 import fs from 'fs';
 import path from 'path';
-import { envFilePath } from './envfile';
+import { envFilePath, writeEnvFile } from './envfile';
+import { detectProvider } from '../core/adapter';
+import { isConfigContext } from '../core/rlsRules';
+import { codeAcl } from './models';
+import { readConfigText } from './files';
 import type { DMMF, DMMFField, DMMFModel } from '../types';
 
 /**
@@ -47,7 +51,10 @@ export interface ProjectInfo {
     client: { generated: boolean };
     migrations: boolean;
     generated: { models: number; routes: number };
-    acl: { exists: boolean; missing: string[]; error?: string };
+    /** Access control: config/acl.json rules and src/config/acl.ts code; models with neither */
+    acl: { codeFile: string | null; rules: boolean; missing: string[]; error?: string };
+    /** Where the RLS variables come from: config/rls.json, or a function in src/config/rls.ts */
+    rls: { source: 'config' | 'code'; error?: string };
     configFiles: Record<'app' | 'rateLimit', ConfigFileInfo>;
     locales: string[];
     tools: { prisma: boolean; rapiddBuild: boolean };
@@ -58,6 +65,49 @@ const USER_MODEL_NAMES = ['user', 'users', 'account', 'accounts'];
 const PASSWORD_FIELD_NAMES = ['password', 'hash', 'passwordhash', 'password_hash', 'passwd', 'pwd', 'hashed_password'];
 const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
 const ACCESS_FIELD = /role|admin|status|active|enabled|verified|approved|type|level|permission/i;
+
+const DATASOURCE_PROVIDER = /(datasource\s+\w+\s*\{[^}]*?provider\s*=\s*")(\w+)(")/;
+
+/** The datasource provider of schema source (postgresql, mysql, ...) */
+export function schemaProvider(source: string): string | null {
+    return DATASOURCE_PROVIDER.exec(source)?.[2] ?? null;
+}
+
+/** The provider the generated Prisma client was built for — null when there is no client */
+export function clientProvider(root: string): string | null {
+    try {
+        return schemaProvider(fs.readFileSync(path.join(root, 'prisma', 'client', 'schema.prisma'), 'utf8'));
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * A fresh schema (no models yet) follows the database: its datasource provider is set to
+ * the one DATABASE_URL needs — the scaffold says postgresql, a MySQL / MariaDB database needs
+ * mysql. A schema with models is never changed (that is a real mismatch).
+ */
+export function alignSchemaProvider(root: string, url: string | undefined): { changed: boolean; from?: string; to?: string } {
+    if (!url) return { changed: false };
+    const file = path.join(root, 'prisma', 'schema.prisma');
+    let source: string;
+    try {
+        source = fs.readFileSync(file, 'utf8');
+    } catch {
+        return { changed: false };
+    }
+    const from = schemaProvider(source);
+    const to = detectProvider(url);
+    if (!from || from === to || /^\s*model\s+\w+/m.test(source)) return { changed: false, from: from ?? undefined, to };
+    writeEnvFile(file, source.replace(DATASOURCE_PROVIDER, `$1${to}$3`));
+    fs.chmodSync(file, 0o644);
+    return { changed: true, from, to };
+}
+
+/** Prisma's CLI accepts mysql:// only — a mariadb:// URL (fine for the app) is passed on as mysql:// */
+export function cliDatabaseUrl(url: string): string {
+    return url.replace(/^mariadb:\/\//, 'mysql://');
+}
 
 /** Locate a package's bin script from the project (handles hoisting) */
 export function findBin(pkg: string, root: string = process.cwd()): string | null {
@@ -90,17 +140,26 @@ function writable(file: string): boolean {
     }
 }
 
-export function readConfigFile(root: string, rel: string): ConfigFileInfo & { content: string } {
-    const file = path.join(root, rel);
-    let content = '';
-    try {
-        content = fs.readFileSync(file, 'utf8');
-    } catch {
-        return { path: rel, exists: false, valid: true, envRefs: [], content: '' };
-    }
-    const envRefs = new Map<string, string | undefined>();
+/** ${NAME} / ${NAME:-default} references in a config text */
+export function envRefsOf(content: string): ConfigFileInfo['envRefs'] {
+    const refs = new Map<string, string | undefined>();
     for (const match of content.matchAll(ENV_REF)) {
-        if (!envRefs.has(match[1])) envRefs.set(match[1], match[2]);
+        if (!refs.has(match[1])) refs.set(match[1], match[2]);
+    }
+    return [...refs].map(([name, def]) => (def === undefined ? { name } : { name, default: def }));
+}
+
+/** A config file — or, when given, its staged content (not yet saved) */
+export function readConfigFile(root: string, rel: string, staged?: string): ConfigFileInfo & { content: string } {
+    let content = '';
+    if (staged !== undefined) {
+        content = staged;
+    } else {
+        try {
+            content = fs.readFileSync(path.join(root, rel), 'utf8');
+        } catch {
+            return { path: rel, exists: false, valid: true, envRefs: [], content: '' };
+        }
     }
     let valid = true;
     let error: string | undefined;
@@ -111,10 +170,7 @@ export function readConfigFile(root: string, rel: string): ConfigFileInfo & { co
         valid = false;
         error = (err as Error).message;
     }
-    return {
-        path: rel, exists: true, valid, error, content,
-        envRefs: [...envRefs].map(([name, def]) => (def === undefined ? { name } : { name, default: def })),
-    };
+    return { path: rel, exists: true, valid, error, content, envRefs: envRefsOf(content) };
 }
 
 type SchemaInfo = { dmmf: DMMF | null; provider: string | null; error?: string; exists: boolean };
@@ -142,7 +198,7 @@ export async function readSchema(root: string): Promise<SchemaInfo> {
 }
 
 async function parseSchema(source: string): Promise<SchemaInfo> {
-    const provider = /datasource\s+\w+\s*\{[^}]*provider\s*=\s*"(\w+)"/.exec(source)?.[1] ?? null;
+    const provider = schemaProvider(source);
     try {
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const { getDMMF } = require('@prisma/internals');
@@ -197,25 +253,56 @@ export function describeUserModel(dmmf: DMMF, env: Record<string, string | undef
     return { model: model.name, passwordField, identifierFields, fields };
 }
 
-export async function inspectProject(root: string = process.cwd(), env: Record<string, string | undefined> = process.env): Promise<ProjectInfo> {
+/** Drop src/config/acl and src/config/rls from the module cache — they read the rules files when loaded */
+export function forgetConfigModules(): void {
+    for (const id of ['../config/acl', '../config/rls']) {
+        try {
+            delete require.cache[require.resolve(id)];
+        } catch {
+            // not there
+        }
+    }
+}
+
+/** Where the RLS variables come from — src/config/rls.ts built from config/rls.json, or its own function */
+function rlsSource(): ProjectInfo['rls'] {
+    try {
+        const resolved = require.resolve('../config/rls');
+        delete require.cache[resolved];
+        // eslint-disable-next-line @typescript-eslint/no-require-imports
+        const loaded = require(resolved);
+        return { source: isConfigContext(loaded.default || loaded) ? 'config' : 'code' };
+    } catch (err) {
+        return { source: 'config', error: (err as Error).message.split('\n')[0] };
+    }
+}
+
+export async function inspectProject(
+    root: string = process.cwd(),
+    env: Record<string, string | undefined> = process.env,
+    staged: { app?: string } = {},
+): Promise<ProjectInfo> {
     const envPath = envFilePath();
     const schema = await readSchema(root);
     const models = schema.dmmf?.datamodel.models ?? [];
 
-    let acl: ProjectInfo['acl'] = { exists: false, missing: [] };
-    const aclFile = ['src/config/acl.ts', 'src/config/acl.js', 'dist/src/config/acl.js'].some((f) => fs.existsSync(path.join(root, f)));
-    if (aclFile) {
+    const code = codeAcl(root);
+    let rules: Record<string, unknown> = {};
+    let rulesError: string | undefined;
+    const rulesText = readConfigText(root, 'acl');
+    if (rulesText !== null) {
         try {
-            // Fresh on every call: `rapidd build` may have just written it
-            delete require.cache[require.resolve('../config/acl')];
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            const loaded = require('../config/acl');
-            const configured = (loaded.default || loaded)?.model ?? {};
-            acl = { exists: true, missing: models.map((m) => m.name).filter((n) => !Object.prototype.hasOwnProperty.call(configured, n)) };
+            rules = JSON.parse(rulesText)?.models ?? {};
         } catch (err) {
-            acl = { exists: true, missing: [], error: (err as Error).message.split('\n')[0] };
+            rulesError = `config/acl.json: ${(err as Error).message}`;
         }
     }
+    const acl: ProjectInfo['acl'] = {
+        codeFile: code.file,
+        rules: rulesText !== null,
+        missing: models.map((m) => m.name).filter((n) => !code.models.includes(n) && !Object.prototype.hasOwnProperty.call(rules, n)),
+        ...(code.error || rulesError ? { error: code.error ?? rulesError } : {}),
+    };
 
     let clientGenerated = false;
     try {
@@ -232,7 +319,7 @@ export async function inspectProject(root: string = process.cwd(), env: Record<s
         locales = [];
     }
 
-    const { content: _app, ...app } = readConfigFile(root, 'config/app.json');
+    const { content: _app, ...app } = readConfigFile(root, 'config/app.json', staged.app);
     const { content: _rl, ...rateLimit } = readConfigFile(root, 'config/rate-limit.json');
 
     return {
@@ -259,6 +346,7 @@ export async function inspectProject(root: string = process.cwd(), env: Record<s
             routes: countFiles(path.join(root, 'routes', 'api'), /\.(ts|js)$/),
         },
         acl,
+        rls: rlsSource(),
         configFiles: { app, rateLimit },
         locales,
         tools: { prisma: !!findBin('prisma', root), rapiddBuild: !!findBin('@rapidd/build', root) },
