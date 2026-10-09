@@ -15,21 +15,22 @@ export function isRedisConfigured(): boolean {
  *   A database number in the URL wins over the per-purpose `db` passed here.
  * - `REDIS_USERNAME` / `REDIS_PASSWORD` for Redis 6+ ACL users.
  * - `REDIS_TLS=true` enables TLS for host/port configs (managed Redis on Azure/AWS/GCP).
+ * - `env` defaults to process.env (the setup wizard passes the settings being edited).
  */
-export function createRedisClient(options: RedisOptions = {}): Redis {
+export function createRedisClient(options: RedisOptions = {}, env: NodeJS.ProcessEnv = process.env): Redis {
     const shared: RedisOptions = {
-        ...(process.env.REDIS_USERNAME ? { username: process.env.REDIS_USERNAME } : {}),
-        ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}),
-        ...(process.env.REDIS_TLS === 'true' ? { tls: {} } : {}),
+        ...(env.REDIS_USERNAME ? { username: env.REDIS_USERNAME } : {}),
+        ...(env.REDIS_PASSWORD ? { password: env.REDIS_PASSWORD } : {}),
+        ...(env.REDIS_TLS === 'true' ? { tls: {} } : {}),
         ...options,
     };
 
-    if (process.env.REDIS_URL) {
-        return new Redis(process.env.REDIS_URL, shared);
+    if (env.REDIS_URL) {
+        return new Redis(env.REDIS_URL, shared);
     }
     return new Redis({
-        host: process.env.REDIS_HOST || 'localhost',
-        port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        host: env.REDIS_HOST || 'localhost',
+        port: parseInt(env.REDIS_PORT || '6379', 10),
         ...shared,
     });
 }

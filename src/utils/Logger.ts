@@ -26,17 +26,20 @@ function parseLevel(value: string | undefined): LogLevel {
 
 // ── State ────────────────────────────────────────────────────────────────────
 
-const _level: LogLevel = parseLevel(process.env.LOG_LEVEL);
-const _format: LogFormat = process.env.LOG_FORMAT === 'json' ? 'json' : 'text';
-const _silent: boolean = process.env.NODE_ENV === 'test';
-const _logDir: string = process.env.LOG_DIR ?? 'logs';
+// Read from the environment at load and again by Logger.configure() — e.g. after the setup
+// wizard has written the configuration
+let _level: LogLevel = parseLevel(process.env.LOG_LEVEL);
+let _format: LogFormat = process.env.LOG_FORMAT === 'json' ? 'json' : 'text';
+let _silent: boolean = process.env.NODE_ENV === 'test';
+let _logDir: string = process.env.LOG_DIR ?? 'logs';
 const _context = new AsyncLocalStorage<LogContext>();
 
 // ── Redaction ────────────────────────────────────────────────────────────────
 
 // Bodies and headers are only logged at `finest` — and must never leak credentials there
-const SENSITIVE_HEADERS = new Set(['authorization', 'cookie', 'set-cookie', 'proxy-authorization',
+const sensitiveHeaders = () => new Set(['authorization', 'cookie', 'set-cookie', 'proxy-authorization',
     (process.env.AUTH_CUSTOM_HEADER || 'x-auth-token').toLowerCase()]);
+let SENSITIVE_HEADERS = sensitiveHeaders();
 const SENSITIVE_KEY = /pass(word|wd)?$|secret|token|ticket|authorization|api[-_]?key|private[-_]?key/i;
 const REDACTED = '[REDACTED]';
 
@@ -227,6 +230,21 @@ function textLine(tag: string, message: string, data: unknown[]): string {
 // ── Logger ───────────────────────────────────────────────────────────────────
 
 export const Logger = {
+    /**
+     * Re-read LOG_LEVEL, LOG_FORMAT, LOG_DIR and AUTH_CUSTOM_HEADER from the environment.
+     * Open log files are closed first, so a new LOG_DIR takes effect.
+     */
+    configure(): void {
+        for (const stream of _streams.values()) stream.end();
+        _streams.clear();
+        _level = parseLevel(process.env.LOG_LEVEL);
+        _format = process.env.LOG_FORMAT === 'json' ? 'json' : 'text';
+        _silent = process.env.NODE_ENV === 'test';
+        _logDir = process.env.LOG_DIR ?? 'logs';
+        _dirChecked = false;
+        SENSITIVE_HEADERS = sensitiveHeaders();
+    },
+
     /** Active log level (from LOG_LEVEL env) — lets callers skip expensive capture work */
     get level(): LogLevel {
         return _level;

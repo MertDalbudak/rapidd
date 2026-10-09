@@ -7,11 +7,11 @@
 #
 # Redis 7 (:56379), OpenLDAP (:51389, no memberOf overlay — like many real installs),
 # Keycloak 26 (:58080, realm "corp", confidential client "rapidd-api", user alice/alice-pass
-# with realm role "admin").
+# with realm role "admin"), PostgreSQL 16 (:56543, postgres/pw, database "app").
 set -euo pipefail
 
 if [[ "${1:-}" == "down" ]]; then
-    docker rm -f rapidd-it-redis rapidd-it-ldap rapidd-it-kc >/dev/null 2>&1 || true
+    docker rm -f rapidd-it-redis rapidd-it-ldap rapidd-it-kc rapidd-it-pg >/dev/null 2>&1 || true
     echo "integration containers removed"
     exit 0
 fi
@@ -28,6 +28,7 @@ ensure() { # name, docker run args...
 ensure rapidd-it-redis -p 56379:6379 redis:7-alpine
 ensure rapidd-it-ldap -p 51389:389 -e LDAP_ORGANISATION=Corp -e LDAP_DOMAIN=corp.example -e LDAP_ADMIN_PASSWORD=adminpw osixia/openldap:1.5.0
 ensure rapidd-it-kc -p 58080:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:26.4 start-dev
+ensure rapidd-it-pg -p 56543:5432 -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=app postgres:16-alpine
 
 # ── OpenLDAP ────────────────────────────────────────────
 LDAP=(docker exec rapidd-it-ldap)
@@ -36,7 +37,8 @@ for _ in $(seq 1 60); do
     sleep 1
 done
 if ! "${LDAP[@]}" ldapsearch -x -H ldap://localhost -b ou=people,dc=corp,dc=example -D cn=admin,dc=corp,dc=example -w adminpw -s base >/dev/null 2>&1; then
-    "${LDAP[@]}" sh -c 'cat > /tmp/seed.ldif' <<'LDIF'
+    # -i: without it docker exec does not pass stdin, and the seed file would be empty
+    docker exec -i rapidd-it-ldap sh -c 'cat > /tmp/seed.ldif' <<'LDIF'
 dn: ou=people,dc=corp,dc=example
 objectClass: organizationalUnit
 ou: people

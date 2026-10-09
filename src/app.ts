@@ -1,4 +1,4 @@
-import 'dotenv/config';
+import './setup/env'; // ENV_FILE / .env — before anything reads the environment
 import path from 'path';
 import fs from 'fs';
 import { randomUUID } from 'crypto';

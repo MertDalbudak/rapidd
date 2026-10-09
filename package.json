@@ -64,6 +64,7 @@
     "build": "tsc",
     "test": "jest --forceExit",
     "typecheck": "tsc --noEmit",
+    "setup": "tsx main.ts setup",
     "test:integration": "bash __test__/integration/setup.sh && RAPIDD_IT=1 jest __test__/integration --forceExit"
   },
   "engines": {

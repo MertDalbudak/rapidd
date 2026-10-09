@@ -44,6 +44,13 @@ export async function loadDMMF(): Promise<DMMF> {
     return _dmmfPromise;
 }
 
+/** Forget the loaded DMMF — the next loadDMMF() reads the schema again (setup wizard, tests) */
+export function resetDMMF(): void {
+    _dmmf = null;
+    _dmmfPromise = null;
+    clearModelCaches();
+}
+
 /**
  * Get cached DMMF synchronously (must call loadDMMF first)
  */

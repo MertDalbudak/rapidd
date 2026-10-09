@@ -1,9 +1,12 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import path from 'path';
-import type { RLSVariables, DatabaseProvider, AdapterResult, AclConfig } from '../types';
+import type { RLSVariables, DatabaseProvider, AclConfig } from '../types';
 import * as dmmf from './dmmf';
 import { Logger } from '../utils/Logger';
 import { applyAclDefault } from './acl';
+import { createAdapter } from './adapter';
+
+export { createAdapter };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'client'));
@@ -22,50 +25,6 @@ function validateIdentifier(value: string, name: string): string {
 
 /** RLS namespace for SQL session variable prefix */
 const RLS_NAMESPACE = validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE');
-
-// =====================================================
-// DATABASE ADAPTER FACTORY
-// =====================================================
-
-function detectProvider(connectionString: string): DatabaseProvider {
-    if (!connectionString) return 'postgresql';
-    if (connectionString.startsWith('mysql://') || connectionString.startsWith('mariadb://')) {
-        return 'mysql';
-    }
-    return 'postgresql';
-}
-
-function parseMySQLConnectionString(connectionString: string): Record<string, unknown> {
-    const url = new URL(connectionString);
-    return {
-        host: url.hostname,
-        port: parseInt(url.port, 10) || 3306,
-        user: url.username,
-        password: url.password,
-        database: url.pathname.slice(1),
-        connectionLimit: 10,
-    };
-}
-
-export function createAdapter(connectionString: string, provider: string | null = null): AdapterResult {
-    const detectedProvider = (provider || process.env.DATABASE_PROVIDER || detectProvider(connectionString)) as DatabaseProvider;
-
-    if (detectedProvider === 'mysql' || (detectedProvider as string) === 'mariadb') {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { PrismaMariaDb } = require('@prisma/adapter-mariadb');
-        const config = parseMySQLConnectionString(connectionString);
-        const adapter = new PrismaMariaDb(config);
-        return { adapter, pool: null, provider: 'mysql' };
-    } else {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { PrismaPg } = require('@prisma/adapter-pg');
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { Pool } = require('pg');
-        const pool = new Pool({ connectionString });
-        const adapter = new PrismaPg(pool);
-        return { adapter, pool, provider: 'postgresql' };
-    }
-}
 
 // =====================================================
 // BASE PRISMA CLIENTS

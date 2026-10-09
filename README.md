@@ -35,12 +35,14 @@ mkdir my-api && cd my-api
 npx @rapidd/core create-project && npm install
 ```
 
-Set `DATABASE_URL` in `.env`, then add your schema in `prisma/schema.prisma`(or create from DB via `npx prisma db pull`):
-
 ```bash
-npx rapidd build            # generate models, routes & ACL scaffold
-npm run dev                 # http://localhost:3000
+npm run dev                 # not configured yet → opens the setup wizard
 ```
+
+The console prints a link to the **setup wizard**: connect and test the database, read the
+schema from it (or create the tables from yours), generate the Prisma client, models, routes and
+ACL, create the first user — then the API starts, in the same process. Prefer the terminal?
+`npm run setup` does the same, and `npm run setup -- --show / --check / --set / --export` script it.
 
 Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
 
@@ -236,6 +238,9 @@ npm run build && npm start
 docker build -t my-api . && docker run -p 3000:3000 --env-file .env my-api
 ```
 
+`npm run setup -- --check` tests the database, Redis and identity providers before a rollout;
+`npm run setup -- --export kubernetes` writes the configuration as a Kubernetes Secret.
+
 **Security defaults in production:** HSTS, Content-Security-Policy, X-Content-Type-Options, Referrer-Policy, and CORS with explicit origin whitelisting — all enabled automatically.
 
 **Operations built in:** `GET /health` and `GET /health/ready` (database + session store), graceful shutdown on `SIGTERM` that drains in-flight requests, `X-Request-Id` on every response and every log line, credential redaction in logs, and an `errorReporter` hook for Sentry & co.
@@ -269,7 +274,7 @@ npx rapidd build                   # generate from schema (after npm install)
 
 Full documentation: **[github.com/MertDalbudak/rapidd/wiki](https://github.com/MertDalbudak/rapidd/wiki)**
 
-[Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) · [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) · [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) · [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) · [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) · [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) · [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) · [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) · [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) · [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) · [i18n](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) · [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)
+[Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) · [Setup Wizard](https://github.com/MertDalbudak/rapidd/wiki/Setup) · [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) · [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) · [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) · [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) · [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) · [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) · [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) · [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) · [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) · [i18n](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) · [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)
 
 ---
 

@@ -10,7 +10,8 @@ do **not** reach existing projects via `npm update` — see the linked section f
 
 Enterprise sign-in (LDAP / Active Directory, OpenID Connect / OAuth2, WebDAV), hardened sessions,
 and the operational basics production deployments need: health checks, graceful shutdown, request
-ids, structured logs. The built-in Mailer is removed — apps use the mail library of their choice.
+ids, structured logs. A setup wizard — in the browser on first start, or `npm run setup` — shows and
+configures everything. The built-in Mailer is removed — apps use the mail library of their choice.
 
 > **Read before upgrading — breaking or client-visible changes:**
 > 1. **Mailer removed** (`src/utils/Mailer.ts`, `templates/`, `config/app.json` → `emails`, and the
@@ -40,6 +41,12 @@ ids, structured logs. The built-in Mailer is removed — apps use the mail libra
 > 11. `upsertMany` results gained `skipped`, and `totalFailed` counts records (a failed bulk insert
 >     counts all of its rows, not 1).
 > 12. Client errors (4xx) are logged at `warn` instead of `error`.
+> 13. **`main.ts` serves the setup wizard while the API cannot start** (no `DATABASE_URL`, Prisma
+>     client not generated, ...) instead of exiting — adopt the new `main.ts` to get it, and set
+>     `SETUP_WIZARD=off` where a missing setting should still fail fast. Only problems that already
+>     stopped the API open it, so a deployment that starts today keeps starting.
+> 14. The Docker image sets `ENV_FILE=/app/data/.env` and declares `/app/data` a volume (where the
+>     wizard saves its settings).
 
 ### Added — authentication
 
@@ -121,6 +128,49 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   every cookie request; memory sessions return copies (mutating `request.user` no longer rewrites the
   session) and are capped; login tickets and OAuth codes are redacted from logged URLs.
 
+### Added — setup wizard
+
+- **First-boot wizard in the browser**: while the API cannot start, `npm run dev` / `npm start`
+  serve it instead (link with a setup password in the console) and start the API in the same
+  process when it is done. Every setting the API reads — with its real default, help text, source
+  (env file / environment / default) and validation — grouped by area; LDAP / OIDC / WebDAV pages
+  appear when the provider is enabled.
+- **Connection tests**: database (version, tables), Redis, LDAP (each server, the service account,
+  a test sign-in showing the mapped identity), OIDC (discovery, signing keys, the redirect URI to
+  register), WebDAV — failures explained ("Authentication failed — check user name and password").
+- **Schema & code**: generate the Prisma client, `db pull`, create tables, `migrate deploy`,
+  `rapidd build` — each guarded (no pull over existing models, no push into a database that has
+  the tables). **First user**: created from a form that follows the user model, only while the
+  table is empty.
+- **Config files** (`config/app.json`, `config/rate-limit.json`) with JSON validation; `${NAME}`
+  references in `app.json` become settings. **Exports**: `.env`, docker compose, Kubernetes
+  Secret, shell.
+- **`npm run setup`** — the same in the terminal, plus scriptable `--show`, `--check` (exit code 1
+  on failure), `--set` / `--unset`, `--generate-secrets`, `--export`, `--web`; `npx rapidd setup`.
+- Env file handling: `ENV_FILE` (default `.env`), atomic writes with `0600` permissions and a
+  `.bak` backup, in-place updates that keep comments and order, quoting verified against dotenv.
+- Security: a setup password (random per start, or `SETUP_PASSWORD`) exchanged for an `HttpOnly` /
+  `SameSite=Strict` cookie, a header required against cross-site requests, lockout after 10 wrong
+  passwords, CSP with nonces and no external resources,
+  secrets masked in the page, `/health` 200 / `/health/ready` 503 while in setup.
+- Internals: `Logger.configure()` re-reads the log settings; `createRedisClient(options, env)`;
+  `resetDMMF()`; side-effect-free `core/adapter` (`createAdapter` is still exported from
+  `core/prisma`); the settings catalog `src/setup/catalog.ts`, kept in step with the code by a test.
+
+### Changed — configuration layout
+
+- `.env.example` is grouped — SERVER, DATA STORES, AUTHENTICATION, SECURITY, API, OPERATIONS.
+  Every `AUTH_*`, `JWT_*`, `DB_USER_*`, `LDAP_*`, `OIDC_*` and `WEBDAV_*` variable sits under
+  AUTHENTICATION, ordered in subsections: providers, tokens, sessions, session transport, user
+  table, external identities, then LDAP / OIDC / WebDAV (`AUTH_LOGIN_REDIRECT` moved next to OIDC).
+  Settings that belong elsewhere but matter for sign-in say so (`PUBLIC_URL` for OIDC callbacks,
+  `COOKIE_SECRET` for auth cookies). CORS & cookies, rate limiting and access control (ACL and
+  row-level security, before in separate places) form SECURITY; the ApiClient's timeouts moved out
+  of the API settings into their own section. No variable or value changed.
+- The setup wizard, `npm run setup -- --show` and the Configuration wiki follow the same groups;
+  the wizard writes new settings into that structure. A test fails when `.env.example` and the
+  settings catalog disagree.
+
 ### Added — verification
 
 - Opt-in integration tests against real servers (`npm run test:integration`: Redis 7, OpenLDAP,
@@ -146,6 +196,15 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
 - `ErrorResponse` now exposes `statusCode` (Fastify, Sentry) and its class `name`; security headers
   respect a CSP the handler set; i18n renders object parameters as JSON; the `lang` cookie is
   validated against the allowed languages; the 404 body carries its `key`.
+
+### Fixed — tooling
+
+- `npx @rapidd/core build` always answered "@rapidd/build is not installed" (it looked for
+  `bin/cli.js`; the package ships `dist/bin/cli.js`).
+- MySQL / MariaDB connection strings with URL-encoded credentials (`p%40ss` for `p@ss`) failed to
+  authenticate — user, password and database name are now decoded.
+- `__test__/integration/setup.sh` seeded an empty LDIF into fresh OpenLDAP containers (`docker exec`
+  without `-i` passes no stdin); PostgreSQL 16 joins the integration environment.
 
 ### Fixed — ORM (QueryBuilder / Model)
 
