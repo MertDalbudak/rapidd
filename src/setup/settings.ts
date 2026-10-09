@@ -165,6 +165,9 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
         }
         case 'PORT':
             return value && (Number(value) < 1 || Number(value) > 65535) ? ['1 – 65535', null] : [null, null];
+        case 'AUTH_SALT_ROUNDS':
+            // What bcrypt accepts
+            return value && (Number(value) < 4 || Number(value) > 31) ? ['4 – 31', null] : [null, null];
         case 'AUTH_PROVIDERS': {
             const providers = listItems(value);
             if (providers.includes('none')) {

@@ -247,6 +247,13 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
   answered `200 … successfully deleted` while the row stayed. Deletes now return `404` then.
 - Duplicate errors name the field again (`409 duplicate_entry`) — the field went missing with
   Prisma 7's driver adapters ("A record with this  already exists").
+- **Token lifetimes as bare numbers**: `AUTH_ACCESS_TOKEN_EXPIRY=3600` made tokens that expired
+  after 3.6 seconds (jsonwebtoken reads a unitless string as milliseconds; `90` expired at once).
+  A bare number is seconds now, as for numbers in code; `15m`, `1d` are unchanged.
+- The setup wizard says what each setting accepts: units (milliseconds, seconds, bytes),
+  separators, the meaning of each option, and — for `DATABASE_URL`, `TRUST_PROXY`, `AUTH_LINK`,
+  `AUTH_ROLE_MAP` and `DB_USER_TABLE` — a reference of accepted values, the common ones a click
+  away. `AUTH_SALT_ROUNDS` is checked against bcrypt's range (4–31).
 - Validation errors say which field and why ("Invalid value for argument `hired_on`: … Expected
   ISO-8601 DateTime."), with `data.field`, instead of a bare "Data validation error".
 - **`DATE` columns** (`@db.Date`): date-only filters selected the wrong day on servers outside

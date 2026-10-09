@@ -203,6 +203,7 @@ export function installComponents(R) {
                 h('span', { class: 'key', text: setting.key })),
             h('div', null, R.fieldInput(setting),
                 setting.help ? h('div', { class: 'help', text: setting.help }) : null,
+                R.fieldDocs[setting.key] ? h('div', { 'data-docs': setting.key }, R.fieldDocs[setting.key]()) : null,
                 h('div', { class: 'meta', 'data-meta': setting.key, hidden: meta.length === 0 }, meta),
                 h('div', { class: 'msg', 'data-msg': setting.key }),
                 R.fieldHints[setting.key] ? h('div', { 'data-hint': setting.key }, R.fieldHints[setting.key]()) : null));
@@ -210,6 +211,8 @@ export function installComponents(R) {
 
     /** Extra guidance under a field, refreshed with every evaluation: key → () => elements */
     R.fieldHints = {};
+    /** What a field accepts, right under its help (refreshed too): key → () => elements */
+    R.fieldDocs = {};
 
     R.updateMessages = () => {
         if (!S.validation) return;
@@ -229,6 +232,11 @@ export function installComponents(R) {
             const meta = setting ? metaBadges(setting) : [];
             el.replaceChildren(...meta);
             el.hidden = meta.length === 0;
+        }
+        for (const el of document.querySelectorAll('[data-docs]')) {
+            const docs = R.fieldDocs[el.getAttribute('data-docs')];
+            el.replaceChildren();
+            if (docs) R.append(el, [docs()]);
         }
         for (const el of document.querySelectorAll('[data-hint]')) {
             const hint = R.fieldHints[el.getAttribute('data-hint')];

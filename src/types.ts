@@ -30,8 +30,9 @@ export interface AuthOptions extends AuthConfig {
     jwt?: {
         secret?: string;
         refreshSecret?: string;
-        accessExpiry?: string;
-        refreshExpiry?: string;
+        /** '15m', '1d' — a bare number is seconds */
+        accessExpiry?: string | number;
+        refreshExpiry?: string | number;
     };
     saltRounds?: number;
     strategies?: AuthStrategy[];

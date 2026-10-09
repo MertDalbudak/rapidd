@@ -138,6 +138,20 @@ main { min-width: 0; padding: 26px 36px 140px; }
 .req { color: var(--bad); margin-left: 3px; }
 .msg { font-size: 13px; margin-top: 6px; display: flex; gap: 6px; align-items: flex-start; }
 .msg:empty { display: none; }
+.ref { margin-top: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-2); font-size: 12.5px; color: var(--text-2); }
+.ref .ref-title { font-weight: 600; color: var(--text); margin-bottom: 8px; }
+.ref dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 7px 14px; margin: 0; align-items: baseline; }
+.ref dt { display: flex; flex-wrap: wrap; gap: 4px; }
+.ref dd { margin: 0; }
+.ref .pick, .ref code { font-family: var(--mono); font-size: 12px; line-height: 1.5; padding: 1px 7px; border-radius: 6px; border: 1px solid var(--border-strong); background: var(--surface); color: var(--text); }
+.ref code { border-style: dashed; border-color: var(--border); background: transparent; color: var(--text-2); }
+.ref .ref-note { font-weight: 400; color: var(--text-3); }
+.ref .pick { cursor: pointer; }
+.ref .pick:hover:not(:disabled) { border-color: var(--brand); color: var(--brand-ink); }
+.ref .pick.on { background: var(--brand-soft); border-color: var(--brand); color: var(--brand-ink); }
+.ref .pick:disabled { cursor: default; opacity: .6; }
+.ref .foot { margin-top: 9px; }
+@media (max-width: 600px) { .ref dl { grid-template-columns: minmax(0, 1fr); gap: 3px; } .ref dd { margin-bottom: 6px; } }
 .msg.error { color: var(--bad); }
 .msg.warning { color: var(--warn); }
 .input, select.input, textarea.input {

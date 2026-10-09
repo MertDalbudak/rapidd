@@ -195,6 +195,21 @@ describe('Auth', () => {
             const header = JSON.parse(Buffer.from(token.split('.')[0], 'base64url').toString());
             expect(header.alg).toBe('HS256');
         });
+
+        it('lifetimes with a unit as given; a bare number (as the environment passes it) is seconds', () => {
+            const lifetime = (accessExpiry: string | number, refreshExpiry: string | number = '7d') => {
+                const a = new Auth({ jwt: { secret: TEST_SECRET, refreshSecret: TEST_REFRESH_SECRET, accessExpiry, refreshExpiry } });
+                const access = jwt.decode(a.generateAccessToken({ id: 1 })) as any;
+                const refresh = jwt.decode(a.generateRefreshToken({ id: 1 }, 'sid')) as any;
+                return [access.exp - access.iat, refresh.exp - refresh.iat];
+            };
+            // jsonwebtoken itself reads "3600" as 3600 ms: tokens that expired almost at once
+            expect(lifetime('3600', '86400')).toEqual([3600, 86400]);
+            expect(lifetime(' 900 ')).toEqual([900, 604800]);
+            expect(lifetime(3600)).toEqual([3600, 604800]);
+            expect(lifetime('15m', '30d')).toEqual([900, 2592000]);
+            expect(lifetime('1.5h')).toEqual([5400, 604800]);
+        });
     });
 
     describe('generateRefreshToken()', () => {

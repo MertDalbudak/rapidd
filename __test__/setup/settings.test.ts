@@ -54,6 +54,12 @@ describe('validate', () => {
         expect(validate({ DATABASE_URL: DB, TRUST_PROXY: '1,2' }, sections).errors.TRUST_PROXY).toBe('one hop count, not 2 (1, 2)');
     });
 
+    it('AUTH_SALT_ROUNDS: what bcrypt accepts', () => {
+        expect(validate({ DATABASE_URL: DB, AUTH_SALT_ROUNDS: '12' }, sections).errors.AUTH_SALT_ROUNDS).toBeUndefined();
+        expect(validate({ DATABASE_URL: DB, AUTH_SALT_ROUNDS: '3' }, sections).errors.AUTH_SALT_ROUNDS).toBe('4 – 31');
+        expect(validate({ DATABASE_URL: DB, AUTH_SALT_ROUNDS: '40' }, sections).errors.AUTH_SALT_ROUNDS).toBe('4 – 31');
+    });
+
     it('a URL for another database than the schema is an error', () => {
         const v = validate({ DATABASE_URL: 'mysql://u:p@h/db' }, sections, { schema: { provider: 'postgresql' } as any });
         expect(v.errors.DATABASE_URL).toMatch(/schema is for postgresql/);

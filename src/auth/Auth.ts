@@ -100,9 +100,17 @@ async function addEntry(store: ISessionStore, key: string, data: Record<string, 
     return true;
 }
 
-/** A jsonwebtoken `expiresIn` value ('7d', '15m', 3600) in seconds */
-function ttlSeconds(expiresIn: string | number): number {
-    const probe = jwt.decode(jwt.sign({}, 'probe', { expiresIn: expiresIn as any })) as jwt.JwtPayload;
+/**
+ * A token lifetime for jsonwebtoken: '15m', '7d' as they are, a bare number in seconds —
+ * jsonwebtoken reads a unitless string ("3600", from the environment) as milliseconds.
+ */
+function expiresIn(value: string | number): string | number {
+    return typeof value === 'string' && /^\d+(\.\d+)?$/.test(value.trim()) ? Number(value) : value;
+}
+
+/** A token lifetime ('7d', '15m', 3600, '3600') in seconds */
+function ttlSeconds(value: string | number): number {
+    const probe = jwt.decode(jwt.sign({}, 'probe', { expiresIn: expiresIn(value) as any })) as jwt.JwtPayload;
     return Math.max(1, (probe.exp ?? 0) - (probe.iat ?? 0));
 }
 
@@ -142,7 +150,7 @@ export class Auth {
         cookieSecure: boolean;
         customHeaderName: string;
         session: { ttl: number; store?: string; maxAge: number };
-        jwt: { secret?: string; refreshSecret?: string; accessExpiry: string; refreshExpiry: string };
+        jwt: { secret?: string; refreshSecret?: string; accessExpiry: string | number; refreshExpiry: string | number };
     };
 
     /** Merged src/config/auth.ts + constructor options + env */
@@ -490,7 +498,7 @@ export class Auth {
         return jwt.sign(
             { sub: user.id, sessionId, user: sanitizedUser },
             this.options.jwt.secret,
-            { algorithm: 'HS256', expiresIn: this.options.jwt.accessExpiry as any }
+            { algorithm: 'HS256', expiresIn: expiresIn(this.options.jwt.accessExpiry) as any }
         );
     }
 
@@ -505,7 +513,7 @@ export class Auth {
         return jwt.sign(
             { sub: user.id, type: 'refresh', ...(sessionId ? { sid: sessionId, jti } : {}) },
             secret,
-            { algorithm: 'HS256', expiresIn: this.options.jwt.refreshExpiry as any }
+            { algorithm: 'HS256', expiresIn: expiresIn(this.options.jwt.refreshExpiry) as any }
         );
     }
 

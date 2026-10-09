@@ -212,8 +212,92 @@ export function installStartPages(R) {
         },
     });
 
+    // ── Accepted values ──────────────────────────────────────────────────
+    /**
+     * "Accepted values" under a field: rows of [values, meaning]. A value given as { use } fills
+     * the field with a click (highlighted while it is the field's value); a string is an example.
+     */
+    function reference(key, title, rows, foot) {
+        const current = (R.value(key) || '').replace(/\s+/g, '');
+        const locked = R.info(key).locked;
+        const all = rows.flatMap(([values]) => values);
+        const clickable = all.some((v) => typeof v !== 'string');
+        const note = !clickable ? null : all.some((v) => typeof v === 'string') ? ' · click a value to use it; dashed ones are examples' : ' · click one to use it';
+        const value = (v) => typeof v === 'string' ? h('code', { text: v })
+            : h('button', { type: 'button', class: 'pick' + (current === v.use.replace(/\s+/g, '') ? ' on' : ''), disabled: locked,
+                title: locked ? 'Set in the environment — change it there' : 'Use ' + v.use, onclick: () => R.setValue(key, v.use, true) }, v.use);
+        return h('div', { class: 'ref' },
+            h('div', { class: 'ref-title' }, title, note ? h('span', { class: 'ref-note', text: note }) : null),
+            h('dl', null, rows.map(([values, text]) => [h('dt', null, values.map(value)), h('dd', null, text)])),
+            foot ? h('div', { class: 'foot' }, foot) : null);
+    }
+    const use = (v) => ({ use: v });
+
     // ── Trusted proxies ──────────────────────────────────────────────────
-    /** How this page came in — Cloudflare, a proxy on this machine — and who the API takes the visitor for */
+    R.fieldDocs.TRUST_PROXY = () => reference('TRUST_PROXY', 'Accepted values — combine them with commas', [
+        [[use('private')], 'Proxies on this machine or in your private network — nginx, Docker, Kubernetes (127.0.0.0/8, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, fc00::/7).'],
+        [[use('cloudflare')], 'Cloudflare’s servers — its published address ranges.'],
+        [[use('private,cloudflare')], 'Cloudflare in front of a proxy on this machine: the usual Cloudflare setup.'],
+        [['10.0.0.0/8', '203.0.113.7'], 'Proxies at these addresses: IPs or CIDR ranges, IPv4 or IPv6.'],
+        [[use('1'), '2'], h('span', null, 'That many proxies in a row, each at a private address. ', h('code', { text: '1,203.0.113.0/24' }), ': one proxy, at those addresses.')],
+        [[use('true')], 'Every proxy: any client can claim any IP. Fine in development, risky in production.'],
+        [[use('false')], 'No proxy: the API sees the proxy’s address instead of the client’s.'],
+    ], 'Empty: every proxy (production logs a warning). loopback, linklocal and uniquelocal — the parts of private — work on their own too.');
+
+    // ── Database connection ──────────────────────────────────────────────
+    R.fieldDocs.DATABASE_URL = () => {
+        const url = R.value('DATABASE_URL') || '';
+        const provider = /^(mysql|mariadb):/.test(url) ? 'mysql' : /^postgres(ql)?:/.test(url) ? 'postgresql' : S.state.project && S.state.project.schema.provider;
+        const rows = [
+            [['postgresql://user:password@host:5432/app'], 'PostgreSQL (postgres:// works too).'],
+            [['mysql://user:password@host:3306/app'], 'MySQL and MariaDB (mariadb:// works too).'],
+            [['%40', '%3A', '%2F', '%23'], 'Special characters in the user or password are URL-encoded: @ → %40, : → %3A, / → %2F, # → %23, ? → %3F, % → %25.'],
+        ];
+        const postgres = [
+            [['schema=store'], 'PostgreSQL: the schema the API works in (default public).'],
+            [['connection_limit=20'], 'Connections in the pool (default 10).'],
+            [['pool_timeout=10'], 'Seconds to wait for a free connection.'],
+            [['sslmode=require'], h('span', null, 'TLS, certificate checked — your own CA with ', h('code', { text: 'sslrootcert=/path/ca.pem' }), '; ', h('code', { text: 'sslmode=no-verify' }), ' skips the check.')],
+        ];
+        const mysql = [
+            [['connection_limit=20'], 'MySQL / MariaDB: connections in the pool (default 10).'],
+            [['connect_timeout=5', 'socket_timeout=30'], 'Seconds to connect · per query.'],
+            [['sslaccept=strict'], h('span', null, 'TLS, certificate checked (', h('code', { text: 'accept_invalid_certs' }), ': not checked); ', h('code', { text: 'ssl=true' }), ' turns TLS on too.')],
+            [['sslcert=ca.pem'], 'The CA file, relative to prisma/.'],
+            [['socket=/run/mysqld/mysqld.sock'], 'Connect through a Unix socket.'],
+            [['allowPublicKeyRetrieval=false'], 'MySQL 8 without TLS needs the server’s key — fetched unless this says false.'],
+        ];
+        const params = provider === 'mysql' ? mysql : provider === 'postgresql' ? postgres : postgres.concat(mysql);
+        return reference('DATABASE_URL', 'Format and parameters', rows.concat(params), 'Parameters follow a ?, joined with &: …/app?schema=store&connection_limit=20.');
+    };
+
+    // ── Identities ───────────────────────────────────────────────────────
+    R.fieldDocs.AUTH_LINK = () => reference('AUTH_LINK', 'Accepted values', [
+        [[use('email')], 'The row whose email column equals the identity’s email (case-insensitive on PostgreSQL). The default.'],
+        [[use('username')], 'Its username column equals the sign-in name at the directory or identity provider.'],
+        [[use('subject')], 'Its subject column equals the identity’s stable id — OIDC sub (OIDC_SUBJECT_CLAIM), LDAP entryUUID or objectGUID.'],
+        [['employee_no:employeeNumber'], 'Any pair, user column : identity attribute — the attribute is email, username, subject, name, or any claim or LDAP attribute.'],
+        [[use('false')], 'No user-table rows: users come from the identity’s claims, their role from AUTH_ROLE_MAP.'],
+    ], 'No matching row: the sign-in is rejected — unless provision in src/config/auth.ts creates one.');
+
+    R.fieldDocs.AUTH_ROLE_MAP = () => reference('AUTH_ROLE_MAP', 'Keys — group or role at the directory or identity provider; values — the role here', [
+        [['"CN=App Admins,OU=Groups,DC=corp,DC=example": "admin"'], 'An LDAP group, as its full DN — case doesn’t matter.'],
+        [['"group:Staff": "staff"'], 'A group with that name — groups only.'],
+        [['"role:editor": "editor"'], 'A role at the identity provider (OIDC roles claim) — roles only.'],
+        [['"Staff": "staff"'], 'A group or a role with exactly that name.'],
+    ], 'A JSON object: {"group:Staff": "staff", "role:editor": "editor"}. The first match wins; no match: AUTH_DEFAULT_ROLE.');
+
+    // ── User table ───────────────────────────────────────────────────────
+    R.fieldDocs.DB_USER_TABLE = () => {
+        const models = (S.state.project && S.state.project.schema.models) || [];
+        if (!models.length) return h('div', { class: 'help', text: 'No models yet — read them from the database under Data model & API.' });
+        const candidates = S.state.project.userModelCandidates || [];
+        const shown = models.slice(0, 40);
+        return reference('DB_USER_TABLE', 'Models in prisma/schema.prisma', [
+            [shown.map(use), candidates.length ? (candidates.join(', ') + (candidates.length === 1 ? ' looks' : ' look') + ' like a user table: a password column and a unique text column.') : 'A user table has a password column and a unique text column (email, username).'],
+        ], models.length > shown.length ? '… and ' + (models.length - shown.length) + ' more — type the name.' : null);
+    };
+
     R.fieldHints.TRUST_PROXY = () => {
         const p = S.proxy;
         if (!p) return null;
