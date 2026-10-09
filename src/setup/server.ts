@@ -19,7 +19,7 @@ import { rlsStatus, rlsStatements, applyRls, RlsSpecError } from './rls';
 import type { RlsOperation } from './rls';
 import { testService } from './services';
 import { setupReasons } from './index';
-import type { SetupReason, WizardMode } from './index';
+import type { SetupReason, WizardLaunch } from './index';
 import { wizardPage, passwordPage } from './ui';
 import { LOGO_PNG } from './ui/logo';
 import { resetAppConfig } from '../core/config';
@@ -36,8 +36,12 @@ import { Logger } from '../utils/Logger';
 export interface WizardOptions {
     /** Why the API cannot start (printed with the link) */
     reasons?: SetupReason[];
-    /** on: opened although the API could start (SETUP_WIZARD=on) */
-    mode?: WizardMode;
+    /**
+     * How it was opened: `auto` — the API cannot start; `on` — SETUP_WIZARD=on; `setup` —
+     * `npm run setup`: finishing ends the wizard without starting the API, and is possible
+     * while the API still cannot start
+     */
+    mode?: WizardLaunch;
     host?: string;
     port?: number;
     /** The setup password (default: SETUP_PASSWORD, else random per start) */
@@ -423,12 +427,14 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
                 if (reply.statusCode >= 400) return saved;
             }
             const reasons = await setupReasons(root);
-            if (reasons.length > 0) {
+            // npm run setup ends here either way — the API is started separately
+            const command = options.mode === 'setup';
+            if (reasons.length > 0 && !command) {
                 return reply.code(409).send({ error: 'The API still cannot start', reasons });
             }
             forgetConfigModules();
             const port = Number(process.env.PORT || 3000);
-            reply.send({ ok: true, port });
+            reply.send(command ? { ok: true, exit: true, reasons } : { ok: true, port });
             // Hand over after the response is out
             setImmediate(finish);
             return reply;
@@ -437,7 +443,14 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
 
     const host = options.host ?? process.env.HOST ?? '0.0.0.0';
     const port = options.port ?? Number(process.env.PORT || 3000);
-    await app.listen({ host, port });
+    try {
+        await app.listen({ host, port });
+    } catch (err: any) {
+        if (err?.code !== 'EADDRINUSE') throw err;
+        throw new Error(options.mode === 'setup'
+            ? `Port ${port} is in use — is the API running? Stop it, or run the setup on another port: PORT=${port + 1} npm run setup`
+            : `Port ${port} is in use`);
+    }
     const address = app.server.address();
     const actualPort = typeof address === 'object' && address ? address.port : port;
     const shownHost = host === '0.0.0.0' || host === '::' ? 'localhost' : host;
@@ -453,11 +466,14 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
 export async function runWebWizard(options: WizardOptions): Promise<void> {
     const handle = await startWizardServer(options);
     const announce = options.announce ?? ((url: string, password: string) => {
+        const headline = options.mode === 'setup'
+            ? `  Rapidd setup — the wizard is running${options.reasons?.length ? '; the API cannot start yet:' : '.'}`
+            : options.reasons?.length || options.mode !== 'on'
+                ? '  Rapidd is not configured yet — the setup wizard is running.'
+                : '  SETUP_WIZARD=on — the setup wizard is running; the API starts when you finish it.';
         const lines = [
             '',
-            options.reasons?.length || options.mode !== 'on'
-                ? '  Rapidd is not configured yet — the setup wizard is running.'
-                : '  SETUP_WIZARD=on — the setup wizard is running; the API starts when you finish it.',
+            headline,
             ...(options.reasons ?? []).map((r) => `    · ${r.key}: ${r.message}`),
             '',
             `  Open:  ${url}?password=${encodeURIComponent(password)}`,

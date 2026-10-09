@@ -37,6 +37,7 @@ npx @rapidd/core create-project && npm install
 
 ```bash
 npm run dev                 # not configured yet → opens the setup wizard
+npm run setup               # the setup wizard, any time
 ```
 
 The console prints a link to the **setup wizard**: connect and test the database, read the

@@ -219,6 +219,10 @@ export function installCore(R) {
         return out;
     };
     R.fileTitles = { app: 'config/app.json', rateLimit: 'config/rate-limit.json', acl: 'config/acl.json', rls: 'config/rls.json' };
+    /** npm run setup ends with saving; at boot, finishing starts the API */
+    R.command = () => S.state.mode === 'setup';
+    R.finishTitle = () => (R.command() ? 'Review & finish' : 'Review & start');
+
     /** Untouched generated secrets are not counted: they are saved with the setup anyway */
     R.generated = (key) => !!S.state.suggested[key] && S.changes[key] === S.state.suggested[key];
     R.unsaved = () => ({ settings: Object.keys(S.changes).filter((k) => !R.generated(k)).length, files: Object.keys(R.stagedFiles()).length });
@@ -378,7 +382,7 @@ export function installCore(R) {
         nodes.push(h('div', { class: 'grow' }));
         nodes.push(h('div', { class: 'finish' },
             h('button', { class: 'btn primary block' + (S.page === 'review' ? ' active' : ''), onclick: () => R.go('review') },
-                R.icon('flag'), 'Review & start', total ? h('span', { class: 'count', style: { background: 'rgba(255,255,255,.25)', borderRadius: '99px', padding: '0 7px', fontSize: '12px' }, text: String(total) }) : null)));
+                R.icon('flag'), R.finishTitle(), total ? h('span', { class: 'count', style: { background: 'rgba(255,255,255,.25)', borderRadius: '99px', padding: '0 7px', fontSize: '12px' }, text: String(total) }) : null)));
         sidebar.replaceChildren(...nodes);
     }
 

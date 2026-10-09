@@ -62,6 +62,7 @@
   "scripts": {
     "start": "node dist/main.js",
     "dev": "tsx watch main.ts",
+    "setup": "tsx main.ts setup",
     "build": "tsc",
     "test": "jest --forceExit",
     "typecheck": "tsc --noEmit",

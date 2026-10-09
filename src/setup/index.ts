@@ -8,8 +8,8 @@ import { ACL_RULES_FILE, loadAclRules } from '../core/aclRules';
 import { RLS_RULES_FILE, loadRlsRules } from '../core/rlsRules';
 
 /**
- * Setup entry point used by main.ts — firstBoot(): while the API cannot start, serve the setup
- * wizard; returns once it is configured.
+ * Setup entry points used by main.ts — firstBoot(): while the API cannot start, serve the setup
+ * wizard and return once it is configured; setupCommand(): `npm run setup`, the wizard on demand.
  */
 
 export interface SetupReason {
@@ -61,6 +61,9 @@ export async function setupReasons(root: string = process.cwd()): Promise<SetupR
 
 export type WizardMode = 'auto' | 'on' | 'off';
 
+/** How the wizard was opened: at boot (`auto`, SETUP_WIZARD=`on`) or by `npm run setup` */
+export type WizardLaunch = Exclude<WizardMode, 'off'> | 'setup';
+
 /**
  * SETUP_WIZARD: auto (default) — serve the wizard while the API cannot start; on — at every
  * start, before the API (to change the access rules, services, ...); off — never
@@ -83,4 +86,20 @@ export async function firstBoot(): Promise<void> {
     const { runWebWizard } = await import('./server');
     await runWebWizard({ reasons, mode });
     Logger.configure();
+}
+
+/**
+ * `npm run setup` (`main.ts setup`, in the image: `docker run … setup`): the wizard whether or
+ * not the API could start — SETUP_WIZARD does not apply. Finishing saves and ends the command;
+ * the API is started as usual (npm run dev / npm start).
+ */
+export async function setupCommand(options: { root?: string; host?: string; port?: number; password?: string } = {}): Promise<SetupReason[]> {
+    const { runWebWizard } = await import('./server');
+    await runWebWizard({ ...options, reasons: await setupReasons(options.root), mode: 'setup' });
+    const remaining = await setupReasons(options.root);
+    const lines = remaining.length > 0
+        ? ['', '  Setup saved — the API cannot start yet:', ...remaining.map((r) => `    · ${r.key}: ${r.message}`), '']
+        : ['', '  Setup saved. Start the API:  npm run dev  (development)  ·  npm start  (production)', ''];
+    process.stdout.write(lines.join('\n') + '\n');
+    return remaining;
 }

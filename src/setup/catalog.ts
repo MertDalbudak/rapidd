@@ -263,7 +263,7 @@ export const SECTIONS: Section[] = [
         description: 'When this wizard opens by itself.',
         settings: [
             { key: 'SETUP_WIZARD', label: 'Setup wizard', type: 'enum', options: ['auto', 'on', 'off'], default: 'auto',
-                help: 'auto: while the API cannot start, serve this wizard instead of exiting · on: at every start, before the API — set it back once done · off: exit with an error (orchestrated deployments).' },
+                help: 'auto: while the API cannot start, serve this wizard instead of exiting · on: at every start, before the API — set it back once done · off: exit with an error (orchestrated deployments). npm run setup opens it any time.' },
             { key: 'SETUP_PASSWORD', label: 'Setup password', type: 'secret', default: 'random, printed to the console', advanced: true,
                 help: "The wizard's access password. Empty: a random one per start, printed with the wizard link. Set one (16+ characters) only when a script drives the setup." },
         ],

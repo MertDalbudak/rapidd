@@ -44,7 +44,8 @@ start. The built-in Mailer is removed — apps use the mail library of their cho
 > 13. **`main.ts` serves the setup wizard while the API cannot start** (no `DATABASE_URL`, Prisma
 >     client not generated, ...) instead of exiting — adopt the new `main.ts` to get it, and set
 >     `SETUP_WIZARD=off` where a missing setting should still fail fast. Only problems that already
->     stopped the API open it, so a deployment that starts today keeps starting.
+>     stopped the API open it, so a deployment that starts today keeps starting. For
+>     `npm run setup`, add `"setup": "tsx main.ts setup"` to the scripts of `package.json`.
 > 14. The Docker image sets `ENV_FILE=/app/data/.env` and declares `/app/data` a volume (where the
 >     wizard saves its settings).
 
@@ -132,8 +133,10 @@ now regression tests in `__test__/auth/AuthSecurity.test.ts` and the provider su
 
 - **A setup wizard in the browser** (Rapidd-branded, light and dark): while the API cannot start,
   `npm run dev` / `npm start` serve it instead (link with a setup password in the console) and
-  start the API in the same process when it is done. `SETUP_WIZARD=on` opens it at every start —
-  to change access rules, services or rate limits of a configured project; `off` exits as before.
+  start the API in the same process when it is done. **`npm run setup`** (in the image:
+  `docker run … <image> setup`) opens it any time — finishing saves and ends the command, also
+  while something is still missing. `SETUP_WIZARD=on` opens it at every start, before the API;
+  `off` exits as before.
 - **Settings**: every setting the API reads — with its real default, help text, source (env file /
   environment / default) and validation — on guided pages (Database, Sign-in, …) and complete,
   searchable, by group under *Environment*. LDAP / OIDC / WebDAV appear when enabled.

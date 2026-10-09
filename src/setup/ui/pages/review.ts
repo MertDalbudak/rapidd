@@ -6,17 +6,23 @@ export function installReviewPage(R) {
     const S = R.S;
     const FILE_PAGES = { app: 'services', rateLimit: 'ratelimits', acl: 'access', rls: 'rls' };
 
+    /**
+     * invalid: changes and files that cannot be saved (block saving); missing: settings that are
+     * not changed but keep the API from starting (block starting it, not saving)
+     */
     function problems() {
         const v = S.validation;
-        const items = [];
+        const invalid = [];
+        const missing = [];
         for (const key of Object.keys(v.errors)) {
             const setting = R.setting(key);
-            items.push(h('li', null, h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.fix(key); } }, setting ? setting.label : key), h('span', { class: 'muted', text: ' (' + key + ')' }), ' — ' + v.errors[key]));
+            (R.changed(key) ? invalid : missing).push(h('li', null,
+                h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.fix(key); } }, setting ? setting.label : key), h('span', { class: 'muted', text: ' (' + key + ')' }), ' — ' + v.errors[key]));
         }
         for (const [id, list] of Object.entries(S.fileProblems)) {
-            for (const p of list) items.push(h('li', null, h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.go(FILE_PAGES[id]); } }, R.fileTitles[id]), ' — ' + p));
+            for (const p of list) invalid.push(h('li', null, h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.go(FILE_PAGES[id]); } }, R.fileTitles[id]), ' — ' + p));
         }
-        return items;
+        return { invalid, missing };
     }
 
     function settingsCard() {
@@ -81,7 +87,7 @@ export function installReviewPage(R) {
             R.toast('bad', r.error || 'Saving failed');
             return;
         }
-        if (finish) return done(r);
+        if (finish) return r.exit ? closed(r) : done(r);
         const written = (r.saved.written.length + r.saved.removed.length) + ' setting' + (r.saved.written.length + r.saved.removed.length === 1 ? '' : 's') + (r.files.length ? ' and ' + r.files.join(', ') : '');
         S.changes = {};
         S.revealed = {};
@@ -92,6 +98,21 @@ export function installReviewPage(R) {
         R.toast('ok', 'Saved ' + written);
         if (r.schema && r.schema.changed) R.toast('info', 'prisma/schema.prisma now uses ' + r.schema.to + ' (was ' + r.schema.from + ')');
         await R.reload();
+    }
+
+    /** npm run setup has ended: how to start the API */
+    function closed(r) {
+        R.finished = true;
+        const reasons = r.reasons || [];
+        document.getElementById('app').replaceChildren(h('div', { class: 'signin' }, h('div', { class: 'box', style: { maxWidth: '520px' } },
+            h('div', { style: { textAlign: 'center' } },
+                h('img', { src: '/setup/assets/logo.png', alt: '', style: { width: '64px', height: '64px', borderRadius: '16px' } }),
+                h('h1', { style: { marginTop: '16px' }, text: 'Setup saved' }),
+                h('p', { class: 'muted', text: 'The setup has ended — you can close this page.' })),
+            reasons.length ? R.notice('warn', 'The API cannot start yet', h('ul', null, reasons.map((x) => h('li', null, h('code', { text: x.key }), ' — ' + x.message))))
+                : h('div', null,
+                    h('p', { style: { margin: '0 0 8px', fontWeight: '600' }, text: 'Start the API' }),
+                    h('pre', { class: 'code', text: 'npm run dev     # development, reloads on changes\nnpm start       # production (after npm run build)' })))));
     }
 
     /** The wizard has handed over: wait for the API on the same port */
@@ -136,12 +157,20 @@ export function installReviewPage(R) {
         id: 'review', title: 'Review & start', group: null, icon: 'flag',
         render: () => {
             const v = S.validation;
-            const list = problems();
-            const unsaved = R.unsaved();
-            const total = unsaved.settings + unsaved.files;
-            const blocked = list.length > 0;
-            const out = [R.pageHead('Review & start', 'Everything that will be written — nothing is saved before you confirm here. Finishing saves the changes and starts the API in this process.')];
-            if (blocked) out.push(R.notice('bad', 'Fix these first', h('ul', null, list)));
+            const { invalid, missing } = problems();
+            // Here generated secrets count too: they are written with everything else
+            const total = Object.keys(S.changes).length + R.unsaved().files;
+            // Saving needs valid changes; starting the API needs every setting (npm run setup only saves)
+            const blocked = invalid.length > 0;
+            const blockedStart = blocked || (!R.command() && missing.length > 0);
+            const out = [R.pageHead(R.finishTitle(), R.command()
+                ? 'Everything that will be written — nothing is saved before you confirm here. Finishing saves the changes and ends npm run setup.'
+                : 'Everything that will be written — nothing is saved before you confirm here. Finishing saves the changes and starts the API in this process.')];
+            if (invalid.length) out.push(R.notice('bad', 'Fix these first', h('ul', null, invalid)));
+            if (missing.length) {
+                out.push(R.notice(R.command() ? 'warn' : 'bad', 'The API cannot start without these',
+                    h('div', null, h('ul', null, missing), R.command() ? h('p', { class: 'muted small', style: { margin: '6px 0 0' }, text: 'You can save and finish anyway — set them later, here or in the environment.' }) : null)));
+            }
             if (S.ui.saveError && S.ui.saveError.reasons) {
                 out.push(R.notice('bad', S.ui.saveError.error, h('ul', null, S.ui.saveError.reasons.map((x) => h('li', null,
                     h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.fix(x.key); } }, x.key), ' — ' + x.message)))));
@@ -155,12 +184,14 @@ export function installReviewPage(R) {
                 out.push(R.notice('info', 'The wizard opens at every start', 'SETUP_WIZARD=on keeps the API waiting for this wizard on each start.',
                     R.info('SETUP_WIZARD').locked ? null : [R.button('Set it back to auto', { size: 'sm', onClick: () => { R.setValue('SETUP_WIZARD', 'auto', true); } })]));
             }
-            if (!total) out.push(R.card({}, R.empty('check', 'No unsaved changes', S.state.reasons.length ? 'The API still cannot start — see the overview.' : 'The configuration is saved. Start the API when you are ready.')));
+            if (!total) out.push(R.card({}, R.empty('check', 'No unsaved changes', S.state.reasons.length ? 'The API still cannot start — see the overview.' : R.command() ? 'The configuration is saved.' : 'The configuration is saved. Start the API when you are ready.')));
             out.push(settingsCard(), fileCards(), exportCard());
             out.push(h('div', { class: 'card' }, h('div', { class: 'card-foot', style: { borderTop: 0, borderRadius: '12px', justifyContent: 'flex-end' } },
                 h('span', { class: 'muted small', style: { marginRight: 'auto' }, text: total ? total + ' change' + (total === 1 ? '' : 's') + ' to save' : 'Nothing to save' }),
                 R.button('Save', { icon: 'download', disabled: !total || blocked, busy: 'Saving…', onClick: () => save(false) }),
-                R.button(total ? 'Save and start the API' : 'Start the API', { kind: 'primary', icon: 'play', disabled: blocked, busy: 'Starting…', onClick: () => save(true) }))));
+                R.command()
+                    ? R.button(total ? 'Save and finish' : 'Finish', { kind: 'primary', icon: 'check', disabled: blocked, busy: 'Saving…', onClick: () => save(true) })
+                    : R.button(total ? 'Save and start the API' : 'Start the API', { kind: 'primary', icon: 'play', disabled: blockedStart, busy: 'Starting…', onClick: () => save(true) }))));
             return out;
         },
     });

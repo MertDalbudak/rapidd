@@ -269,6 +269,41 @@ describe('HTTP setup wizard', () => {
             expect(r).toMatchObject({ ok: false, message: expect.stringContaining('already has models') });
         });
 
+        it('npm run setup: finishing ends the wizard even while the API cannot start — and says so', async () => {
+            const { setupCommand } = await import('../../src/setup');
+            let printed = '';
+            const write = jest.spyOn(process.stdout, 'write').mockImplementation((chunk: any) => { printed += String(chunk); return true; });
+            try {
+                const running = setupCommand({ root: dir, host: '127.0.0.1', port: 0, password: PASSWORD });
+                for (let i = 0; i < 50 && !printed.includes('password='); i++) await new Promise((r) => setTimeout(r, 20));
+                expect(printed).toContain('Rapidd setup — the wizard is running; the API cannot start yet:');
+                const base = new URL(/Open:\s+(\S+)/.exec(printed)![1]).origin;
+                const auth = { authorization: `Bearer ${PASSWORD}`, 'content-type': 'application/json' };
+                expect(((await (await fetch(`${base}/setup/api/state`, { headers: auth })).json()) as { mode: string }).mode).toBe('setup');
+                const finished = await fetch(`${base}/setup/api/finish`, { method: 'POST', headers: auth, body: JSON.stringify({ changes: { LOG_FORMAT: 'json' } }) });
+                expect(finished.status).toBe(200);
+                expect(await finished.json()).toMatchObject({ ok: true, exit: true, reasons: [{ key: 'DATABASE_URL' }, { key: 'prisma/client' }] });
+                const remaining = await running;
+                expect(remaining.map((r) => r.key)).toEqual(['DATABASE_URL', 'prisma/client']);
+                expect(printed).toContain('Setup saved — the API cannot start yet:');
+                expect(dotenv.parse(fs.readFileSync(process.env.ENV_FILE!))).toMatchObject({ LOG_FORMAT: 'json' });
+            } finally {
+                write.mockRestore();
+            }
+        });
+
+        it('npm run setup: a port in use is explained', async () => {
+            const busy = http.createServer();
+            await new Promise<void>((resolve) => busy.listen(0, '127.0.0.1', resolve));
+            const port = (busy.address() as AddressInfo).port;
+            try {
+                await expect(startWizardServer({ host: '127.0.0.1', port, password: PASSWORD, root: dir, mode: 'setup' }))
+                    .rejects.toThrow(`Port ${port} is in use — is the API running? Stop it, or run the setup on another port: PORT=${port + 1} npm run setup`);
+            } finally {
+                busy.close();
+            }
+        });
+
         it('finish: first boot refuses while the API still cannot start', async () => {
             await start();
             const r = await wizard.app.inject({ method: 'POST', url: '/setup/api/finish', headers: bearer, payload: { changes: { DATABASE_URL: 'postgresql://u:p@h/db' } } });

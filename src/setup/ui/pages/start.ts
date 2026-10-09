@@ -61,16 +61,17 @@ export function installStartPages(R) {
         out.push(h('div', { class: 'hero' },
             h('img', { src: '/setup/assets/logo.png', alt: '' }),
             h('div', null,
-                h('h1', { text: first ? 'Set up ' + st.app.name : st.app.name + ' is ready to start' }),
-                h('p', { text: first
-                    ? 'Rapidd serves this setup until the API can start. Work through the steps — nothing is written before you save, and the API starts when you finish.'
-                    : st.mode === 'on' ? 'Opened with SETUP_WIZARD=on: change what you need, then save and start the API.' : 'Everything the API needs is configured. Review your changes and start it.' })),
+                h('h1', { text: first ? 'Set up ' + st.app.name : R.command() ? st.app.name + ' is configured' : st.app.name + ' is ready to start' }),
+                h('p', { text: R.command()
+                    ? 'Opened with npm run setup. Change what you need — nothing is written before you save; finishing saves and ends the setup.'
+                    : first ? 'Rapidd serves this setup until the API can start. Work through the steps — nothing is written before you save, and the API starts when you finish.'
+                        : st.mode === 'on' ? 'Opened with SETUP_WIZARD=on: change what you need, then save and start the API.' : 'Everything the API needs is configured. Review your changes and start it.' })),
             h('div', { class: 'actions' },
                 first ? R.button('Start with the database', { kind: 'primary', icon: 'chevronRight', onClick: () => R.go('database') })
-                    : R.button('Review & start', { kind: 'primary', icon: 'flag', onClick: () => R.go('review') }))));
+                    : R.button(R.finishTitle(), { kind: 'primary', icon: 'flag', onClick: () => R.go('review') }))));
 
         if (first) {
-            out.push(R.notice('bad', 'Before the API can start', h('ul', null, st.reasons.map((r) => h('li', null,
+            out.push(R.notice(R.command() ? 'warn' : 'bad', 'Before the API can start', h('ul', null, st.reasons.map((r) => h('li', null,
                 h('code', { text: r.key }), ' — ' + r.message + ' ',
                 h('a', { href: '#', onclick: (e) => { e.preventDefault(); R.fix(r.key); } }, 'Fix this'))))));
         }

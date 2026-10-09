@@ -135,6 +135,7 @@ function createProject() {
         scripts: {
             start: 'node dist/main.js',
             dev: 'tsx watch main.ts',
+            setup: 'tsx main.ts setup',
             build: 'tsc',
         },
         engines: corePkg.engines || { node: '^22.12.0 || >=24.0.0' },
@@ -159,7 +160,8 @@ function createProject() {
 
     console.log('Project created. Next steps:\n');
     console.log('  npm install');
-    console.log('  npm run dev      # opens the setup wizard in the browser on first start\n');
+    console.log('  npm run dev      # opens the setup wizard in the browser on first start');
+    console.log('  npm run setup    # the setup wizard, any time\n');
 }
 
 function copyDir(src, dest, rel, skipNames, skipPaths) {

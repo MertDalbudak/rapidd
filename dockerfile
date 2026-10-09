@@ -56,9 +56,9 @@ COPY --chown=rapidd:nodejs public ./public
 RUN mkdir -p /app/uploads /app/temp/uploads /app/logs /app/data && \
     chown -R rapidd:nodejs /app/uploads /app/temp /app/logs /app/data
 
-# The setup wizard (first start without configuration) saves its settings here — keep it
-# on a volume. Orchestrated deployments pass settings as environment variables instead
-# (and may set SETUP_WIZARD=off to fail fast when one is missing).
+# The setup wizard (first start without configuration, or `docker run … <image> setup`) saves
+# its settings here — keep it on a volume. Orchestrated deployments pass settings as
+# environment variables instead (and may set SETUP_WIZARD=off to fail fast when one is missing).
 ENV ENV_FILE=/app/data/.env
 
 VOLUME ["/app/uploads", "/app/logs", "/app/data"]
