@@ -3,7 +3,7 @@
   "publishConfig": {
     "access": "public"
   },
-  "version": "2.3.2",
+  "version": "3.0.0",
   "description": "Code-first REST API framework for TypeScript. Database in, API out.",
   "main": "dist/main.js",
   "bin": {
@@ -93,7 +93,7 @@
     "pg": "^8.23.1"
   },
   "devDependencies": {
-    "@rapidd/build": "^2.3.0",
+    "@rapidd/build": "^3.0.0",
     "@types/bcrypt": "^6.0.0",
     "@types/jest": "^30.0.0",
     "@types/jsonwebtoken": "^9.0.8",
