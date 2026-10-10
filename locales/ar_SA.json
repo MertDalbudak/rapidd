@@ -47,6 +47,7 @@
     "auth_not_configured": "المصادقة غير مهيأة",
     "invalid_composite_key": "مفتاح مركب غير صالح: متوقع {expected} حقول، تم استلام {received}",
     "invalid_composite_key_format": "تنسيق مفتاح مركب غير صالح. متوقع كائن أو سلسلة نصية مفصولة بعلامة التلدة",
+    "invalid_id": "قيمة غير صالحة '{value}' للحقل {field}",
     "no_permission_to_create": "لا توجد صلاحية لإنشاء {model}",
     "no_permission_to_update": "لا توجد صلاحية لتحديث السجل",
     "no_permission_to_delete": "لا توجد صلاحية لحذف السجل",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "شرط تصفية غير صالح: '{condition}'",
     "unbalanced_filter_group": "أقواس غير متوازنة في التصفية",
     "filter_group_too_deep": "مجموعات التصفية متداخلة بعمق كبير (الحد الأقصى {max})",
-    "empty_filter_value": "شرط التصفية للحقل '{field}' له قيمة فارغة"
+    "empty_filter_value": "شرط التصفية للحقل '{field}' له قيمة فارغة",
+    "auth_provider_unavailable": "مزود المصادقة {provider} غير متاح",
+    "auth_provider_not_found": "مزود المصادقة {provider} غير موجود",
+    "auth_login_failed": "فشل تسجيل الدخول باستخدام {provider}",
+    "account_not_linked": "لا يوجد حساب مرتبط بتسجيل الدخول هذا عبر {provider}",
+    "account_inactive": "الحساب غير نشط",
+    "invalid_login_ticket": "تذكرة تسجيل الدخول غير صالحة أو منتهية الصلاحية",
+    "session_expired": "انتهت صلاحية الجلسة، يرجى تسجيل الدخول مرة أخرى"
 }

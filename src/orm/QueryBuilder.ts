@@ -4,6 +4,9 @@ import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
 import { isSystemUser } from '../core/user';
 import * as dmmf from '../core/dmmf';
+import { dayRange, filterTimeZone, startOfDay } from './dates';
+import { PRISMA_WRITE_OPS, isRawOperation, secureNestedOperations } from './nestedOperations';
+import { parseScalar } from './values';
 import type {
     RelationConfig,
     DMMFField,
@@ -40,16 +43,8 @@ const MAX_FILTER_PATH_DEPTH: number = 10;
 // Cap nesting depth of boolean filter groups (OR(AND(OR(...)))) to bound recursion
 const MAX_FILTER_GROUP_DEPTH: number = 10;
 
-/**
- * Prisma nested-write operation keys.
- * Payloads containing any of these are treated as raw Prisma operations and passed
- * through untransformed (shared with Model.assertWritable — keep the lists in sync
- * by importing this constant, not copying it).
- */
-export const PRISMA_WRITE_OPS = [
-    'connect', 'create', 'connectOrCreate', 'disconnect', 'set',
-    'update', 'upsert', 'deleteMany', 'updateMany', 'createMany',
-] as const;
+// Raw Prisma nested-write operations (connect, deleteMany, ...) — see ./nestedOperations
+export { PRISMA_WRITE_OPS };
 
 // Prisma scalar types whose filter values must parse as numbers
 const NUMERIC_FIELD_TYPES = new Set(['Int', 'BigInt', 'Float', 'Decimal']);
@@ -115,6 +110,71 @@ const PRISMA_ERROR_MAP: Record<string, PrismaErrorInfo> = {
     P2033: { status: 400, message: 'number_exceeds_range' },
     P2034: { status: 409, message: 'transaction_write_conflict' },
 };
+
+/** Prisma's filter operators — reported as "argument" in validation errors, but not fields */
+const PRISMA_OPERATORS = new Set(['equals', 'in', 'notIn', 'lt', 'lte', 'gt', 'gte', 'contains', 'startsWith', 'endsWith', 'not',
+    'has', 'hasSome', 'hasEvery', 'isEmpty', 'mode', 'some', 'every', 'none', 'is', 'isNot', 'AND', 'OR', 'NOT', 'where', 'data', 'select', 'include']);
+
+/**
+ * The timezone a date-only filter value is read in: DATE columns hold calendar days (Prisma
+ * represents them as UTC midnight) — UTC; timestamps — API_TIMEZONE, else the server's zone.
+ */
+function dateZone(field?: DMMFField): string | undefined {
+    return isDateColumn(field) ? 'UTC' : filterTimeZone();
+}
+
+/**
+ * A date-only value ("2026-01-15") written to a DateTime field: Prisma accepts full ISO
+ * datetimes only. A DATE column gets that day; a timestamp the start of the day in the filter
+ * timezone (API_TIMEZONE, else the server's) — as date-only filters read it.
+ */
+function writeDate(field: DMMFField, value: unknown): unknown {
+    if (field.type !== 'DateTime' || typeof value !== 'string') return value;
+    const day = dayRange(value, isDateColumn(field) ? 'UTC' : filterTimeZone());
+    return day ? day.gte : value;
+}
+
+/** `DateTime @db.Date` — a calendar day without a time */
+function isDateColumn(field?: DMMFField): boolean {
+    return Array.isArray(field?.nativeType) && String(field!.nativeType[0]).toLowerCase() === 'date';
+}
+
+/** Unique-constraint field from a driver adapter's report: `sku`, or MySQL's index name `Post_slug_key` → `slug` */
+function uniqueFieldName(target: string, modelName: string): string {
+    return target.replace(new RegExp(`^${modelName}_`), '').replace(/_key$/, '');
+}
+
+/**
+ * Database errors Prisma passes on unclassified (driver adapters report check constraints,
+ * invalid values and row-level security rejections as DriverAdapterError): they are client
+ * errors, not 500s.
+ */
+function databaseErrorInfo(cause: any): PrismaErrorInfo | null {
+    if (!cause || typeof cause !== 'object') return null;
+    const code = String(cause.code ?? cause.originalCode ?? '');
+    if (cause.kind === 'postgres') {
+        // 42501: a row-level security policy (WITH CHECK) or a missing grant refused the write
+        if (code === '42501') return { status: 403, message: 'no_permission' };
+        if (code === '23P01') return { status: 409, message: 'database_constraint_failed' };
+        if (code === '23502') return { status: 400, message: 'null_constraint_violation' };
+        if (code.startsWith('23')) return { status: 400, message: 'database_constraint_failed' };
+        if (code === '22001') return { status: 400, message: 'value_too_long' };
+        if (code === '22003') return { status: 400, message: 'value_out_of_range' };
+        if (code.startsWith('22')) return { status: 400, message: 'invalid_value' };
+        if (code === '40001' || code === '40P01') return { status: 409, message: 'transaction_write_conflict' };
+    }
+    if (cause.kind === 'mysql') {
+        switch (Number(code)) {
+            case 3819: return { status: 400, message: 'database_constraint_failed' };
+            case 1048: case 1364: return { status: 400, message: 'null_constraint_violation' };
+            case 1406: return { status: 400, message: 'value_too_long' };
+            case 1264: case 1690: return { status: 400, message: 'value_out_of_range' };
+            case 1292: case 1366: return { status: 400, message: 'invalid_value' };
+            case 1213: case 1205: return { status: 409, message: 'transaction_write_conflict' };
+        }
+    }
+    return null;
+}
 
 /**
  * QueryBuilder - Builds Prisma queries with relation handling, filtering, and ACL support
@@ -290,8 +350,17 @@ class QueryBuilder {
      * navigation, and ACL-omit enforcement. When a user is provided, fields hidden by
      * the ACL (getOmitFields) are rejected with 403 so a client can't infer restricted
      * values through filter probing (e.g. price=gt:100000).
+     *
+     * Also accepted: an object of field equality conditions (`{ courseId: '5' }` — values
+     * taken literally, parsed by field type, same ACL checks) and an array of filter
+     * strings (`?q=a&q=b`), combined with AND.
      */
-    filter(q: string, user: any = null): Record<string, unknown> {
+    filter(q: string | string[] | Record<string, unknown>, user: any = null): Record<string, unknown> {
+        if (Array.isArray(q)) {
+            q = q.filter((part) => typeof part === 'string' && part.trim() !== '').join(',');
+        } else if (q && typeof q === 'object') {
+            return this.#equalityFilter(q, user);
+        }
         if (typeof q !== 'string' || q.trim() === '') {
             return {};
         }
@@ -435,6 +504,32 @@ class QueryBuilder {
     }
 
     /**
+     * Object filter: field equality conditions. Values are literal (no operator syntax, so
+     * nothing can be injected through them), parsed by field type; null matches null.
+     */
+    #equalityFilter(q: Record<string, unknown>, user: any): Record<string, unknown> {
+        const where: Record<string, unknown> = {};
+        for (const [fieldName, value] of Object.entries(q)) {
+            const field = this.fields[fieldName];
+            if (!field || field.kind === 'object') {
+                throw new ErrorResponse(400, "invalid_filter_field", { field: fieldName, modelName: this.name });
+            }
+            this.#assertQueryableField(fieldName, this.name, user);
+            if (value === null) {
+                where[fieldName] = null;
+                continue;
+            }
+            const scalar = typeof value !== 'object' || value instanceof Date;
+            const parsed = scalar && field.type !== 'Json' && field.type !== 'Bytes' ? parseScalar(field, value) : undefined;
+            if (parsed === undefined) {
+                throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value: String(value).slice(0, 100), expected: field.type });
+            }
+            where[fieldName] = parsed;
+        }
+        return where;
+    }
+
+    /**
      * Reject querying (filter/sort) through fields the ACL hides from this user.
      * System users bypass, matching the write-control convention.
      */
@@ -554,6 +649,20 @@ class QueryBuilder {
             this.#assertQueryableField(fieldName, modelName, user);
         }
 
+        // Scalar list columns (PostgreSQL arrays) are tested by element: tags=a holds a,
+        // tags=[a,b] holds any of them; not: negates
+        if (field.isList && field.kind !== 'object') {
+            const negated = value.startsWith('not:');
+            const raw = negated ? value.substring(4) : value;
+            const type = this.#resolveFilterType(field);
+            const condition = raw.startsWith('[') && raw.endsWith(']')
+                ? { hasSome: this.#coerceArrayValues(this.#parseArrayValue(raw), fieldName, type) }
+                : { has: this.#coerceArrayValues([raw], fieldName, type)[0] };
+            if (negated) filter.NOT = (filter.NOT || []).concat([{ [fieldName]: condition }]);
+            else filter[fieldName] = condition;
+            return;
+        }
+
         // Handle not: prefix (negation)
         if (value.startsWith('not:')) {
             this.#applyNegatedFilter(filter, fieldName, value.substring(4), field);
@@ -620,7 +729,7 @@ class QueryBuilder {
 
         // not:between:
         if (value.startsWith('between:')) {
-            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType);
+            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType, dateZone(field));
             return;
         }
 
@@ -634,7 +743,7 @@ class QueryBuilder {
                 return;
             }
             case 'DateTime':
-                filter[fieldName] = { not: this.#buildDateCondition(fieldName, value) };
+                filter[fieldName] = { not: this.#buildDateCondition(fieldName, value, field) };
                 return;
             case 'Boolean':
                 filter[fieldName] = { not: this.#parseBooleanValue(fieldName, value) };
@@ -664,7 +773,7 @@ class QueryBuilder {
     /**
      * Apply not:between: filter
      */
-    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null): void {
+    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null, zone: string | undefined = filterTimeZone()): void {
         const [start, end] = rangeValue.split(';').map((v: string) => v.trim());
 
         if (!start || !end) {
@@ -687,9 +796,13 @@ class QueryBuilder {
                 ],
             }]);
         } else if (fieldType === 'DateTime' || fieldType === null) {
-            const startDate = new Date(start);
-            const endDate = new Date(end);
-            if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+            // The same days as between: — date-only values in the filter timezone
+            let startDate: Date;
+            let endDate: Date;
+            try {
+                startDate = this.#parseDate(start, zone);
+                endDate = this.#parseDate(end, zone);
+            } catch {
                 throw new ErrorResponse(400, "invalid_date_range", { start, end });
             }
             filter.NOT = (filter.NOT || []).concat([{
@@ -737,7 +850,7 @@ class QueryBuilder {
                 return;
             }
             case 'DateTime':
-                filter[fieldName] = this.#buildDateCondition(fieldName, value);
+                filter[fieldName] = this.#buildDateCondition(fieldName, value, field);
                 return;
             case 'Boolean':
                 filter[fieldName] = { equals: this.#parseBooleanValue(fieldName, value) };
@@ -785,8 +898,9 @@ class QueryBuilder {
      * Supports date operators (before:/after:/from:/to:/on:/between:), plain datetimes,
      * and date-only values (which match the entire day).
      */
-    #buildDateCondition(fieldName: string, value: string): Record<string, any> {
-        const opFilter = this.#filterDateTime(value);
+    #buildDateCondition(fieldName: string, value: string, field?: DMMFField): Record<string, any> {
+        const zone = dateZone(field);
+        const opFilter = this.#filterDateTime(value, zone);
         if (opFilter) {
             return opFilter;
         }
@@ -798,17 +912,14 @@ class QueryBuilder {
 
         let date: Date;
         try {
-            date = this.#parseDate(value);
+            date = this.#parseDate(value, zone);
         } catch {
             throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value, expected: 'date' });
         }
 
         // Date-only values match the entire day (same semantics as 'on:')
         if (FILTER_PATTERNS.DATE_ONLY.test(value)) {
-            return {
-                gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-                lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1),
-            };
+            return this.#calendarDay(value, date, zone);
         }
         return { equals: date };
     }
@@ -966,7 +1077,7 @@ class QueryBuilder {
     /**
      * Parse date/datetime filter operators
      */
-    #filterDateTime(value: string): Record<string, Date | Record<string, Date>> | null {
+    #filterDateTime(value: string, zone: string | undefined = filterTimeZone()): Record<string, Date | Record<string, Date>> | null {
         const foundOperator = FILTER_PATTERNS.DATE_OPS.find((op: string) => value.startsWith(op));
         if (!foundOperator) {
             return null;
@@ -985,17 +1096,13 @@ class QueryBuilder {
 
             // Handle simple date operators
             if (simpleOperatorMap[foundOperator]) {
-                const date = this.#parseDate(operatorValue);
+                const date = this.#parseDate(operatorValue, zone);
                 return { [simpleOperatorMap[foundOperator]]: date };
             }
 
             // Handle 'on:' - match entire day
             if (foundOperator === 'on:') {
-                const date = this.#parseDate(operatorValue);
-                return {
-                    gte: new Date(date.getFullYear(), date.getMonth(), date.getDate()),
-                    lt: new Date(date.getFullYear(), date.getMonth(), date.getDate() + 1),
-                };
+                return this.#calendarDay(operatorValue, this.#parseDate(operatorValue, zone), zone);
             }
 
             // Handle 'between:'
@@ -1010,8 +1117,8 @@ class QueryBuilder {
                     return null;
                 }
 
-                const startDate = this.#parseDate(start);
-                const endDate = this.#parseDate(end);
+                const startDate = this.#parseDate(start, zone);
+                const endDate = this.#parseDate(end, zone);
                 return { gte: startDate, lte: endDate };
             }
 
@@ -1023,14 +1130,37 @@ class QueryBuilder {
     }
 
     /**
-     * Parse a date string and validate it
+     * Parse a date string and validate it. With a zone (API_TIMEZONE, or UTC for DATE columns),
+     * a date-only value means the start of that day in the zone (instead of UTC midnight).
      */
-    #parseDate(dateStr: string): Date {
+    #parseDate(dateStr: string, zone: string | undefined = filterTimeZone()): Date {
+        if (zone) {
+            const day = dayRange(dateStr, zone);
+            if (day) return day.gte;
+        }
         const date = new Date(dateStr);
         if (isNaN(date.getTime())) {
             throw new Error(`Invalid date: ${dateStr}`);
         }
         return date;
+    }
+
+    /**
+     * The calendar day a filter value names, as a [gte, lt) range. A date-only value is read
+     * from the string itself; a datetime selects the day that contains it — both in
+     * API_TIMEZONE when set, else in the server's timezone.
+     */
+    #calendarDay(value: string, parsed: Date, zone: string | undefined = filterTimeZone()): { gte: Date; lt: Date } {
+        const fromString = dayRange(value, zone);
+        if (fromString) return fromString;
+        if (!zone) {
+            return {
+                gte: startOfDay(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate(), undefined),
+                lt: startOfDay(parsed.getFullYear(), parsed.getMonth() + 1, parsed.getDate() + 1, undefined),
+            };
+        }
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: zone, year: 'numeric', month: '2-digit', day: '2-digit' }).format(parsed);
+        return dayRange(parts, zone)!;
     }
 
     /**
@@ -1189,7 +1319,9 @@ class QueryBuilder {
 
             for (const [relationName, paths] of Object.entries(pathsByRelation)) {
                 const childRelation = childRelationships.find((r: RelationConfig) => r.name === relationName);
-                if (!childRelation) continue;
+                if (!childRelation) {
+                    throw new ErrorResponse(400, "relation_not_exist", { relation: relationName, modelName: relation.object });
+                }
 
                 const childPaths = (paths as string[]).filter((p: string) => p !== '');
                 const childInclude = childPaths.length > 0
@@ -1270,6 +1402,13 @@ class QueryBuilder {
                         deepIncludes[topLevel].push(parts.slice(1).join('.'));
                     }
                 });
+
+                // A misspelt relation must not silently return less than asked for
+                for (const name of topLevelIncludes) {
+                    if (!this.relatedObjects.some((r: RelationConfig) => r.name === name)) {
+                        throw new ErrorResponse(400, "relation_not_exist", { relation: name, modelName: this.name });
+                    }
+                }
 
                 // Build include object for each top-level relation
                 this.relatedObjects.forEach((curr: RelationConfig) => {
@@ -1519,15 +1658,9 @@ class QueryBuilder {
             }
         }
 
-        // Validate: every relation referenced in fields must be in the include set
-        for (const relationName of relations.keys()) {
-            if (!availableRelations.has(relationName)) {
-                throw new ErrorResponse(400, "relation_not_included", {
-                    relation: relationName,
-                    hint: `Add '${relationName}' to the include parameter`,
-                });
-            }
-        }
+        // A relation named in fields (posts.title) is included — no need to list it in include
+        // as well; listing it there too is the same relation (a set)
+        for (const relationName of relations.keys()) availableRelations.add(relationName);
 
         // Build select object
         const select: Record<string, any> = {};
@@ -1542,10 +1675,10 @@ class QueryBuilder {
             }
         }
 
-        // Add relations from the include param
+        // Add relations from the include param and the fields
         for (const relationName of availableRelations) {
             const rel = this.getRelationByName(relationName);
-            if (!rel) continue;
+            if (!rel) throw new ErrorResponse(400, "relation_not_exist", { relation: relationName, modelName: this.name });
 
             // Get ACL content for this relation (where, omit)
             const { content, denied } = this.#buildBaseIncludeContent(rel, user, this.name);
@@ -1677,7 +1810,8 @@ class QueryBuilder {
      * deliberately for trusted internal transformations.
      */
     create(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
-        let result: Record<string, any> = { ...data };
+        // One working copy; the per-key processors edit it in place
+        const result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to set
         const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
@@ -1693,10 +1827,11 @@ class QueryBuilder {
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                result = this.#processCreateRelation(result, key, user);
+                this.#processCreateRelation(result, key, user);
             } else {
+                result[key] = writeDate(field, result[key]);
                 // Check if this scalar field is a FK that should become a connect
-                result = this.#processForeignKeyField(result, key, user, false);
+                this.#processForeignKeyField(result, key, user, false);
             }
         }
 
@@ -1704,35 +1839,33 @@ class QueryBuilder {
     }
 
     /**
-     * Process a relation field for create operation
+     * Process a relation field for create operation (edits `data`, the caller's working copy)
      */
     #processCreateRelation(
         data: Record<string, any>,
         key: string,
         user: any = null
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
-        if (!data[key]) return data;
+        if (!data[key]) return;
 
         this.#ensureRelations(relatedObject);
 
-        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
-            result[key] = this.#processCreateArrayRelation(
+            data[key] = this.#processCreateArrayRelation(
                 data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, key, user
             );
         } else {
             // Clone the nested object to avoid mutating original
-            result[key] = this.#processCreateSingleRelation(
+            data[key] = this.#processCreateSingleRelation(
                 { ...data[key] }, relatedObject, key, user
             );
         }
-        return result;
     }
 
     /**
@@ -1870,17 +2003,17 @@ class QueryBuilder {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
 
+        // Raw Prisma operations (connect, create, ...) — held to the related model's ACL
+        if (isRawOperation(item)) {
+            return this.#secureRawOperations(item, relatedObject, user, depth);
+        }
+
         // Get ACL context for the related model
         const { modelAcl: relatedAcl, omitFields } = this.#resolveAclContext(relatedObject.object, user);
 
-        // Check canCreate permission
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, item)) {
+        // A plain object payload creates the related record
+        if (user && !isSystemUser(user) && relatedAcl?.canCreate && !relatedAcl.canCreate(user, item)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
-        }
-
-        // If item is already a Prisma operation (connect, create, etc.), skip field validation
-        if (PRISMA_WRITE_OPS.some((op: string) => op in item)) {
-            return { ...item };
         }
 
         // Apply omit fields
@@ -1988,19 +2121,18 @@ class QueryBuilder {
      * Process a scalar field that is a FK to a to-one relation, turning it into a
      * relation connect. In update mode (allowDisconnect) a null value becomes a
      * disconnect; in create mode falsy values are simply dropped.
-     * Shared by the create and update write transformers.
+     * Shared by the create and update write transformers; edits `data`, their working copy.
      */
     #processForeignKeyField(
         data: Record<string, any>,
         key: string,
         user: any,
         allowDisconnect: boolean
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByField(key);
-        if (!relatedObject) return data;
+        if (!relatedObject) return;
 
-        const result: Record<string, any> = { ...data };
-        const value = result[key];
+        const value = data[key];
         // Create mode keeps the historical truthy check; update mode connects on any non-null value
         const shouldConnect = allowDisconnect ? value != null : Boolean(value);
 
@@ -2013,12 +2145,25 @@ class QueryBuilder {
             // Apply ACL access filter for connect
             const { accessFilter } = this.#resolveAclContext(relatedObject.object, user);
 
-            result[relatedObject.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, accessFilter) };
+            data[relatedObject.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, accessFilter) };
         } else if (allowDisconnect) {
-            result[relatedObject.name] = { disconnect: true };
+            data[relatedObject.name] = { disconnect: true };
         }
-        delete result[key];
-        return result;
+        delete data[key];
+    }
+
+    /**
+     * A plain row for bulk writes (createMany): fields the ACL hides or doesn't let this user
+     * write are removed, nothing is transformed. Relations aren't supported by createMany.
+     */
+    sanitizeRow(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        const row: Record<string, any> = { ...data };
+        const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
+        for (const field of omitFields) {
+            delete row[field];
+        }
+        this.#applyWritableWhitelist(row, modelAcl, user);
+        return row;
     }
 
     /**
@@ -2026,8 +2171,9 @@ class QueryBuilder {
      * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
      * Does NOT mutate the input data - returns a new transformed object
      */
-    update(id: string | number, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
-        let result: Record<string, any> = { ...data };
+    update(id: string | number | null, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+        // One working copy; the per-key processors edit it in place
+        const result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to modify
         const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
@@ -2036,6 +2182,14 @@ class QueryBuilder {
         }
         this.#applyWritableWhitelist(result, modelAcl, user);
 
+        // The record's own key, unchanged, is not a write (clients echo it back; upserts carry
+        // it). Dropping it avoids a pointless key update — and Prisma's checked update input,
+        // used once a foreign key becomes a connect, has no autoincrement id at all.
+        const pk = this.getPrimaryKey();
+        if (id != null && typeof pk === 'string' && result[pk] != null && String(result[pk]) === String(id)) {
+            delete result[pk];
+        }
+
         const keys = Object.keys(result);
         for (const key of keys) {
             const field = this.fields[key];
@@ -2043,10 +2197,11 @@ class QueryBuilder {
 
             // Handle relation fields or unknown keys
             if (field == null || isRelationField) {
-                result = this.#processUpdateRelation(result, key, id, user);
+                this.#processUpdateRelation(result, key, id, user);
             } else {
+                result[key] = writeDate(field, result[key]);
                 // Check if this scalar field is a FK that should become a connect/disconnect
-                result = this.#processForeignKeyField(result, key, user, true);
+                this.#processForeignKeyField(result, key, user, true);
             }
         }
 
@@ -2054,36 +2209,34 @@ class QueryBuilder {
     }
 
     /**
-     * Process a relation field for update operation
+     * Process a relation field for update operation (edits `data`, the caller's working copy)
      */
     #processUpdateRelation(
         data: Record<string, any>,
         key: string,
-        parentId: string | number,
+        parentId: string | number | null,
         user: any
-    ): Record<string, any> {
+    ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
             throw new ErrorResponse(400, "unexpected_key", { key });
         }
 
-        if (!data[key]) return data;
+        if (!data[key]) return;
 
         this.#ensureRelations(relatedObject);
 
-        const result: Record<string, any> = { ...data };
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
-            result[key] = this.#processArrayRelation(
+            data[key] = this.#processArrayRelation(
                 data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, parentId, user
             );
         } else {
             // Clone the nested object to avoid mutating original
-            result[key] = this.#processSingleRelation(
+            data[key] = this.#processSingleRelation(
                 { ...data[key] }, relatedObject, user
             );
         }
-        return result;
     }
 
     /**
@@ -2175,6 +2328,44 @@ class QueryBuilder {
     }
 
     /**
+     * Hold raw Prisma operations in a nested payload ({ tags: { deleteMany: {} } },
+     * { author: { connect: { id } } }, ...) to the related model's ACL — otherwise they
+     * would bypass access/update/delete filters, canCreate and field stripping entirely.
+     * System users (and trusted internal calls without a user) pass through unchanged.
+     */
+    #secureRawOperations(ops: Record<string, any>, relation: RelationConfig, user: any, depth: number = 0): Record<string, any> {
+        if (!user || isSystemUser(user)) return ops;
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
+        }
+        const { modelAcl, accessFilter, updateFilter, deleteFilter, omitFields } = this.#resolveAclContext(relation.object, user);
+        const pk = this.getPrimaryKey(relation.object);
+        const identifiers = Array.isArray(pk) ? pk : [pk];
+        const nestedRelations = dmmf.buildRelationships(relation.object);
+        // `true` from an ACL hook means "no restriction"
+        const normalize = (filter: any) => (filter === true || filter == null ? null : filter);
+
+        return secureNestedOperations(ops, relation, {
+            accessFilter: normalize(accessFilter),
+            updateFilter: normalize(updateFilter),
+            deleteFilter: normalize(deleteFilter),
+            canCreate: (data) => !modelAcl?.canCreate || modelAcl.canCreate(user, data),
+            cleanData: (data) => {
+                const cleaned: Record<string, any> = { ...data };
+                for (const field of omitFields) delete cleaned[field];
+                this.#applyWritableWhitelist(cleaned, modelAcl, user, identifiers);
+                for (const key of Object.keys(cleaned)) {
+                    const nested = nestedRelations.find((r: RelationConfig) => r.name === key);
+                    if (nested && isRawOperation(cleaned[key])) {
+                        cleaned[key] = this.#secureRawOperations(cleaned[key], nested, user, depth + 1);
+                    }
+                }
+                return cleaned;
+            },
+        });
+    }
+
+    /**
      * Resolve the ACL context (hooks + evaluated filters) for a model and user.
      * Central helper for the `user && acl?.hook ? ... : fallback` boilerplate.
      * Filters are lazy getters — only the hooks you destructure are invoked.
@@ -2183,6 +2374,7 @@ class QueryBuilder {
         modelAcl: any;
         accessFilter: Record<string, any> | null;
         updateFilter: Record<string, any> | null;
+        deleteFilter: Record<string, any> | null;
         omitFields: string[];
     } {
         const modelAcl = getAcl().model[modelName];
@@ -2197,6 +2389,9 @@ class QueryBuilder {
             },
             get updateFilter() {
                 return active && modelAcl?.getUpdateFilter ? self.cleanFilter(modelAcl.getUpdateFilter(user)) : null;
+            },
+            get deleteFilter() {
+                return active && modelAcl?.getDeleteFilter ? self.cleanFilter(modelAcl.getDeleteFilter(user)) : null;
             },
             get omitFields() {
                 if (!active || !modelAcl?.getOmitFields) return [];
@@ -2409,17 +2604,17 @@ class QueryBuilder {
         relatedObject: RelationConfig,
         user: any = null
     ): Record<string, any> | null {
+        // Raw Prisma operations (connect, deleteMany, ...) — held to the related model's ACL
+        if (isRawOperation(dataObj)) {
+            return this.#secureRawOperations(dataObj, relatedObject, user);
+        }
+
         // Get ACL context for the related model
         const { modelAcl: relatedAcl, omitFields } = this.#resolveAclContext(relatedObject.object, user);
 
-        // Check canCreate permission since upsert may create new records
-        if (user && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
+        // A plain object payload becomes an upsert, which may create the related record
+        if (user && !isSystemUser(user) && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
-        }
-
-        // If dataObj is already a Prisma operation (connect, create, disconnect, etc.), skip field validation
-        if (PRISMA_WRITE_OPS.some((op: string) => op in dataObj)) {
-            return dataObj;
         }
 
         // Remove omitted fields from input
@@ -2698,8 +2893,6 @@ class QueryBuilder {
      * receive localized messages; it defaults to the configured default language.
      */
     static errorHandler(error: any, data: Record<string, unknown> = {}, language: string | null = null): QueryErrorResponse {
-        Logger.error(error);
-
         // Default values
         let statusCode: number = error.status_code || 500;
         let message: string;
@@ -2717,6 +2910,10 @@ class QueryBuilder {
             message = error.message || String(error);
         }
 
+        // The database's own error behind a driver adapter failure: thrown as is (Prisma 7.8), or
+        // as the generic P2039 "Database error" (7.10)
+        const databaseError = databaseErrorInfo(error?.name === 'DriverAdapterError' ? error.cause : error?.meta?.driverAdapterError?.cause);
+
         // Handle Prisma error codes (PrismaClientKnownRequestError)
         if (error?.code && PRISMA_ERROR_MAP[error.code]) {
             const errorInfo = PRISMA_ERROR_MAP[error.code];
@@ -2724,10 +2921,12 @@ class QueryBuilder {
 
             // Handle dynamic messages (e.g., P2002 duplicate)
             if (error.code === 'P2002') {
-                const target = error.meta?.target;
+                // Driver adapters (Prisma 7) report the constraint in driverAdapterError, not meta.target
+                const constraint = error.meta?.driverAdapterError?.cause?.constraint;
+                const target = error.meta?.target ?? constraint?.fields ?? constraint?.index;
                 const modelName = error.meta?.modelName || '';
-                // target can be string (MySQL constraint name) or string[] (field names)
-                const fields = Array.isArray(target) ? target : (target ? [target] : []);
+                // target can be string (MySQL index name) or string[] (field names)
+                const fields = (Array.isArray(target) ? target : (target ? [target] : [])).map((f: unknown) => uniqueFieldName(String(f), modelName));
                 const field = fields.join(', ');
                 // Try to find the value from the data passed to errorHandler
                 const value = fields.length === 1 && data[fields[0]] !== undefined
@@ -2741,14 +2940,22 @@ class QueryBuilder {
                 message = LanguageDict.get(key, null, language);
             }
         }
+        else if (databaseError) {
+            statusCode = databaseError.status;
+            key = databaseError.message!;
+            message = LanguageDict.get(key, null, language);
+        }
         // Handle PrismaClientValidationError — invalid arguments, type mismatches
         else if (error?.name === 'PrismaClientValidationError' || error?.constructor?.name === 'PrismaClientValidationError') {
             statusCode = 400;
             key = 'data_validation_error';
-            // Extract the useful part: "Argument `equals`: Invalid value provided. Expected Int, provided String."
-            const rawMessage = error.message || '';
-            const argMatch = rawMessage.match(/Argument\s+`[^`]+`:\s*.+$/m);
-            message = argMatch ? argMatch[0] : LanguageDict.get(key, null, language);
+            // Prisma ends the message with the reason — "Invalid value for argument `hired_on`:
+            // premature end of input. Expected ISO-8601 DateTime." / "Argument `name` is missing."
+            const reason = String(error.message || '').split('\n').map((l: string) => l.trim()).filter(Boolean).pop() || '';
+            const field = /argument `([^`]+)`/i.exec(reason)?.[1];
+            message = /argument/i.test(reason) ? reason : LanguageDict.get(key, null, language);
+            // A filter operator (equals, in, ...) is not the field a client can fix
+            if (field && !PRISMA_OPERATORS.has(field)) errorData = { field };
         }
         // Handle PrismaClientInitializationError — connection/config issues
         else if (error?.name === 'PrismaClientInitializationError' || error?.constructor?.name === 'PrismaClientInitializationError') {
@@ -2761,6 +2968,14 @@ class QueryBuilder {
             statusCode = 500;
             key = 'internal_server_error';
             message = LanguageDict.get(key, null, language);
+        }
+
+        // Client errors (404, 403, duplicates, validation) are expected traffic: warn, so error
+        // level and alerting stay meaningful for real failures
+        if (statusCode >= 500) {
+            Logger.error(error);
+        } else {
+            Logger.warn(`${statusCode} ${key ?? error?.code ?? ''}`.trim(), { message: error?.message });
         }
 
         return {

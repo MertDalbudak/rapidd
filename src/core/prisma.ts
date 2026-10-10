@@ -1,8 +1,13 @@
 import { AsyncLocalStorage } from 'async_hooks';
 import path from 'path';
-import type { RLSVariables, DatabaseProvider, AdapterResult, AclConfig } from '../types';
+import type { RLSVariables, DatabaseProvider, AclConfig } from '../types';
 import * as dmmf from './dmmf';
 import { Logger } from '../utils/Logger';
+import { applyAclDefault, mergeAclRules } from './acl';
+import { aclFromRules } from './aclRules';
+import { createAdapter } from './adapter';
+
+export { createAdapter };
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { PrismaClient, Prisma } = require(path.join(process.cwd(), 'prisma', 'client'));
@@ -21,50 +26,6 @@ function validateIdentifier(value: string, name: string): string {
 
 /** RLS namespace for SQL session variable prefix */
 const RLS_NAMESPACE = validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE');
-
-// =====================================================
-// DATABASE ADAPTER FACTORY
-// =====================================================
-
-function detectProvider(connectionString: string): DatabaseProvider {
-    if (!connectionString) return 'postgresql';
-    if (connectionString.startsWith('mysql://') || connectionString.startsWith('mariadb://')) {
-        return 'mysql';
-    }
-    return 'postgresql';
-}
-
-function parseMySQLConnectionString(connectionString: string): Record<string, unknown> {
-    const url = new URL(connectionString);
-    return {
-        host: url.hostname,
-        port: parseInt(url.port, 10) || 3306,
-        user: url.username,
-        password: url.password,
-        database: url.pathname.slice(1),
-        connectionLimit: 10,
-    };
-}
-
-export function createAdapter(connectionString: string, provider: string | null = null): AdapterResult {
-    const detectedProvider = (provider || process.env.DATABASE_PROVIDER || detectProvider(connectionString)) as DatabaseProvider;
-
-    if (detectedProvider === 'mysql' || (detectedProvider as string) === 'mariadb') {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { PrismaMariaDb } = require('@prisma/adapter-mariadb');
-        const config = parseMySQLConnectionString(connectionString);
-        const adapter = new PrismaMariaDb(config);
-        return { adapter, pool: null, provider: 'mysql' };
-    } else {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { PrismaPg } = require('@prisma/adapter-pg');
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { Pool } = require('pg');
-        const pool = new Pool({ connectionString });
-        const adapter = new PrismaPg(pool);
-        return { adapter, pool, provider: 'postgresql' };
-    }
-}
 
 // =====================================================
 // BASE PRISMA CLIENTS
@@ -171,6 +132,13 @@ export const prisma = rlsEnabled
     })
     : basePrisma;
 
+/** Whether this request's queries carry RLS variables (each query then runs in its own transaction) */
+export function rlsActive(): boolean {
+    if (!rlsEnabled) return false;
+    const variables = requestContext.getStore()?.variables;
+    return !!variables && Object.keys(variables).length > 0;
+}
+
 // =====================================================
 // TRANSACTION HELPERS
 // =====================================================
@@ -231,21 +199,29 @@ initializeDMMF();
 let _acl: AclConfig | null = null;
 export function getAcl(): AclConfig {
     if (!_acl) {
+        // config/acl.json (the setup wizard's rules) applies to every model it lists; it is
+        // loaded first, so a broken file stops the API — rules never fail open
+        const rules = aclFromRules();
+        let code: AclConfig = { model: {} };
         try {
             // eslint-disable-next-line @typescript-eslint/no-require-imports
-            _acl = require('../config/acl').default || require('../config/acl');
+            code = require('../config/acl').default || require('../config/acl');
         } catch (error: any) {
-            // ACL is FAIL-OPEN: an empty config grants unrestricted access to every model.
-            // A missing config may be intentional (internal services), but a broken one
-            // (syntax error, bad import) must be loud — otherwise a typo silently
-            // disables all access control.
-            _acl = { model: {} };
+            if (error?.name === 'AclRulesError') throw error;
+            // A missing code ACL may be intentional (rules only, internal services), but a
+            // broken one (syntax error, bad import) must be loud — otherwise a typo silently
+            // drops every code entry.
             if (error?.code === 'MODULE_NOT_FOUND') {
-                Logger.warn('No ACL config found (src/config/acl) — ALL models are unrestricted. Add an acl.ts to enable access control.');
+                if (Object.keys(rules).length === 0) {
+                    Logger.warn('No ACL found (config/acl.json, src/config/acl) — ALL models are unrestricted. Add access rules in the setup wizard or an acl.ts.');
+                }
             } else {
-                Logger.error(`ACL config failed to load — falling back to UNRESTRICTED access for all models: ${error?.message || error}`);
+                Logger.error(`src/config/acl failed to load — only the rules of config/acl.json apply: ${error?.message || error}`);
             }
         }
+        // An entry in src/config/acl.ts takes its model over with code; ACL_DEFAULT=deny
+        // closes every model that has no entry
+        _acl = applyAclDefault(mergeAclRules(code, rules));
     }
     return _acl!;
 }

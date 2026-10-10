@@ -5,6 +5,8 @@ import { Logger } from '../utils/Logger';
 const ROOT = process.env.ROOT || '';
 // Resolved to an absolute path — require() would treat a bare relative path as a package name
 const DEFAULT_STRINGS_PATH = process.env.STRINGS_PATH || path.resolve(ROOT || process.cwd(), 'locales');
+/** Language used when a request has none (DEFAULT_LANGUAGE, e.g. de_DE) */
+const DEFAULT_LANGUAGE = process.env.DEFAULT_LANGUAGE || 'en_US';
 
 /**
  * Singleton LanguageDict class for efficient translation management.
@@ -17,13 +19,13 @@ export class LanguageDict {
     private static _dictionaries: Record<string, Record<string, string>> = {};
     private static _available: string[] = [];
     private static _dictionaryPath: string | null = null;
-    private static _defaultLanguage: string = 'en_US';
+    private static _defaultLanguage: string = DEFAULT_LANGUAGE;
     private static _initialized: boolean = false;
 
     /**
      * Initialize the LanguageDict system
      */
-    static initialize(dictionaryPath: string = DEFAULT_STRINGS_PATH, defaultLanguage: string = 'en_US'): void {
+    static initialize(dictionaryPath: string = DEFAULT_STRINGS_PATH, defaultLanguage: string = DEFAULT_LANGUAGE): void {
         if (this._initialized && this._dictionaryPath === dictionaryPath) {
             return;
         }
@@ -90,7 +92,13 @@ export class LanguageDict {
         // Handle parameter interpolation ({key} syntax)
         if (data !== null && typeof data === 'object') {
             translated = translated.replace(RE_PARAMS, (match: string, paramKey: string) => {
-                return data[paramKey] !== undefined ? String(data[paramKey]) : match;
+                const value = data[paramKey];
+                if (value === undefined) return match;
+                // Objects would render as "[object Object]" — show their JSON instead
+                if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+                    try { return JSON.stringify(value); } catch { return match; }
+                }
+                return String(value);
             });
         }
 
@@ -125,6 +133,11 @@ export class LanguageDict {
             this.initialize();
         }
         return this._available.includes(language);
+    }
+
+    /** The language used when none is requested (DEFAULT_LANGUAGE, default en_US) */
+    static get defaultLanguage(): string {
+        return this._defaultLanguage;
     }
 
     /**

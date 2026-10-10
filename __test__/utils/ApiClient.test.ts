@@ -4,9 +4,16 @@
  */
 import { ApiClient, ApiClientError } from '../../src/utils/ApiClient';
 
-// Mock global fetch
+// Mock global fetch. Tests describe responses with json(); a real Response always has
+// text() too (ApiClient reads text so empty/malformed bodies can't break error handling).
 const mockFetch = jest.fn();
-global.fetch = mockFetch;
+global.fetch = (async (...args: unknown[]) => {
+    const response = await mockFetch(...args);
+    if (response && typeof response.text !== 'function' && typeof response.json === 'function') {
+        response.text = async () => JSON.stringify(await response.json());
+    }
+    return response;
+}) as typeof fetch;
 
 describe('ApiClient', () => {
     beforeEach(() => {
@@ -412,6 +419,67 @@ describe('ApiClient', () => {
             expect(err.response).toEqual({ error: 'not found' });
             expect(err.url).toBe('https://api.com/resource');
             expect(err.message).toBe('HTTP 404');
+        });
+    });
+
+    // ── Robustness ───────────────────────────────────────────
+
+    describe('robustness', () => {
+        const respond = (status: number, body: string, headers: Record<string, string> = { 'content-type': 'application/json' }) => ({
+            ok: status < 400, status, headers: new Headers(headers), text: () => Promise.resolve(body),
+        });
+
+        it('does not retry POST/PATCH unless asked (no duplicate side effects)', async () => {
+            mockFetch.mockRejectedValue(new Error('network down'));
+            await expect(ApiClient.fetch('https://api.example.com/invoices', { method: 'POST', body: {} })).rejects.toThrow('network down');
+            expect(mockFetch).toHaveBeenCalledTimes(1);
+
+            mockFetch.mockClear();
+            await expect(ApiClient.fetch('https://api.example.com/invoices', { method: 'post', body: {}, retries: 1 })).rejects.toThrow();
+            expect(mockFetch).toHaveBeenCalledTimes(2);
+        }, 30000);
+
+        it('returns null for 204 and empty JSON bodies', async () => {
+            mockFetch.mockResolvedValueOnce(respond(204, ''));
+            expect(await ApiClient.fetch('https://api.example.com/x', { method: 'DELETE' })).toBeNull();
+            mockFetch.mockResolvedValueOnce(respond(200, ''));
+            expect(await ApiClient.fetch('https://api.example.com/x')).toBeNull();
+        });
+
+        it('keeps a 4xx with an empty or malformed body an ApiClientError, without retrying', async () => {
+            mockFetch.mockResolvedValue(respond(422, '{not json'));
+            const err = await ApiClient.fetch('https://api.example.com/x').catch((e: ApiClientError) => e) as ApiClientError;
+            expect(err).toBeInstanceOf(ApiClientError);
+            expect(err.status).toBe(422);
+            expect(err.response).toBe('{not json');
+            expect(mockFetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('retries 429 after Retry-After', async () => {
+            mockFetch
+                .mockResolvedValueOnce(respond(429, '', { 'content-type': 'application/json', 'retry-after': '0' }))
+                .mockResolvedValueOnce(respond(200, '{"ok":true}'));
+            expect(await ApiClient.fetch('https://api.example.com/x', { retries: 1 })).toEqual({ ok: true });
+            expect(mockFetch).toHaveBeenCalledTimes(2);
+        });
+
+        it('stops immediately when the caller aborts', async () => {
+            const controller = new AbortController();
+            mockFetch.mockImplementation(async () => {
+                controller.abort();
+                throw new DOMException('aborted', 'AbortError');
+            });
+            await expect(ApiClient.fetch('https://api.example.com/x', { signal: controller.signal, retries: 3 })).rejects.toThrow();
+            expect(mockFetch).toHaveBeenCalledTimes(1);
+        });
+
+        it('applies its timeout even with a caller-provided signal', async () => {
+            mockFetch.mockImplementation((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+                init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+            }));
+            const controller = new AbortController();
+            await expect(ApiClient.fetch('https://api.example.com/slow', { signal: controller.signal, timeout: 50, retries: 0 }))
+                .rejects.toBeDefined();
         });
     });
 });

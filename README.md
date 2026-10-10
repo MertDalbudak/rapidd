@@ -21,8 +21,9 @@ Rapidd generates a fully-featured REST API from your database schema — then ge
 
 - **Zero to API in 3 commands** — CRUD endpoints with filtering, pagination, relations, and field selection
 - **Convention over configuration** — auto-detects auth tables, password fields, DB provider, and RLS support. Every default overridable
-- **Production-grade from day one** — security headers, JWT with refresh rotation, row-level security, per-model ACL, rate limiting
-- **Batteries included** — HTTP client, SMTP mailer with templates, file uploads, rate limiting, i18n across 10 languages
+- **Production-grade from day one** — security headers, rotating sessions with reuse detection, row-level security, per-model ACL, rate limiting, health checks, graceful shutdown, request-id-correlated (JSON) logs
+- **Enterprise sign-in, plug & play** — your user table, LDAP / Active Directory, OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, ...) and WebDAV — configured with env vars
+- **Essentials included, the rest is yours** — HTTP client, file uploads, rate limiting, i18n across 10 languages; pick your own mailer, queue or SDK
 - **Fully extensible** — before/after middleware on every CRUD operation, custom routes alongside generated ones
 
 ---
@@ -34,12 +35,15 @@ mkdir my-api && cd my-api
 npx @rapidd/core create-project && npm install
 ```
 
-Set `DATABASE_URL` in `.env`, then add your schema in `prisma/schema.prisma`(or create from DB via `npx prisma db pull`):
-
 ```bash
-npx rapidd build            # generate models, routes & ACL scaffold
-npm run dev                 # http://localhost:3000
+npm run dev                 # not configured yet → opens the setup wizard
+npm run setup               # the setup wizard, any time
 ```
+
+The console prints a link to the **setup wizard**: connect and test the database, read the
+schema from it (or create the tables from yours), generate the Prisma client, models and routes,
+set up sign-in, access rules, row-level security, rate limits and the external APIs you call,
+create the first user — then the API starts, in the same process.
 
 Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
 
@@ -88,14 +92,30 @@ Comma-separated conditions combine with implicit AND. For explicit boolean logic
 
 ## Authentication
 
-Auto-enabled when a user table is detected.
+Auto-enabled when a user table is detected — or off with `AUTH_PROVIDERS=none`: every request is anonymous and access rules decide. External identity providers plug in with env vars:
+
+```env
+AUTH_PROVIDERS=ldap,oidc,local        # tried in order for password logins
+
+LDAP_URL=ldaps://dc1.corp.example.com # Active Directory / LDAP
+LDAP_BIND_DN=CN=svc-api,OU=Service,DC=corp,DC=example,DC=com
+LDAP_BIND_PASSWORD=...
+LDAP_SEARCH_BASE=DC=corp,DC=example,DC=com
+
+OIDC_ISSUER=https://login.microsoftonline.com/<tenant>/v2.0   # Entra ID, Keycloak, Okta, ...
+OIDC_CLIENT_ID=...                    # accepts the IdP's access tokens + SSO browser login
+```
 
 ```
 POST /auth/login          { "user": "john@example.com", "password": "..." }
 POST /auth/logout         Authorization: Bearer <token>
 POST /auth/refresh        { "refreshToken": "..." }
 GET  /auth/me             Authorization: Bearer <token>
+GET  /auth/providers      enabled providers, for login pages
+GET  /auth/<provider>/login → IdP → callback → single-use ticket → POST /auth/exchange
 ```
+
+External identities link to your user table by email (or provision rows on first login, or come from IdP claims with role mapping). Sessions are server-side with rotating refresh tokens, reuse detection and per-user revocation; `validateUser` / `onLogin` hooks gate deactivated accounts and record logins.
 
 Four strategies — **bearer** (default), **basic**, **cookie**, and **custom header** — configurable globally via `AUTH_STRATEGIES` env var or per endpoint prefix in `config/app.json`:
 
@@ -120,7 +140,22 @@ Multi-identifier login lets users authenticate with any unique field (email, use
 
 ## Access Control
 
-Define per-model rules in `src/config/acl.ts`. Enforced on every CRUD operation, relation include, and field selection.
+Rules per model and role in `config/acl.json` — edited in the setup wizard, generated with defaults by `rapidd build`. Enforced on every CRUD operation, relation include, and field selection.
+
+```json
+{
+    "models": {
+        "posts": {
+            "create": { "GUEST": false, "*": true },
+            "read":   { "ADMIN": "all", "*": { "where": { "authorId": "$user.id" } } },
+            "delete": { "ADMIN": "all" },
+            "hide":   { "*": ["internalNotes"], "ADMIN": [] }
+        }
+    }
+}
+```
+
+Anything a rule cannot express goes into `src/config/acl.ts` — an entry there takes its model over:
 
 ```typescript
 const acl: AclConfig = {
@@ -194,7 +229,6 @@ CREATE POLICY tenant_isolation ON orders
 | Utility | Description | Docs |
 |---------|-------------|------|
 | **ApiClient** | Config-driven HTTP client with Bearer, Basic, API Key, and OAuth2 auth. Automatic token caching, retries, and fluent builder. | [Wiki](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) |
-| **Mailer** | SMTP email with EJS template rendering, layout wrappers, i18n support, batch sending, and attachments. | [Wiki](https://github.com/MertDalbudak/rapidd/wiki/Mailer) |
 | **File Uploads** | Multipart uploads with MIME validation, size limits, and type presets (`images`, `documents`, etc.). | [Wiki](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) |
 | **Rate Limiting** | Redis-backed with automatic memory fallback. Per-path configuration via `config/rate-limit.json`. | [Wiki](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) |
 | **i18n** | 10 languages included. Auto-detected from `Accept-Language` header. Parameter interpolation in error messages. | [Wiki](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) |
@@ -208,7 +242,9 @@ NODE_ENV=production
 JWT_SECRET=your-secret-here          # Required — server won't start without it
 JWT_REFRESH_SECRET=your-refresh-secret
 ALLOWED_ORIGINS=yourdomain.com
-TRUST_PROXY=true
+TRUST_PROXY=1                        # one proxy at a private address, or the proxies' IPs/CIDRs
+REDIS_URL=rediss://cache.example.com:6380
+LOG_FORMAT=json
 ```
 
 ```bash
@@ -219,6 +255,8 @@ docker build -t my-api . && docker run -p 3000:3000 --env-file .env my-api
 ```
 
 **Security defaults in production:** HSTS, Content-Security-Policy, X-Content-Type-Options, Referrer-Policy, and CORS with explicit origin whitelisting — all enabled automatically.
+
+**Operations built in:** `GET /health` and `GET /health/ready` (database + session store), graceful shutdown on `SIGTERM` that drains in-flight requests, `X-Request-Id` on every response and every log line, credential redaction in logs, and an `errorReporter` hook for Sentry & co.
 
 > **[Deployment wiki](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)** — Docker Compose, nginx reverse proxy, production checklist, horizontal scaling
 
@@ -249,7 +287,7 @@ npx rapidd build                   # generate from schema (after npm install)
 
 Full documentation: **[github.com/MertDalbudak/rapidd/wiki](https://github.com/MertDalbudak/rapidd/wiki)**
 
-[Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) · [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) · [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) · [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) · [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) · [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) · [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) · [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) · [Mailer](https://github.com/MertDalbudak/rapidd/wiki/Mailer) · [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) · [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) · [i18n](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) · [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)
+[Getting Started](https://github.com/MertDalbudak/rapidd/wiki/Getting-Started) · [Setup Wizard](https://github.com/MertDalbudak/rapidd/wiki/Setup) · [Configuration](https://github.com/MertDalbudak/rapidd/wiki/Configuration) · [Query API](https://github.com/MertDalbudak/rapidd/wiki/Query-API) · [Authentication](https://github.com/MertDalbudak/rapidd/wiki/Authentication) · [Access Control](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL)) · [Model Middleware](https://github.com/MertDalbudak/rapidd/wiki/Model-Middleware) · [Row-Level Security](https://github.com/MertDalbudak/rapidd/wiki/Row%E2%80%90Level-Security-(RLS)) · [ApiClient](https://github.com/MertDalbudak/rapidd/wiki/ApiClient) · [File Uploads](https://github.com/MertDalbudak/rapidd/wiki/File-Uploads) · [Rate Limiting](https://github.com/MertDalbudak/rapidd/wiki/Rate-Limiting) · [i18n](https://github.com/MertDalbudak/rapidd/wiki/Internationalization-(i18n)) · [Deployment](https://github.com/MertDalbudak/rapidd/wiki/Deployment-&-Production)
 
 ---
 

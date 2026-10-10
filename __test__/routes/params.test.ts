@@ -16,6 +16,7 @@ const mockPrismaModel = {
 };
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: new Proxy({}, {
         get: (_target, prop) => {
             if (prop === '$transaction') return jest.fn((fn: any) => fn(new Proxy({}, {
@@ -647,10 +648,11 @@ describe('include parameter', () => {
             expect(call.include.tags).toBeDefined();
         });
 
-        it('should silently ignore non-existent relation in include', async () => {
+        it('rejects a relation the model does not have', async () => {
             const response = await app.inject({ method: 'GET', url: '/api/v1/products?include=nonexistent' });
-            // Unknown relations are silently ignored (not found in relatedObjects)
-            expect(response.statusCode).toBe(200);
+            expect(response.statusCode).toBe(400);
+            expect(JSON.parse(response.payload)).toMatchObject({ key: 'relation_not_exist', data: { relation: 'nonexistent' } });
+            expect((await app.inject({ method: 'GET', url: '/api/v1/products?include=category,nonexistent' })).statusCode).toBe(400);
         });
 
         it('should handle include with whitespace', async () => {
@@ -691,14 +693,10 @@ describe('include parameter', () => {
             expect(dataCall.include.tags).toBeDefined();
         });
 
-        it('should silently ignore non-existent relation on single record', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, name: 'Product' })
-                .mockResolvedValueOnce({ id: 1 });
-
+        it('rejects a relation the model does not have on single record', async () => {
             const response = await app.inject({ method: 'GET', url: '/api/v1/products/1?include=nonexistent' });
-            // Unknown relations are silently ignored
-            expect(response.statusCode).toBe(200);
+            expect(response.statusCode).toBe(400);
+            expect(JSON.parse(response.payload).key).toBe('relation_not_exist');
         });
     });
 });
@@ -1185,6 +1183,7 @@ describe('Response format and meta', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        mockPrismaModel.findUnique.mockReset();
     });
 
     it('should return correct response structure with data and meta', async () => {
@@ -1237,19 +1236,15 @@ describe('Response format and meta', () => {
         expect(response.statusCode).toBe(404);
     });
 
-    it('should return 403 when record exists but permission denied', async () => {
-        mockPrismaModel.findUnique
-            .mockResolvedValueOnce({ id: 1, name: 'Product' })
-            .mockResolvedValueOnce(null);
-
-        const response = await app.inject({ method: 'GET', url: '/api/v1/products/1' });
-        expect(response.statusCode).toBe(403);
+    it('should return 400 invalid_id for an id that is not an integer', async () => {
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products/abc' });
+        expect(response.statusCode).toBe(400);
+        expect(response.json().key).toBe('invalid_id');
+        expect(mockPrismaModel.findUnique).not.toHaveBeenCalled();
     });
 
     it('should return 200 with data for single record', async () => {
-        mockPrismaModel.findUnique
-            .mockResolvedValueOnce({ id: 1, name: 'Product', price: 9.99 })
-            .mockResolvedValueOnce({ id: 1 });
+        mockPrismaModel.findUnique.mockResolvedValueOnce({ id: 1, name: 'Product', price: 9.99 });
 
         const response = await app.inject({ method: 'GET', url: '/api/v1/products/1' });
         expect(response.statusCode).toBe(200);
@@ -1308,17 +1303,26 @@ describe('ACL integration with query parameters', () => {
         expect(call.omit?.internal_cost).toBe(true);
     });
 
-    it('should apply access filter on single record permission check', async () => {
-        mockPrismaModel.findUnique
-            .mockResolvedValueOnce({ id: 1, name: 'Product' })
-            .mockResolvedValueOnce({ id: 1 });
+    it('should apply access filter to the single record lookup', async () => {
+        mockPrismaModel.findUnique.mockReset().mockResolvedValueOnce({ id: 1, name: 'Product' });
 
-        await app.inject({ method: 'GET', url: '/api/v1/products/1' });
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products/1' });
+        expect(response.statusCode).toBe(200);
 
-        // Second findUnique call is the permission check
-        // Unique key stays at top level; ACL filter nested under AND (WhereUniqueInput requirement)
-        const permCall = mockPrismaModel.findUnique.mock.calls[1][0];
-        expect(permCall.where.id).toBe(1);
-        expect(permCall.where.AND).toEqual([{ ownerId: 42 }]);
+        // One query; the unique key stays at top level, the ACL filter nests under AND
+        // (WhereUniqueInput requirement)
+        expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
+        const call = mockPrismaModel.findUnique.mock.calls[0][0];
+        expect(call.where.id).toBe(1);
+        expect(call.where.AND).toEqual([{ ownerId: 42 }]);
+    });
+
+    it('should return 403 when the record exists but is outside the access filter', async () => {
+        mockPrismaModel.findUnique.mockReset()
+            .mockResolvedValueOnce(null)        // scoped lookup
+            .mockResolvedValueOnce({ id: 1 });  // existence check
+
+        const response = await app.inject({ method: 'GET', url: '/api/v1/products/1' });
+        expect(response.statusCode).toBe(403);
     });
 });

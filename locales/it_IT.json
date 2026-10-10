@@ -47,6 +47,7 @@
     "auth_not_configured": "L'autenticazione non è configurata",
     "invalid_composite_key": "Chiave composita non valida: previsti {expected} campi, ricevuti {received}",
     "invalid_composite_key_format": "Formato chiave composita non valido. Previsto un oggetto o una stringa separata da tilde",
+    "invalid_id": "Valore non valido '{value}' per {field}",
     "no_permission_to_create": "Nessun permesso per creare {model}",
     "no_permission_to_update": "Nessun permesso per aggiornare il record",
     "no_permission_to_delete": "Nessun permesso per eliminare il record",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Condizione di filtro non valida: '{condition}'",
     "unbalanced_filter_group": "Parentesi o parentesi quadre non bilanciate nel filtro",
     "filter_group_too_deep": "I gruppi di filtro sono annidati troppo in profondità (max {max})",
-    "empty_filter_value": "La condizione di filtro per '{field}' ha un valore vuoto"
+    "empty_filter_value": "La condizione di filtro per '{field}' ha un valore vuoto",
+    "auth_provider_unavailable": "Il provider di autenticazione {provider} non è disponibile",
+    "auth_provider_not_found": "Provider di autenticazione {provider} non trovato",
+    "auth_login_failed": "Accesso con {provider} non riuscito",
+    "account_not_linked": "Nessun account è collegato a questo accesso {provider}",
+    "account_inactive": "L'account non è attivo",
+    "invalid_login_ticket": "Ticket di accesso non valido o scaduto",
+    "session_expired": "Sessione scaduta, effettua di nuovo l'accesso"
 }

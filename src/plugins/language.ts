@@ -1,79 +1,94 @@
 import path from 'path';
+import fs from 'fs';
 import { FastifyPluginAsync } from 'fastify';
 import fp from 'fastify-plugin';
+import { getAppConfig } from '../core/config';
 
-const ALLOWED_LANGUAGES: string[] = (() => {
-    try {
-        return require(path.join(process.cwd(), 'config', 'app.json')).languages || ['en_US'];
-    } catch {
-        return ['en_US'];
-    }
-})();
+const DEFAULT_LANGUAGE = process.env.DEFAULT_LANGUAGE || 'en_US';
+
+const ALLOWED_LANGUAGES: string[] = Array.isArray(getAppConfig().languages) && getAppConfig().languages.length
+    ? getAppConfig().languages
+    : [DEFAULT_LANGUAGE];
 
 const SUPPORTED_LANGUAGES: string[] = (() => {
     try {
-        const fs = require('fs');
-        const path = require('path');
         const stringsPath = process.env.STRINGS_PATH || './locales';
         return fs.readdirSync(stringsPath).map((e: string) => path.parse(e).name);
     } catch {
-        return ['en_US'];
+        return [DEFAULT_LANGUAGE];
     }
 })();
+
+const isUsable = (lang: string) =>
+    ALLOWED_LANGUAGES.some((a) => a.toLowerCase() === lang.toLowerCase())
+    && SUPPORTED_LANGUAGES.some((s) => s.toLowerCase() === lang.toLowerCase());
+
+/** DEFAULT_LANGUAGE when allowed and available, else the first allowed language with a dictionary */
+const DEFAULT_RESOLVED: string = (isUsable(DEFAULT_LANGUAGE) ? DEFAULT_LANGUAGE : undefined)
+    || ALLOWED_LANGUAGES.find(isUsable)
+    || DEFAULT_LANGUAGE;
+
+/**
+ * Match one language code against the allowed languages: exact match first
+ * ("de-DE" / "de_DE" → de_DE), then by language family ("de", "de_AT" → de_DE).
+ * Returns null for anything else — arbitrary client input never becomes request.language.
+ */
+function matchLanguage(code: string): string | null {
+    if (!code || typeof code !== 'string' || code.length > 35) return null;
+    const normalized = code.trim().toLowerCase().replace(/-/g, '_');
+    const exact = ALLOWED_LANGUAGES.find((a) => a.toLowerCase() === normalized);
+    if (exact) return exact;
+    const prefix = normalized.split('_')[0];
+    return ALLOWED_LANGUAGES.find((a) => a.toLowerCase().startsWith(prefix + '_')) ?? null;
+}
 
 /**
  * Parse Accept-Language header and return the best matching language
  */
 function resolveLanguage(headerValue: string): string {
-    const defaultLang = ALLOWED_LANGUAGES.find((allowed: string) =>
-        SUPPORTED_LANGUAGES.find((avail: string) => avail.toLowerCase() === allowed.toLowerCase())
-    ) || 'en_US';
-
-    if (!headerValue || typeof headerValue !== 'string') return defaultLang;
+    if (!headerValue || typeof headerValue !== 'string') return DEFAULT_RESOLVED;
 
     try {
         const languages = headerValue
-            .toLowerCase()
             .split(',')
             .map((lang: string) => {
                 const parts = lang.trim().split(';');
-                const code = parts[0].trim().replace(/-/g, '_');
                 const quality = parts[1] ? parseFloat(parts[1].replace('q=', '')) : 1.0;
-                return { code, quality };
+                return { code: parts[0].trim(), quality: Number.isNaN(quality) ? 0 : quality };
             })
             .sort((a, b) => b.quality - a.quality);
 
-        // Exact match (e.g. "de_DE" header → "de_DE" locale)
+        // Exact matches across all preferences beat family matches
         for (const lang of languages) {
-            const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase() === lang.code);
+            const normalized = lang.code.toLowerCase().replace(/-/g, '_');
+            const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase() === normalized);
             if (match) return match;
         }
-
-        // Language family match (e.g. "en_GB" header → "en_US" locale)
         for (const lang of languages) {
-            const prefix = lang.code.split('_')[0];
-            const match = ALLOWED_LANGUAGES.find((a: string) => a.toLowerCase().startsWith(prefix + '_'));
+            const match = matchLanguage(lang.code);
             if (match) return match;
         }
     } catch {
         /* fall through to default */
     }
 
-    return defaultLang;
+    return DEFAULT_RESOLVED;
 }
 
 /**
  * Language resolution plugin.
- * Sets request.language based on cookie or Accept-Language header.
+ * Sets request.language from the `lang` cookie (when it names an allowed language) or the
+ * Accept-Language header, falling back to DEFAULT_LANGUAGE.
  */
 const languagePlugin: FastifyPluginAsync = async (fastify) => {
-    fastify.decorateRequest('language', 'en_US');
+    fastify.decorateRequest('language', DEFAULT_RESOLVED);
 
     fastify.addHook('onRequest', async (request) => {
         const cookieLang = (request as any).cookies?.['lang'];
-        request.language = cookieLang || resolveLanguage(request.headers['accept-language'] || '');
+        request.language = (cookieLang && matchLanguage(cookieLang))
+            || resolveLanguage(request.headers['accept-language'] || '');
     });
 };
 
 export default fp(languagePlugin, { name: 'rapidd-language' });
-export { resolveLanguage, ALLOWED_LANGUAGES };
+export { resolveLanguage, matchLanguage, ALLOWED_LANGUAGES };

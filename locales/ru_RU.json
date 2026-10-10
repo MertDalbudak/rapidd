@@ -47,6 +47,7 @@
     "auth_not_configured": "Аутентификация не настроена",
     "invalid_composite_key": "Недопустимый составной ключ: ожидалось {expected} полей, получено {received}",
     "invalid_composite_key_format": "Недопустимый формат составного ключа. Ожидается объект или строка, разделенная тильдой",
+    "invalid_id": "Недопустимое значение '{value}' для {field}",
     "no_permission_to_create": "Нет разрешения на создание {model}",
     "no_permission_to_update": "Нет разрешения на обновление записи",
     "no_permission_to_delete": "Нет разрешения на удаление записи",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Недопустимое условие фильтра: '{condition}'",
     "unbalanced_filter_group": "Несбалансированные скобки в фильтре",
     "filter_group_too_deep": "Группы фильтра вложены слишком глубоко (макс. {max})",
-    "empty_filter_value": "Условие фильтра для '{field}' имеет пустое значение"
+    "empty_filter_value": "Условие фильтра для '{field}' имеет пустое значение",
+    "auth_provider_unavailable": "Поставщик аутентификации {provider} недоступен",
+    "auth_provider_not_found": "Поставщик аутентификации {provider} не найден",
+    "auth_login_failed": "Не удалось войти через {provider}",
+    "account_not_linked": "С этим входом через {provider} не связана ни одна учётная запись",
+    "account_inactive": "Учётная запись неактивна",
+    "invalid_login_ticket": "Недействительный или просроченный билет входа",
+    "session_expired": "Сеанс истёк, войдите снова"
 }

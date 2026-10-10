@@ -123,4 +123,60 @@ describe('SessionStoreManager', () => {
             delete process.env.AUTH_SESSION_STORAGE;
         });
     });
+
+    describe('new capabilities', () => {
+        beforeEach(() => {
+            manager = new SessionStoreManager({ store: 'memory', ttl: 60 });
+        });
+
+        it('forwards per-entry options, touch and take', async () => {
+            await manager.create('t', { v: 1 }, { ttl: 5, userId: 3 });
+            expect(await manager.touch('t')).toEqual({ v: 1 });
+            expect(await manager.take('t')).toEqual({ v: 1 });
+            expect(await manager.get('t')).toBeNull();
+        });
+
+        it('revokes by user', async () => {
+            await manager.create('s1', { id: 3 }, { userId: 3 });
+            await manager.create('s2', { id: 3 }, { userId: 3 });
+            expect(await manager.deleteByUser(3)).toBe(2);
+            expect(await manager.get('s1')).toBeNull();
+        });
+
+        it('falls back to get+refresh / get+delete for stores without touch/take', async () => {
+            const redis = new SessionStoreManager({ store: 'redis', ttl: 60 });
+            try {
+                await redis.create('x', { v: 1 });
+                expect(await redis.touch('x')).toEqual({ v: 1 });
+                expect(await redis.take('x')).toEqual({ v: 1 });
+                expect(await redis.get('x')).toBeNull();
+            } finally {
+                await redis.destroy();
+            }
+        });
+    });
+
+    describe('default store selection', () => {
+        const saved = { ...process.env };
+        afterEach(() => {
+            process.env = { ...saved };
+        });
+
+        it('uses memory when no Redis is configured', async () => {
+            delete process.env.AUTH_SESSION_STORAGE;
+            delete process.env.REDIS_HOST;
+            delete process.env.REDIS_URL;
+            manager = new SessionStoreManager({ ttl: 60 });
+            await manager.get('init');
+            expect(manager.getStatus().configured).toBe('memory');
+        });
+
+        it('uses redis when REDIS_HOST or REDIS_URL is set', async () => {
+            delete process.env.AUTH_SESSION_STORAGE;
+            process.env.REDIS_URL = 'redis://localhost:6379';
+            manager = new SessionStoreManager({ ttl: 60 });
+            await manager.get('init');
+            expect(manager.getStatus().configured).toBe('redis');
+        });
+    });
 });

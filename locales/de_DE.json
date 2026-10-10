@@ -47,6 +47,7 @@
     "auth_not_configured": "Authentifizierung ist nicht konfiguriert",
     "invalid_composite_key": "Ungültiger zusammengesetzter Schlüssel: {expected} Felder erwartet, {received} erhalten",
     "invalid_composite_key_format": "Ungültiges Format für zusammengesetzten Schlüssel. Erwartet wird ein Objekt oder ein durch Tilde getrennter String",
+    "invalid_id": "Ungültiger Wert '{value}' für {field}",
     "no_permission_to_create": "Keine Berechtigung zum Erstellen von {model}",
     "no_permission_to_update": "Keine Berechtigung zum Aktualisieren des Datensatzes",
     "no_permission_to_delete": "Keine Berechtigung zum Löschen des Datensatzes",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Ungültige Filterbedingung: '{condition}'",
     "unbalanced_filter_group": "Unausgeglichene Klammern im Filter",
     "filter_group_too_deep": "Filtergruppen sind zu tief verschachtelt (max. {max})",
-    "empty_filter_value": "Filterbedingung für '{field}' hat einen leeren Wert"
+    "empty_filter_value": "Filterbedingung für '{field}' hat einen leeren Wert",
+    "auth_provider_unavailable": "Authentifizierungsanbieter {provider} ist nicht erreichbar",
+    "auth_provider_not_found": "Authentifizierungsanbieter {provider} nicht gefunden",
+    "auth_login_failed": "Anmeldung mit {provider} fehlgeschlagen",
+    "account_not_linked": "Mit dieser {provider}-Anmeldung ist kein Konto verknüpft",
+    "account_inactive": "Konto ist inaktiv",
+    "invalid_login_ticket": "Ungültiges oder abgelaufenes Anmeldeticket",
+    "session_expired": "Sitzung abgelaufen, bitte erneut anmelden"
 }

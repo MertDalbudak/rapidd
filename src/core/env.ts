@@ -1,3 +1,5 @@
+import { Logger } from '../utils/Logger';
+
 /**
  * Environment variable validation and access
  * Validates required variables at startup and provides typed access
@@ -21,7 +23,14 @@ export interface EnvConfig {
     ALLOWED_ORIGINS?: string;
 
     // Auth
-    AUTH_SESSION_STORAGE: 'redis' | 'memory';
+    /** Default: redis when REDIS_URL/REDIS_HOST is set, else memory */
+    AUTH_SESSION_STORAGE?: 'redis' | 'memory';
+    /** Identity providers, in order: local, ldap, oidc, webdav */
+    AUTH_PROVIDERS?: string;
+    /** Absolute session lifetime in seconds (0 = unlimited) */
+    AUTH_SESSION_MAX_AGE?: number;
+    /** Externally visible base URL (OIDC callback URLs) */
+    PUBLIC_URL?: string;
     AUTH_SESSION_TTL: number;
     AUTH_SALT_ROUNDS: number;
     AUTH_ACCESS_TOKEN_EXPIRY: string;
@@ -39,6 +48,7 @@ export interface EnvConfig {
     RATE_LIMIT_MAX_REQUESTS: number;
 
     // Redis
+    REDIS_URL?: string;
     REDIS_HOST?: string;
     REDIS_PORT: number;
     REDIS_PASSWORD?: string;
@@ -50,14 +60,23 @@ export interface EnvConfig {
     RLS_NAMESPACE: string;
 
     // Proxy
-    TRUST_PROXY?: boolean;
+    TRUST_PROXY?: string;
 
     // Pagination
     PAGINATION_MODE: 'offset' | 'page';
 
     // Logging
     LOG_LEVEL: 'essential' | 'fine' | 'finest';
+    LOG_FORMAT?: 'text' | 'json';
     LOG_DIR: string;
+
+    // Access control & i18n
+    ACL_DEFAULT?: 'allow' | 'deny';
+    DEFAULT_LANGUAGE?: string;
+
+    // Lifecycle
+    SHUTDOWN_TIMEOUT_MS?: number;
+    SHUTDOWN_DELAY_MS?: number;
 }
 
 const REQUIRED_VARS = [
@@ -68,7 +87,6 @@ const DEFAULTS: Partial<Record<keyof EnvConfig, string | number | boolean>> = {
     NODE_ENV: 'development',
     PORT: 3000,
     HOST: '0.0.0.0',
-    AUTH_SESSION_STORAGE: 'redis',
     AUTH_SESSION_TTL: 86400,
     AUTH_SALT_ROUNDS: 10,
     AUTH_ACCESS_TOKEN_EXPIRY: '1d',
@@ -117,6 +135,43 @@ export function validateEnv(): void {
             `Invalid DATABASE_URL format. Must start with postgresql://, postgres://, mysql://, or mariadb://`
         );
     }
+
+    for (const problem of findEnumProblems()) {
+        Logger.warn(problem);
+    }
+
+    // An unknown zone would make every date filter throw — fail at startup instead
+    if (process.env.API_TIMEZONE) {
+        try {
+            new Intl.DateTimeFormat('en-US', { timeZone: process.env.API_TIMEZONE });
+        } catch {
+            throw new Error(`Invalid API_TIMEZONE "${process.env.API_TIMEZONE}" — use an IANA name such as Europe/Berlin or UTC`);
+        }
+    }
+}
+
+/** Env vars with a fixed set of values — a typo must be visible, not silently defaulted */
+const ENUMS: Record<string, string[]> = {
+    NODE_ENV: ['development', 'production', 'test'],
+    LOG_LEVEL: ['essential', 'fine', 'finest'],
+    LOG_FORMAT: ['text', 'json'],
+    ACL_DEFAULT: ['allow', 'deny'],
+    PAGINATION_MODE: ['offset', 'page'],
+    AUTH_SESSION_STORAGE: ['redis', 'memory'],
+    COOKIE_SAME_SITE: ['strict', 'lax', 'none'],
+    AUTH_COOKIE_SAME_SITE: ['strict', 'lax', 'none'],
+};
+
+/** Messages for set-but-invalid enumerated env vars */
+export function findEnumProblems(env: NodeJS.ProcessEnv = process.env): string[] {
+    const problems: string[] = [];
+    for (const [key, allowed] of Object.entries(ENUMS)) {
+        const value = env[key];
+        if (value !== undefined && value !== '' && !allowed.includes(value)) {
+            problems.push(`Invalid ${key}="${value}" — expected one of: ${allowed.join(', ')}. The default is used instead.`);
+        }
+    }
+    return problems;
 }
 
 /**

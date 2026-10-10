@@ -17,21 +17,37 @@ if (!command) {
     process.exit(0);
 }
 
+/** A package's bin script, resolved from the project (null when not installed) */
+function resolveBin(pkg, cwd) {
+    try {
+        const manifest = require.resolve(`${pkg}/package.json`, { paths: [cwd] });
+        const { bin } = JSON.parse(fs.readFileSync(manifest, 'utf-8'));
+        const rel = typeof bin === 'string' ? bin : bin && Object.values(bin)[0];
+        return rel ? path.join(path.dirname(manifest), rel) : null;
+    } catch {
+        return null;
+    }
+}
+
+function run(script, scriptArgs) {
+    try {
+        execFileSync(process.execPath, [script, ...scriptArgs], { stdio: 'inherit' });
+    } catch (err) {
+        process.exit(err.status ?? 1);
+    }
+}
+
 if (COMMANDS[command]) {
     COMMANDS[command](args.slice(1));
 } else if (command === 'build') {
     // Proxy to @rapidd/build
-    try {
-        const buildBin = require.resolve('@rapidd/build/bin/cli.js');
-        execFileSync(process.execPath, [buildBin, ...args], { stdio: 'inherit' });
-    } catch (err) {
-        if (err.code === 'MODULE_NOT_FOUND') {
-            console.error('@rapidd/build is not installed.\n');
-            console.error('  npm install -D @rapidd/build');
-            process.exit(1);
-        }
-        process.exit(err.status ?? 1);
+    const buildBin = resolveBin('@rapidd/build', process.cwd());
+    if (!buildBin) {
+        console.error('@rapidd/build is not installed.\n');
+        console.error('  npm install -D @rapidd/build');
+        process.exit(1);
     }
+    run(buildBin, args);
 } else {
     console.error(`Unknown command: ${command}`);
     process.exit(1);
@@ -69,7 +85,6 @@ function createProject() {
         'src/',
         'config/',
         'locales/',
-        'templates/',
         'public/',
         'prisma/schema.prisma',
         'prisma.config.ts',
@@ -120,19 +135,20 @@ function createProject() {
         scripts: {
             start: 'node dist/main.js',
             dev: 'tsx watch main.ts',
+            setup: 'tsx main.ts setup',
             build: 'tsc',
         },
         engines: corePkg.engines || { node: '^22.12.0 || >=24.0.0' },
         dependencies: pick(coreDeps, [
-            '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/static',
+            '@fastify/cookie', '@fastify/cors', '@fastify/formbody', '@fastify/multipart', '@fastify/proxy-addr', '@fastify/static',
             '@prisma/adapter-mariadb', '@prisma/adapter-pg', '@prisma/client', '@prisma/internals',
-            'bcrypt', 'dotenv', 'ejs', 'fastify', 'fastify-plugin',
-            'ioredis', 'jsonwebtoken', 'luxon', 'nodemailer', 'pg',
+            'bcrypt', 'dotenv', 'fastify', 'fastify-plugin',
+            'ioredis', 'jsonwebtoken', 'pg',
         ]),
         devDependencies: pick(coreDevDeps, [
             '@rapidd/build',
-            '@types/bcrypt', '@types/ejs', '@types/jsonwebtoken', '@types/luxon',
-            '@types/node', '@types/nodemailer', '@types/pg',
+            '@types/bcrypt', '@types/jsonwebtoken',
+            '@types/node', '@types/pg',
             'prisma', 'tsx', 'typescript',
         ]),
     };
@@ -144,10 +160,8 @@ function createProject() {
 
     console.log('Project created. Next steps:\n');
     console.log('  npm install');
-    console.log('  # Set DATABASE_URL in .env');
-    console.log('  npx prisma db pull');
-    console.log('  npx rapidd build');
-    console.log('  npm run dev\n');
+    console.log('  npm run dev      # opens the setup wizard in the browser on first start');
+    console.log('  npm run setup    # the setup wizard, any time\n');
 }
 
 function copyDir(src, dest, rel, skipNames, skipPaths) {

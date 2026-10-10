@@ -44,6 +44,13 @@ export async function loadDMMF(): Promise<DMMF> {
     return _dmmfPromise;
 }
 
+/** Forget the loaded DMMF — the next loadDMMF() reads the schema again (setup wizard, tests) */
+export function resetDMMF(): void {
+    _dmmf = null;
+    _dmmfPromise = null;
+    clearModelCaches();
+}
+
 /**
  * Get cached DMMF synchronously (must call loadDMMF first)
  */
@@ -123,6 +130,19 @@ export function getPrimaryKey(modelName: string): string | string[] {
     }
     _primaryKeyCache.set(modelName, pk);
     return pk;
+}
+
+/**
+ * The Prisma selector name of a compound @@id / @@unique (`email_companyId`, or the
+ * schema's `name:` when the index declares one)
+ */
+export function compoundKeyName(modelName: string, fields: string[]): string {
+    const model = getModel(modelName);
+    const sameFields = (index?: { name?: string | null; fields: string[] } | null) =>
+        !!index && index.fields.length === fields.length && fields.every((f) => index.fields.includes(f));
+    const index = sameFields(model?.primaryKey) ? model!.primaryKey! : model?.uniqueIndexes?.find(sameFields);
+    // The selector follows the index's own field order: @@unique([b, a]) is `b_a`
+    return index ? (index.name || index.fields.join('_')) : fields.join('_');
 }
 
 /**

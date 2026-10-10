@@ -76,6 +76,19 @@ export function getDefaultUser(): RapiddUser | null {
     return _defaultUser ? { ..._defaultUser } : null;
 }
 
+/** The role of requests while sign-in is off (AUTH_PROVIDERS=none) */
+export const ANONYMOUS_ROLE = 'anonymous';
+
+/**
+ * The identity of every request while sign-in is off (AUTH_PROVIDERS=none): the default user
+ * of `src/config/user.ts` when the app defines one, else `{ id: null, role: 'anonymous' }`.
+ * Not a system user — access rules apply (role "anonymous", else "*"), and rules on
+ * `$user.id` give it no rows.
+ */
+export function anonymousUser(): RapiddUser {
+    return getDefaultUser() ?? ({ id: null, role: ANONYMOUS_ROLE } as unknown as RapiddUser);
+}
+
 /** Reset the cached default user (tests). */
 export function resetDefaultUserCache(): void {
     _defaultUser = undefined;

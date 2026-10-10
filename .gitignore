@@ -2,6 +2,8 @@
 ._*
 /node_modules
 .env
+.env.bak
+*.tmp
 compose.yml
 /config/app.json
 /logs

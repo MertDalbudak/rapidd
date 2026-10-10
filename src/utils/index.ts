@@ -1,9 +1,6 @@
 export { ApiClient, ApiClientError } from './ApiClient';
 export type { ServiceConfig, EndpointConfig, AuthConfig, RequestOptions, ApiResponse } from './ApiClient';
 
-export { Mailer } from './Mailer';
-export type { EmailConfig, EmailOptions, EmailAttachment, EmailResult } from './Mailer';
-
 export { Logger } from './Logger';
 export type { LogLevel } from './Logger';
 

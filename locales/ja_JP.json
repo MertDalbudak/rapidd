@@ -47,6 +47,7 @@
     "auth_not_configured": "認証が設定されていません",
     "invalid_composite_key": "無効な複合キー: {expected}フィールドが必要ですが、{received}を受信しました",
     "invalid_composite_key_format": "無効な複合キー形式。オブジェクトまたはチルダ区切りの文字列が必要です",
+    "invalid_id": "{field} の値 '{value}' は無効です",
     "no_permission_to_create": "{model}を作成する権限がありません",
     "no_permission_to_update": "レコードを更新する権限がありません",
     "no_permission_to_delete": "レコードを削除する権限がありません",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "無効なフィルター条件: '{condition}'",
     "unbalanced_filter_group": "フィルター内の括弧が対応していません",
     "filter_group_too_deep": "フィルターグループのネストが深すぎます（最大 {max}）",
-    "empty_filter_value": "'{field}' のフィルター条件の値が空です"
+    "empty_filter_value": "'{field}' のフィルター条件の値が空です",
+    "auth_provider_unavailable": "認証プロバイダー {provider} は利用できません",
+    "auth_provider_not_found": "認証プロバイダー {provider} が見つかりません",
+    "auth_login_failed": "{provider} でのログインに失敗しました",
+    "account_not_linked": "この {provider} ログインにリンクされたアカウントはありません",
+    "account_inactive": "アカウントは無効です",
+    "invalid_login_ticket": "ログインチケットが無効か期限切れです",
+    "session_expired": "セッションの有効期限が切れました。再度ログインしてください"
 }

@@ -47,6 +47,7 @@
     "auth_not_configured": "L'authentification n'est pas configurée",
     "invalid_composite_key": "Clé composite invalide : {expected} champs attendus, {received} reçus",
     "invalid_composite_key_format": "Format de clé composite invalide. Un objet ou une chaîne séparée par des tildes est attendu",
+    "invalid_id": "Valeur invalide '{value}' pour {field}",
     "no_permission_to_create": "Pas de permission pour créer {model}",
     "no_permission_to_update": "Pas de permission pour mettre à jour l'enregistrement",
     "no_permission_to_delete": "Pas de permission pour supprimer l'enregistrement",
@@ -99,5 +100,12 @@
     "invalid_filter_condition": "Condition de filtre invalide : '{condition}'",
     "unbalanced_filter_group": "Parenthèses ou crochets déséquilibrés dans le filtre",
     "filter_group_too_deep": "Les groupes de filtre sont imbriqués trop profondément (max {max})",
-    "empty_filter_value": "La condition de filtre pour '{field}' a une valeur vide"
+    "empty_filter_value": "La condition de filtre pour '{field}' a une valeur vide",
+    "auth_provider_unavailable": "Le fournisseur d'authentification {provider} est indisponible",
+    "auth_provider_not_found": "Fournisseur d'authentification {provider} introuvable",
+    "auth_login_failed": "Échec de la connexion avec {provider}",
+    "account_not_linked": "Aucun compte n'est associé à cette connexion {provider}",
+    "account_inactive": "Le compte est inactif",
+    "invalid_login_ticket": "Ticket de connexion invalide ou expiré",
+    "session_expired": "Session expirée, veuillez vous reconnecter"
 }

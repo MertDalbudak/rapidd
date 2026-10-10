@@ -1,27 +1,28 @@
-import 'dotenv/config';
-import { getEnv } from './src/core/env';
-import { buildApp } from './src/app';
+import './src/setup/env'; // ENV_FILE / .env into process.env — before anything reads its configuration
 import { Logger } from './src/utils/Logger';
+import { firstBoot, setupCommand } from './src/setup';
+
+// Side-effect imports that must run before the server starts go here,
+// e.g. model middleware: import './src/middleware/model';
 
 /**
- * Application entry point
- * Builds Fastify app and starts server
+ * Application entry point. While the API cannot start (no database configured, Prisma client
+ * missing, ...) the setup wizard is served instead, and the API starts once setup is done
+ * (SETUP_WIZARD=off: exit with the error instead; SETUP_WIZARD=on: the wizard at every start).
+ * `npm run setup` (main.ts setup) serves only the wizard and ends when it is finished.
+ *
+ * Pass options to customize: startServer({ plugins: [...], errorReporter: (err) => Sentry.captureException(err) })
  */
 export async function start(): Promise<void> {
-    const port = getEnv('PORT');
-    const host = getEnv('HOST');
-
     try {
-        const app = await buildApp();
-
-        await app.listen({ port, host });
-        Logger.log('Server running', { host, port });
-        Logger.log('Environment', { env: getEnv('NODE_ENV') });
-
-        // Warn if running compiled build with development NODE_ENV
-        if (process.argv[1]?.includes('/dist/') && getEnv('NODE_ENV') === 'development') {
-            Logger.warn('Running compiled build with NODE_ENV=development. Set NODE_ENV=production in your .env for production use.');
+        if (process.argv.slice(2).includes('setup')) {
+            await setupCommand();
+            process.exit(0);
         }
+        await firstBoot();
+        // Loaded only now: the API reads its configuration while its modules load
+        const { startServer } = await import('./src/server');
+        await startServer();
     } catch (err) {
         Logger.error(err as Error);
         process.exit(1);

@@ -16,6 +16,7 @@ const mockPrismaModel = {
 };
 
 jest.mock('../../src/core/prisma', () => ({
+    rlsActive: () => false,
     prisma: new Proxy({}, {
         get: (_target, prop) => {
             if (prop === '$transaction') return jest.fn((fn: any) => fn(new Proxy({}, {
@@ -62,6 +63,7 @@ jest.mock('../../src/core/dmmf', () => ({
     isListRelation: jest.fn(() => false),
     getRelationInfo: jest.fn(() => null),
     buildRelationships: jest.fn(() => []),
+    compoundKeyName: jest.fn((_model: string, fields: string[]) => fields.join('_')),
 }));
 
 import { Model } from '../../src/orm/Model';
@@ -75,6 +77,8 @@ describe('Model', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        // Drop queued mockResolvedValueOnce values so they can't leak into the next test
+        Object.values(mockPrismaModel).forEach((fn) => fn.mockReset());
         modelMiddleware.clear();
         (getAcl as jest.Mock).mockReturnValue({ model: {} });
         model = new Model('posts', { user: { id: 1, role: 'admin' } });
@@ -140,8 +144,13 @@ describe('Model', () => {
             expect(model.buildWhereId(1)).toEqual({ id: 1 });
         });
 
-        it('should build where clause with string id', () => {
-            expect(model.buildWhereId('abc')).toEqual({ id: 'abc' });
+        it('coerces URL string ids to the key type', () => {
+            expect(model.buildWhereId('5')).toEqual({ id: 5 });
+            expect(model.buildWhereId(' -7 ')).toEqual({ id: -7 });
+        });
+
+        it.each(['abc', '12abc', '1.5', '', '9007199254740993', '0x10'])('rejects %p for an Int key with 400 invalid_id', (id) => {
+            expect(() => model.buildWhereId(id)).toThrow(expect.objectContaining({ status_code: 400, message: 'invalid_id' }));
         });
     });
 
@@ -433,43 +442,58 @@ describe('Model', () => {
     });
 
     describe('_get()', () => {
-        it('should return record when found and authorized', async () => {
+        const restrict = () => (getAcl as jest.Mock).mockReturnValue({
+            model: { posts: { getAccessFilter: (user: any) => ({ authorId: user.id }) } },
+        });
+
+        it('should return record when found and authorized — one query', async () => {
             const record = { id: 1, title: 'Test' };
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce(record)   // main query
-                .mockResolvedValueOnce({ id: 1 }); // permission check
+            mockPrismaModel.findUnique.mockResolvedValueOnce(record);
             const result = await model.get(1);
             expect(result).toEqual(record);
+            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
         });
 
         it('should throw 404 when record not found', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce(null)
-                .mockResolvedValueOnce(null);
+            mockPrismaModel.findUnique.mockResolvedValueOnce(null);
             await expect(model.get(999)).rejects.toMatchObject({ status_code: 404 });
+            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
         });
 
-        it('should throw 403 when permission check fails', async () => {
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, title: 'Secret' })
-                .mockResolvedValueOnce(null); // permission denied
-            await expect(model.get(1)).rejects.toMatchObject({ status_code: 403 });
+        it('scopes the lookup by the access filter', async () => {
+            restrict();
+            mockPrismaModel.findUnique.mockResolvedValueOnce({ id: 1 });
+            await new Model('posts', { user: { id: 7, role: 'user' } }).get('1');
+            expect(mockPrismaModel.findUnique).toHaveBeenCalledTimes(1);
+            expect(mockPrismaModel.findUnique.mock.calls[0][0].where).toEqual({ id: 1, AND: [{ authorId: 7 }] });
         });
 
-        it('should throw 403 when permission PK mismatch', async () => {
+        it('should throw 403 when the record exists outside the access filter', async () => {
+            restrict();
             mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1, title: 'Test' })
-                .mockResolvedValueOnce({ id: 2 }); // different PK
-            await expect(model.get(1)).rejects.toMatchObject({ status_code: 403 });
+                .mockResolvedValueOnce(null)        // scoped lookup
+                .mockResolvedValueOnce({ id: 1 });  // existence check
+            await expect(new Model('posts', { user: { id: 7, role: 'user' } }).get(1)).rejects.toMatchObject({ status_code: 403 });
+        });
+
+        it('should throw 404 when a restricted user asks for a missing record', async () => {
+            restrict();
+            mockPrismaModel.findUnique.mockResolvedValue(null);
+            await expect(new Model('posts', { user: { id: 7, role: 'user' } }).get(1)).rejects.toMatchObject({ status_code: 404 });
+        });
+
+        it('options.where narrows the lookup but cannot replace the id or the ACL', async () => {
+            restrict();
+            mockPrismaModel.findUnique.mockResolvedValueOnce({ id: 1 });
+            await new Model('posts', { user: { id: 7, role: 'user' } }).get(1, '', { where: { id: 2, status: 'live' } });
+            expect(mockPrismaModel.findUnique.mock.calls[0][0].where).toEqual({ id: 1, AND: [{ authorId: 7 }, { id: 2, status: 'live' }] });
         });
 
         it('should execute middleware', async () => {
             const spy = jest.fn(async (ctx: any) => ctx);
             modelMiddleware.use('before', 'get', spy);
 
-            mockPrismaModel.findUnique
-                .mockResolvedValueOnce({ id: 1 })
-                .mockResolvedValueOnce({ id: 1 });
+            mockPrismaModel.findUnique.mockResolvedValueOnce({ id: 1 });
             await model.get(1);
             expect(spy).toHaveBeenCalled();
         });
@@ -589,6 +613,21 @@ describe('Model', () => {
             mockPrismaModel.delete.mockResolvedValue({ id: 1 });
             const result = await model.delete(1);
             expect(result).toEqual({ id: 1 });
+        });
+
+        it('selects scalar columns only — so a delete a row-level security policy refuses is noticed', async () => {
+            mockPrismaModel.delete.mockResolvedValue({ id: 1 });
+            const fields = jest.spyOn(model, 'fields', 'get').mockReturnValue({
+                id: { name: 'id', kind: 'scalar', type: 'Int', isId: true },
+                title: { name: 'title', kind: 'scalar', type: 'String' },
+                author: { name: 'author', kind: 'object', type: 'users' },
+            });
+            try {
+                await model.delete(1);
+                expect(mockPrismaModel.delete).toHaveBeenLastCalledWith(expect.objectContaining({ select: { id: true, title: true } }));
+            } finally {
+                fields.mockRestore();
+            }
         });
 
         it('should throw 403 when delete filter is false', async () => {
@@ -740,7 +779,7 @@ describe('Model', () => {
         it('should return empty result for empty array', async () => {
             const result = await model.upsertMany([]);
             expect(result).toEqual({
-                created: 0, updated: 0, failed: [], totalSuccess: 0, totalFailed: 0
+                created: 0, updated: 0, skipped: 0, failed: [], totalSuccess: 0, totalFailed: 0
             });
         });
 
