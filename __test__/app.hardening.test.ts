@@ -62,13 +62,15 @@ beforeAll(() => {
         };
     `);
     process.env.ROUTES_PATH = ROUTES;
-    process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 });
 
 afterAll(() => {
     fs.rmSync(ROUTES, { recursive: true, force: true });
 });
 
+// buildApp validates DATABASE_URL (nothing here connects) — set before the snapshot afterEach
+// restores, or every test after the first would lose it
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 const savedEnv = { ...process.env };
 beforeEach(() => {
     // Independent of the developer's .env: no user table → auth disabled

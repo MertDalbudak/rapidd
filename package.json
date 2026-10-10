@@ -108,6 +108,9 @@
   },
   "jest": {
     "testEnvironment": "node",
+    "setupFiles": [
+      "<rootDir>/__test__/no-env-file.ts"
+    ],
     "transform": {
       "^.+\\.tsx?$": [
         "ts-jest",

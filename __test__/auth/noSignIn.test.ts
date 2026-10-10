@@ -51,6 +51,9 @@ import { aclFromRules } from '../../src/core/aclRules';
 
 // Per run: the IDE's watcher may run this file at the same time
 const ROUTES = fs.mkdtempSync(path.join(__dirname, '__temp_routes_no_sign_in_'));
+// buildApp validates DATABASE_URL (nothing here connects) — set before the snapshot afterEach
+// restores, or every test after the first would lose it
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 const saved = { ...process.env };
 
 beforeAll(() => {
@@ -64,7 +67,6 @@ beforeAll(() => {
             fastify.get('/', async (request) => ({ user: request.user }));
         };
     `);
-    process.env.DATABASE_URL = process.env.DATABASE_URL || 'postgresql://test:test@localhost:5432/test';
 });
 afterAll(() => fs.rmSync(ROUTES, { recursive: true, force: true }));
 beforeEach(() => {
