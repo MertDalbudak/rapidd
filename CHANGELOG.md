@@ -6,7 +6,29 @@ All notable changes to `@rapidd/core` are documented here. This project follows
 (the framework source is copied into your project rather than installed), framework fixes below
 do **not** reach existing projects via `npm update` — see the linked section for how to adopt them.
 
-## [Unreleased] — 3.0.0
+## [3.0.1] - 2026-10-11
+
+### Changed — ORM
+
+- **`upsertMany` updates are up to 3× faster on MySQL / MariaDB** (~10 % on PostgreSQL). An
+  existing record whose payload is only the model's own columns is written with one `updateMany`
+  statement; `update` also reads the row back — on MySQL/MariaDB, without `RETURNING`, a second
+  query per record. `update` remains for records with foreign keys (connects checked against the
+  related model's ACL) or nested writes, keys that aren't an `@id`/`@unique` field or the fields
+  of the `@@id`/an `@@unique`, calls with Prisma options, and records `updateMany` doesn't find —
+  so a missing or forbidden row fails with the same error as before. Results, error mappings and
+  stored data are unchanged (old and new compared on PostgreSQL 17, MariaDB 12.3 and MySQL 8.4,
+  including RLS); Prisma's error message header now names `updateMany()` instead of `update()`,
+  and a custom Prisma client extension hooking `update` (rather than `$allOperations`) no longer
+  sees these writes. 10 000 existing records: MariaDB 5.8 s → 1.9 s, MySQL 6.9 s → 2.3 s,
+  PostgreSQL 1.9 s → 1.7 s.
+
+### Documentation
+- README comparison table: "Multi-database" read as connecting several databases at once. The
+  row is now "Multiple database engines", with a note that Rapidd supports PostgreSQL and
+  MySQL/MariaDB, one database per app.
+
+## [3.0.0] - 2026-10-10
 
 Enterprise sign-in (LDAP / Active Directory, OpenID Connect / OAuth2, WebDAV), hardened sessions,
 and the operational basics production deployments need: health checks, graceful shutdown, request

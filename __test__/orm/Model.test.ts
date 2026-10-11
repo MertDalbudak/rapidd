@@ -9,6 +9,7 @@ const mockPrismaModel = {
     findUnique: jest.fn(),
     create: jest.fn(),
     update: jest.fn(),
+    updateMany: jest.fn(),
     delete: jest.fn(),
     upsert: jest.fn(),
     createMany: jest.fn(),
@@ -797,19 +798,47 @@ describe('Model', () => {
 
         it('should update existing records', async () => {
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
-            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
 
             const result = await model.upsertMany([
                 { id: 1, title: 'Updated' },
             ]);
             expect(result.updated).toBe(1);
             expect(result.created).toBe(0);
+            // Plain columns: one updateMany, no update (which would read the row back)
+            expect(mockPrismaModel.updateMany).toHaveBeenCalledWith({ where: { id: 1 }, data: { title: 'Updated' } });
+            expect(mockPrismaModel.update).not.toHaveBeenCalled();
+        });
+
+        it('should accept null prismaOptions as no options', async () => {
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
+
+            const result = await model.upsertMany([{ id: 1, title: 'Updated' }], 'id', null as any);
+            expect(result.updated).toBe(1);
+            expect(mockPrismaModel.updateMany).toHaveBeenCalledWith({ where: { id: 1 }, data: { title: 'Updated' } });
+        });
+
+        it('should fall back to update when updateMany matches no row, reporting it as before', async () => {
+            (getAcl as jest.Mock).mockReturnValue({
+                model: { posts: { getUpdateFilter: (user: any) => ({ authorId: user.id }) } }
+            });
+            const m = new Model('posts', { user: { id: 7, role: 'user' } });
+            mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 0 });
+            const notFound = Object.assign(new Error('No record was found for an update.'), { code: 'P2025' });
+            mockPrismaModel.update.mockRejectedValue(notFound);
+
+            const result = await m.upsertMany([{ id: 1, title: 'Updated' }]);
+            expect(mockPrismaModel.update).toHaveBeenCalledWith({ where: { id: 1, AND: [{ authorId: 7 }] }, data: { title: 'Updated' } });
+            expect(result).toMatchObject({ updated: 0, totalFailed: 1 });
+            expect(result.failed[0]).toEqual({ record: { title: 'Updated' }, error: notFound });
         });
 
         it('should handle mixed create and update', async () => {
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
             mockPrismaModel.createMany.mockResolvedValue({ count: 1 });
-            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
 
             const result = await model.upsertMany([
                 { id: 1, title: 'Updated' },
@@ -843,7 +872,7 @@ describe('Model', () => {
             });
             // Record exists -> upsertMany only updates -> no create permission needed
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
-            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
             const m = new Model('posts', { user: { id: 1, role: 'user' } });
             const result = await m.upsertMany([{ id: 1, title: 'Test' }]);
             expect(result.updated).toBe(1);
@@ -866,11 +895,11 @@ describe('Model', () => {
             });
             const m = new Model('posts', { user: { id: 7, role: 'user' } });
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
-            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
 
             await m.upsertMany([{ id: 1, title: 'Updated' }]);
-            const updateCall = mockPrismaModel.update.mock.calls[0][0];
-            // Unique key stays at top level; ACL filter nested under AND (WhereUniqueInput requirement)
+            const updateCall = mockPrismaModel.updateMany.mock.calls[0][0];
+            // Unique key stays at top level; ACL filter nested under AND (the shape update's WhereUniqueInput requires)
             expect(updateCall.where.id).toBe(1);
             expect(updateCall.where.AND).toEqual([{ authorId: 7 }]);
         });
@@ -881,20 +910,20 @@ describe('Model', () => {
             });
             const m = new Model('posts', { user: { id: 1, role: 'editor' } });
             mockPrismaModel.findMany.mockResolvedValue([{ id: 3 }]);
-            mockPrismaModel.update.mockResolvedValue({ id: 3 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
 
             await m.upsertMany([{ id: 3, title: 'Updated' }]);
-            const updateCall = mockPrismaModel.update.mock.calls[0][0];
+            const updateCall = mockPrismaModel.updateMany.mock.calls[0][0];
             expect(updateCall.where.id).toBe(3);
             expect(updateCall.where.AND).toEqual([{ OR: [{ status: 'draft' }, { status: 'review' }] }]);
         });
 
         it('should not wrap where in AND when update filter is empty', async () => {
             mockPrismaModel.findMany.mockResolvedValue([{ id: 1 }]);
-            mockPrismaModel.update.mockResolvedValue({ id: 1 });
+            mockPrismaModel.updateMany.mockResolvedValue({ count: 1 });
 
             await model.upsertMany([{ id: 1, title: 'Updated' }]);
-            const updateCall = mockPrismaModel.update.mock.calls[0][0];
+            const updateCall = mockPrismaModel.updateMany.mock.calls[0][0];
             expect(updateCall.where.AND).toBeUndefined();
             expect(updateCall.where.id).toBe(1);
         });

@@ -65,6 +65,7 @@ const mockDelegates: Record<string, Record<string, jest.Mock>> = {};
 const mockDelegate = (model: string) => (mockDelegates[model] ??= {
     findUnique: jest.fn(), findMany: jest.fn(async () => []), create: jest.fn(async () => ({})),
     createMany: jest.fn(async ({ data }: any) => ({ count: data.length })), update: jest.fn(async () => ({})),
+    updateMany: jest.fn(async () => ({ count: 1 })),
     upsert: jest.fn(async () => ({})), count: jest.fn(async () => 0), delete: jest.fn(async () => ({})),
 });
 const mockDb = { provider: 'postgresql', statements: [] as string[], commits: 0 };
@@ -226,9 +227,9 @@ describe('upsertMany', () => {
 
     it('PostgreSQL: a failing record is contained by a savepoint; the report matches what commits', async () => {
         mockDelegate('Item').findMany.mockResolvedValue([{ id: 1 }, { id: 2 }, { id: 3 }]);
-        mockDelegate('Item').update.mockImplementation(async ({ where }: any) => {
+        mockDelegate('Item').updateMany.mockImplementation(async ({ where }: any) => {
             if (where.id === 2) throw conflict();
-            return {};
+            return { count: 1 };
         });
 
         const result = await new Model('Item').upsertMany(items([1, 'a'], [2, 'a'], [3, 'c']));
@@ -247,9 +248,9 @@ describe('upsertMany', () => {
     it('MySQL rolls back only the failed statement: no savepoints', async () => {
         mockDb.provider = 'mysql';
         mockDelegate('Item').findMany.mockResolvedValue([{ id: 1 }, { id: 2 }]);
-        mockDelegate('Item').update.mockImplementation(async ({ where }: any) => {
+        mockDelegate('Item').updateMany.mockImplementation(async ({ where }: any) => {
             if (where.id === 1) throw conflict();
-            return {};
+            return { count: 1 };
         });
         const result = await new Model('Item').upsertMany(items([1, 'x'], [2, 'y']));
         expect(result).toMatchObject({ updated: 1, totalFailed: 1 });
@@ -258,7 +259,7 @@ describe('upsertMany', () => {
 
     it('deadlocks and write conflicts fail the batch instead of being reported as one record', async () => {
         mockDelegate('Item').findMany.mockResolvedValue([{ id: 1 }]);
-        mockDelegate('Item').update.mockRejectedValue(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' }));
+        mockDelegate('Item').updateMany.mockRejectedValue(Object.assign(new Error('Transaction failed due to a write conflict or a deadlock'), { code: 'P2034' }));
         await expect(new Model('Item').upsertMany(items([1, 'a']))).rejects.toMatchObject({ code: 'P2034' });
     });
 
@@ -279,7 +280,7 @@ describe('upsertMany', () => {
     it('a key repeated within the batch updates the row the batch creates', async () => {
         const result = await new Model('Item').upsertMany([{ id: 1, name: 'first' }, { id: 1, name: 'second' }]);
         expect(mockDelegates.Item.createMany.mock.calls[0][0].data).toEqual([{ id: 1, name: 'first' }]);
-        expect(mockDelegates.Item.update.mock.calls[0][0]).toMatchObject({ where: { id: 1 }, data: { name: 'second' } });
+        expect(mockDelegates.Item.updateMany.mock.calls[0][0]).toEqual({ where: { id: 1 }, data: { name: 'second' } });
         expect(result).toMatchObject({ created: 1, updated: 1 });
     });
 
@@ -294,12 +295,52 @@ describe('upsertMany', () => {
         expect(mockDelegates.Item.createMany.mock.calls[0][0].data).toEqual([{ id: 1, name: 'a' }]);
     });
 
-    it('composite keys: plain-field lookup, the named selector for updates, and the PK as default key', async () => {
-        mockDelegate('Member').findMany.mockResolvedValue([{ orgId: 1, userId: 1 }]);
-        const result = await new Model('Member').upsertMany([{ orgId: 1, userId: 1, role: 'admin' }, { orgId: 1, userId: 2, role: 'member' }]);
-        expect(mockDelegates.Member.findMany.mock.calls[0][0].where).toEqual({ OR: [{ orgId: 1, userId: 1 }, { orgId: 1, userId: 2 }] });
-        expect(mockDelegates.Member.update.mock.calls[0][0].where).toEqual({ pk: { orgId: 1, userId: 1 } });
-        expect(result).toMatchObject({ created: 1, updated: 1 });
+    it('composite keys: plain-field lookup and updates, the PK as default key, the named selector for update', async () => {
+        mockDelegate('Member').findMany.mockResolvedValue([{ orgId: 1, userId: 1 }, { orgId: 1, userId: 3 }]);
+        mockDelegate('Member').updateMany.mockImplementation(async ({ where }: any) => ({ count: where.userId === 3 ? 0 : 1 }));
+        const result = await new Model('Member').upsertMany([
+            { orgId: 1, userId: 1, role: 'admin' }, { orgId: 1, userId: 2, role: 'member' }, { orgId: 1, userId: 3, role: 'gone' },
+        ]);
+        expect(mockDelegates.Member.findMany.mock.calls[0][0].where).toEqual({ OR: [{ orgId: 1, userId: 1 }, { orgId: 1, userId: 2 }, { orgId: 1, userId: 3 }] });
+        expect(mockDelegates.Member.updateMany.mock.calls[0][0].where).toEqual({ orgId: 1, userId: 1 });
+        // A row updateMany doesn't find goes to update, addressed by the schema's selector name
+        expect(mockDelegates.Member.update.mock.calls.map(([args]: any) => args.where)).toEqual([{ pk: { orgId: 1, userId: 3 } }]);
+        expect(result).toMatchObject({ created: 1, updated: 2 });
+    });
+
+    it('PostgreSQL: a row updateMany doesn\'t find is reported by update, as before', async () => {
+        mockDelegate('Item').findMany.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+        mockDelegate('Item').updateMany.mockImplementation(async ({ where }: any) => ({ count: where.id === 2 ? 0 : 1 }));
+        mockDelegate('Item').update.mockRejectedValue(Object.assign(new Error('No record was found for an update.'), { code: 'P2025' }));
+        const result = await new Model('Item').upsertMany(items([1, 'a'], [2, 'b']));
+        expect(result).toMatchObject({ updated: 1, totalFailed: 1, failed: [{ record: { name: 'b' }, error: { code: 'P2025' } }] });
+        expect(mockDelegates.Item.update.mock.calls[0][0]).toEqual({ where: { id: 2 }, data: { name: 'b' } });
+        expect(mockDb.commits).toBe(1);
+    });
+
+    it('foreign keys stay on update: the connect is held to the related model\'s access rules', async () => {
+        mockAcl.model.Item = { getAccessFilter: (u: any) => ({ owner: u.id }) };
+        mockDelegate('Tag').findMany.mockResolvedValue([{ id: 1 }, { id: 2 }]);
+        const result = await new Model('Tag', { user }).upsertMany([{ id: 1, label: 'x', itemId: 5 }, { id: 2, label: 'y' }]);
+        expect(mockDelegates.Tag.update.mock.calls[0][0]).toEqual({ where: { id: 1 }, data: { label: 'x', item: { connect: { id: 5, AND: [{ owner: 7 }] } } } });
+        expect(mockDelegates.Tag.updateMany.mock.calls).toEqual([[{ where: { id: 2 }, data: { label: 'y' } }]]);
+        expect(result).toMatchObject({ updated: 2 });
+    });
+
+    it('a @@unique key updates by its plain fields; a key that isn\'t unique, or Prisma options, keep update', async () => {
+        mockDelegate('Slot').findMany.mockResolvedValue([{ day: 1, room: 2 }]);
+        await new Model('Slot').upsertMany([{ id: 9, day: 1, room: 2 }], ['day', 'room']);
+        expect(mockDelegates.Slot.updateMany.mock.calls[0][0].where).toEqual({ day: 1, room: 2 });
+        expect(mockDelegates.Slot.update).not.toHaveBeenCalled();
+
+        mockDelegate('Item').findMany.mockResolvedValue([{ id: 1, qty: 5 }]);
+        await new Model('Item').upsertMany([{ qty: 5, owner: 1 }], 'qty');
+        await new Model('Item').upsertMany([{ id: 1, name: 'a' }], 'id', { select: { id: true } });
+        expect(mockDelegates.Item.update.mock.calls.map(([args]: any) => args)).toEqual([
+            { where: { qty: 5 }, data: { qty: 5, owner: 1 } },
+            { where: { id: 1 }, data: { name: 'a' }, select: { id: true } },
+        ]);
+        expect(mockDelegates.Item.updateMany).not.toHaveBeenCalled();
     });
 });
 

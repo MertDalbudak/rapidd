@@ -170,6 +170,26 @@ class Model {
         return key === this.primaryKey && this.isCompositePK ? this.primaryKeyFields : key;
     }
 
+    /** The fields name one row at most: an @id / @unique field, or exactly the fields of the @@id or a @@unique */
+    #isUniqueKey(fields: string[]): boolean {
+        if (fields.length === 1) {
+            const field = this.fields[fields[0]] as { isId?: boolean; isUnique?: boolean } | undefined;
+            if (field?.isId || field?.isUnique) return true;
+        }
+        const model = dmmf.getModel(this.name);
+        const sameFields = (index?: { fields: string[] } | null) =>
+            !!index && index.fields.length === fields.length && fields.every((f) => index.fields.includes(f));
+        return sameFields(model?.primaryKey) || !!model?.uniqueIndexes?.some(sameFields);
+    }
+
+    /** Only the model's own columns — no relation writes (a foreign key arrives as a connect) */
+    #plainColumns(data: Record<string, unknown>): boolean {
+        return Object.keys(data).every((key) => {
+            const kind = (this.fields[key] as { kind?: string } | undefined)?.kind;
+            return kind === 'scalar' || kind === 'enum';
+        });
+    }
+
     /**
      * Build a Prisma select clause for primary key fields
      */
@@ -741,18 +761,34 @@ class Model {
                 }
             }
 
-            // Updates, each scoped by the ACL update filter
+            // Updates, each scoped by the ACL update filter. A record of plain columns is written
+            // with updateMany — one statement, where update also returns the row (on MySQL/MariaDB,
+            // without RETURNING, a second query per record). update stays for a key that isn't
+            // provably unique, extra Prisma options, and relation writes (foreign keys become
+            // connects checked against the related model's access rules) — and for a record
+            // updateMany doesn't find, so a missing or forbidden row is reported as before
+            const fastUpdates = this.#isUniqueKey(keyFields) && Object.keys(_prismaOptions ?? {}).length === 0;
             const updatedCount = await writeEach(
                 updateRecords,
-                ({ original, transformed }) => {
-                    const whereId = Array.isArray(targetKey)
-                        ? this.buildWhereUniqueKey(targetKey, original)
-                        : { [targetKey as string]: original[targetKey as string] };
-                    return tx[this.name].update({
-                        'where': this.#mergeAclIntoUniqueWhere(whereId, updateFilter),
-                        'data': transformed,
-                        ..._prismaOptions
+                async ({ original, transformed }) => {
+                    const update = () => {
+                        const whereId = Array.isArray(targetKey)
+                            ? this.buildWhereUniqueKey(targetKey, original)
+                            : { [targetKey as string]: original[targetKey as string] };
+                        return tx[this.name].update({
+                            'where': this.#mergeAclIntoUniqueWhere(whereId, updateFilter),
+                            'data': transformed,
+                            ..._prismaOptions
+                        });
+                    };
+                    if (!fastUpdates || !this.#plainColumns(transformed)) return update();
+                    const keyWhere = Object.fromEntries(keyFields.map((k: string) => [k, original[k]]));
+                    const { count } = await tx[this.name].updateMany({
+                        'where': this.#mergeAclIntoUniqueWhere(keyWhere, updateFilter),
+                        'data': transformed
                     });
+                    if (count === 0) return update();
+                    return undefined;
                 },
                 ({ transformed }, error) => failed.push({ record: transformed, error })
             );

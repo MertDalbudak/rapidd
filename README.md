@@ -58,7 +58,7 @@ Every table gets full CRUD endpoints. Auth is enabled automatically when a user 
 | Full source code ownership | ✓ | — | — | — | ✓ |
 | Schema-first (no UI) | ✓ | ✓ | ✓ | ✓ | — |
 | REST API | ✓ | partial | ✓ | ✓ | ✓ |
-| Multi-database | ✓ | ✓ | — | — | ✓ |
+| Multiple database engines | ✓** | ✓ | — | — | ✓ |
 | Built-in auth | ✓ | — | — | ✓ | ✓ |
 | Per-model ACL | ✓ | ✓ | — | — | ✓ |
 | Row-level security | ✓* | ✓ | ✓ | ✓ | — |
@@ -66,7 +66,8 @@ Every table gets full CRUD endpoints. Auth is enabled automatically when a user 
 | Custom routes alongside generated | ✓ | — | — | ✓ | ✓ |
 | No vendor dependency | ✓ | ✓ | ✓ | — | ✓ |
 
-<sub>* PostgreSQL only. All other features support PostgreSQL and MySQL/MariaDB.</sub>
+<sub>* PostgreSQL only. All other features support PostgreSQL and MySQL/MariaDB.</sub><br>
+<sub>** PostgreSQL and MySQL/MariaDB — one database per app, not several at once.</sub>
 
 ---
 
