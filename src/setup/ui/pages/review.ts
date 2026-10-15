@@ -4,7 +4,7 @@
 export function installReviewPage(R) {
     const h = R.h;
     const S = R.S;
-    const FILE_PAGES = { app: 'services', rateLimit: 'ratelimits', acl: 'access', rls: 'rls' };
+    const FILE_PAGES = { app: 'services', rateLimit: 'ratelimits', rls: 'rls' };
 
     /**
      * invalid: changes and files that cannot be saved (block saving); missing: settings that are
@@ -93,7 +93,6 @@ export function installReviewPage(R) {
         S.revealed = {};
         for (const id of Object.keys(r.texts)) S.files[id] = { original: r.texts[id] };
         S.project = null;
-        S.acl = null;
         S.rls = null;
         R.toast('ok', 'Saved ' + written);
         if (r.schema && r.schema.changed) R.toast('info', 'prisma/schema.prisma now uses ' + r.schema.to + ' (was ' + r.schema.from + ')');

@@ -5,7 +5,7 @@ import path from 'path';
 import vm from 'vm';
 import type { AddressInfo } from 'net';
 import { readSchema } from '../../src/setup/project';
-import { className, modelsOverview, aclContext, routePrefixes } from '../../src/setup/models';
+import { className, modelsOverview, routePrefixes } from '../../src/setup/models';
 import type { ModelOverview } from '../../src/setup/models';
 import { buildRuns } from '../../src/setup/actions';
 import { rlsStatements, rlsWarnings, rlsActive, RlsSpecError } from '../../src/setup/rls';
@@ -13,8 +13,6 @@ import type { RlsStatus } from '../../src/setup/rls';
 import { testService } from '../../src/setup/services';
 import { setupReasons, wizardMode } from '../../src/setup';
 import { wizardScript, wizardPage, passwordPage } from '../../src/setup/ui';
-import { mergeAclRules } from '../../src/core/acl';
-import { aclFromRules, validateAclRules } from '../../src/core/aclRules';
 
 const SCHEMA = `datasource db {
   provider = "postgresql"
@@ -89,19 +87,10 @@ describe('data model overview', () => {
         expect(by.order).toMatchObject({ table: 'orders', route: { kind: 'route', exists: true }, relations: { user: 'user', items: 'order_item' } });
         expect(by.order.fields.map((f) => f.name)).toEqual(['id', 'user_id']);
         expect(by.order_item.route).toMatchObject({ kind: 'nested', parents: ['order', 'product'] });
-        expect(by.audit.route).toMatchObject({ kind: 'none' });
+        // A key of three columns is a route of its own: /api/v1/audit/1~2~3
+        expect(by.audit).toMatchObject({ key: ['a', 'b', 'c'], route: { kind: 'route', url: '/api/v1/audit' } });
         expect(by.product.code).toBe(true);
-        expect(routePrefixes(models)).toEqual(['/auth/login', '/auth/refresh', '/auth', '/api/v1', '/api/v1/user', '/api/v1/order', '/api/v1/product']);
-    });
-
-    it('what the access rule editor needs: roles, the user attributes, role fields', async () => {
-        const { dmmf } = await readSchema(dir);
-        const ctx = aclContext(dir, dmmf, { AUTH_ROLE_MAP: '{"Domain Admins":"ADMIN","Auditors":"auditor"}', AUTH_DEFAULT_ROLE: 'guest' });
-        expect(ctx.roles).toEqual(['ADMIN', 'STAFF', 'auditor', 'guest']);
-        expect(ctx.userModel).toBe('user');
-        expect(ctx.userAttributes).toEqual(['id', 'email', 'role', 'tenant_id']);
-        expect(ctx.roleFieldCandidates).toEqual(['role']);
-        expect(ctx.codeFile).toBeNull();
+        expect(routePrefixes(models)).toEqual(['/auth/login', '/auth/refresh', '/auth', '/api/v1', '/api/v1/user', '/api/v1/order', '/api/v1/product', '/api/v1/audit']);
     });
 });
 
@@ -133,6 +122,31 @@ model projects {
             expect(warning).toMatch(/employees looks like one: set it as the user table \(DB_USER_TABLE\)/);
             // Once chosen, nothing to suggest
             expect((await inspectProject(dir, { DATABASE_URL: 'mysql://u:p@h/db', DB_USER_TABLE: 'employees' })).userModelCandidates).toEqual([]);
+        } finally {
+            fs.rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+describe('a password column under another name', () => {
+    it('DB_USER_PASSWORD_FIELD makes it a credential the overview warns about', async () => {
+        const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rapidd-wizard-password-'));
+        try {
+            fs.mkdirSync(path.join(dir, 'prisma'));
+            fs.writeFileSync(path.join(dir, 'prisma', 'schema.prisma'), `datasource db {
+  provider = "postgresql"
+}
+model members {
+  id       Int    @id
+  login    String @unique
+  kennwort String
+}
+`);
+            const { inspectProject } = await import('../../src/setup/project');
+            const project = await inspectProject(dir, { DATABASE_URL: 'postgresql://u:p@h/db', DB_USER_TABLE: 'members', DB_USER_PASSWORD_FIELD: 'kennwort' });
+            const { dmmf } = await readSchema(dir);
+            expect(modelsOverview(dir, dmmf, [], project.userModel)[0].sensitive).toEqual(['kennwort']);
+            expect(modelsOverview(dir, dmmf, [])[0].sensitive).toEqual([]);
         } finally {
             fs.rmSync(dir, { recursive: true, force: true });
         }
@@ -214,7 +228,7 @@ describe('row-level security SQL', () => {
     it('RLS_ENABLED: on for PostgreSQL unless turned off', () => {
         expect(rlsActive({ DATABASE_URL: 'postgresql://h/db' })).toBe(true);
         expect(rlsActive({ DATABASE_URL: 'mysql://h/db' })).toBe(false);
-        expect(rlsActive({ DATABASE_URL: 'mysql://h/db', RLS_ENABLED: 'true' })).toBe(true);
+        expect(rlsActive({ DATABASE_URL: 'mysql://h/db', RLS_ENABLED: 'true' })).toBe(false); // MySQL has no RLS
         expect(rlsActive({ DATABASE_URL: 'postgresql://h/db', RLS_ENABLED: 'false' })).toBe(false);
     });
 
@@ -292,25 +306,6 @@ describe('service test calls', () => {
     });
 });
 
-describe('access rules from config and code', () => {
-    it('code entries take their model over; the other rules stay', () => {
-        const rules = aclFromRules({ models: { post: { read: { '*': 'all' } }, tag: { read: { '*': 'none' } } } });
-        const code = { getAccessFilter: () => ({ id: 1 }) };
-        const merged = mergeAclRules({ model: { post: code } }, rules);
-        expect(merged.model.post).toBe(code);
-        expect(merged.model.tag).toBe(rules.tag);
-        expect(mergeAclRules(null, rules).model).toEqual(rules);
-    });
-
-    it('"all" writable fields for a role', () => {
-        const acl = aclFromRules({ models: { post: { write: { admin: 'all', '*': ['title'] } } } }).post;
-        expect(acl.getWritableFields!({ id: 1, role: 'admin' })).toBeNull();
-        expect(acl.getWritableFields!({ id: 2, role: 'staff' })).toEqual(['title']);
-        expect(validateAclRules({ models: { post: { write: { admin: 'all' }, hide: { admin: 'all' } } } }))
-            .toEqual(['post.hide.admin: a list of field names']);
-    });
-});
-
 describe('setup reasons and wizard mode', () => {
     let dir: string;
     const saved = { ...process.env };
@@ -327,12 +322,10 @@ describe('setup reasons and wizard mode', () => {
         Object.assign(process.env, saved);
     });
 
-    it('a broken config/acl.json or config/rls.json keeps the API from starting', async () => {
-        fs.writeFileSync(path.join(dir, 'config', 'acl.json'), '{ "models": { "post": { "read": { "*": "some" } } } }');
+    it('a broken config/rls.json keeps the API from starting', async () => {
         fs.writeFileSync(path.join(dir, 'config', 'rls.json'), '{ broken');
         const reasons = await setupReasons(dir);
-        expect(reasons.map((r) => r.key)).toEqual([path.join('config', 'acl.json'), path.join('config', 'rls.json')]);
-        expect(reasons[0].message).toBe(`${path.join('config', 'acl.json')}: post.read.*: "all", "none" or { "where": { ... } }`);
+        expect(reasons.map((r) => r.key)).toEqual([path.join('config', 'rls.json')]);
         expect(reasons.every((r) => !r.message.includes(dir))).toBe(true);
     });
 
@@ -353,7 +346,7 @@ describe('wizard page', () => {
         const script = wizardScript();
         expect(() => new vm.Script(script)).not.toThrow();
         expect(script).not.toMatch(/\brequire\(|\bexports\.|import\(/);
-        for (const page of ['overview', 'database', 'model', 'signin', 'admin', 'access', 'rls', 'ratelimits', 'services', 'environment', 'review']) {
+        for (const page of ['overview', 'database', 'model', 'signin', 'admin', 'rls', 'ratelimits', 'services', 'environment', 'review']) {
             expect(script).toContain(`id: '${page}'`);
         }
     });

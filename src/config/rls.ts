@@ -17,13 +17,13 @@ import { rlsFromConfig } from '../core/rlsRules';
  * // User-based isolation
  * const rlsContext: RlsContextFn = (request) => ({
  *     current_user_id: request.user?.id ?? null,
- *     current_user_role: request.user?.role ?? null,
  * });
  *
  * @example
- * // Multi-tenant from header
+ * // Multi-tenant from a header your gateway sets — a client can send any value, so never
+ * // a header clients control alone
  * const rlsContext: RlsContextFn = (request) => ({
- *     current_tenant_id: request.headers['x-tenant-id'] ?? null,
+ *     current_tenant_id: request.headers['x-gateway-tenant-id'] ?? null,
  * });
  *
  * @example

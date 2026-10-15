@@ -24,7 +24,7 @@ export type ActionName = 'generate' | 'pull' | 'push' | 'migrate' | 'build';
 /** What `build` generates: model classes and/or REST routes, for all or some models */
 export interface BuildOptions {
     models?: string[];
-    components?: ('model' | 'route')[];
+    components?: ('model' | 'route' | 'acl')[];
 }
 
 export interface BuildSupport {
@@ -115,7 +115,8 @@ export async function actionBlocker(name: ActionName, values: Values, root: stri
     if (project.schema.models.length === 0) return 'The schema has no models to create';
     let tables: string[];
     try {
-        tables = (await databaseInfo(values.DATABASE_URL)).tables;
+        // Seen as the push runs: the admin connection, when set (MySQL lists only the tables a user may use)
+        tables = (await databaseInfo(values.DATABASE_URL_ADMIN || values.DATABASE_URL)).tables;
     } catch (err) {
         return `Cannot reach the database: ${(err as Error).message}`;
     }
@@ -128,8 +129,8 @@ export async function actionBlocker(name: ActionName, values: Values, root: stri
 
 /**
  * The rapidd build runs for these options: one per component and — for an older @rapidd/build —
- * per model. Always with --only: access rules are the wizard's (staged with the other changes),
- * so the build never writes config/acl.json behind its back.
+ * per model. Always with --only, so only the chosen components are written (acl: src/config/acl.ts
+ * while it has no entries — the generator never changes one that has).
  */
 export function buildRuns(options: BuildOptions, allModels: string[], support: BuildSupport): string[][] {
     const components = options.components?.length ? options.components : (['model', 'route'] as const);
@@ -150,14 +151,8 @@ export function buildRuns(options: BuildOptions, allModels: string[], support: B
     return runs;
 }
 
-/** Run a project action with the given settings (DATABASE_URL & co. need not be saved yet) */
-export async function runAction(name: ActionName, values: Values, root: string = process.cwd(), options: BuildOptions = {}): Promise<ActionResult> {
-    const blocker = await actionBlocker(name, values, root);
-    if (blocker) return { ok: false, message: blocker, output: '' };
-
-    // A fresh schema follows the database (the scaffold says postgresql)
-    const aligned: { changed: boolean; from?: string; to?: string } = name === 'build' ? { changed: false } : alignSchemaProvider(root, values.DATABASE_URL);
-
+/** The environment of a command run for the project: the settings over the process's own */
+function commandEnv(values: Values): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env };
     for (const [key, value] of Object.entries(values)) {
         if (value !== undefined && value !== '') env[key] = value;
@@ -166,6 +161,25 @@ export async function runAction(name: ActionName, values: Values, root: string =
     env.FORCE_COLOR = '0';
     // Prisma refuses some commands from non-interactive shells without this
     env.PRISMA_HIDE_UPDATE_MESSAGE = '1';
+    return env;
+}
+
+/** A prisma CLI command for the project, with the given settings */
+export async function runPrisma(args: string[], values: Values, root: string = process.cwd(), timeoutMs = 120_000): Promise<{ code: number | null; output: string }> {
+    const prisma = findBin('prisma', root);
+    if (!prisma) return { code: 1, output: 'The prisma CLI is not installed here (it is a dev dependency)' };
+    return run(prisma, args, root, commandEnv(values), timeoutMs);
+}
+
+/** Run a project action with the given settings (DATABASE_URL & co. need not be saved yet) */
+export async function runAction(name: ActionName, values: Values, root: string = process.cwd(), options: BuildOptions = {}): Promise<ActionResult> {
+    const blocker = await actionBlocker(name, values, root);
+    if (blocker) return { ok: false, message: blocker, output: '' };
+
+    // A fresh schema follows the database (the scaffold says postgresql)
+    const aligned: { changed: boolean; from?: string; to?: string } = name === 'build' ? { changed: false } : alignSchemaProvider(root, values.DATABASE_URL);
+
+    const env = commandEnv(values);
 
     if (name === 'build') {
         const project = await inspectProject(root, values);
@@ -178,6 +192,11 @@ export async function runAction(name: ActionName, values: Values, root: string =
             if (result.code !== 0) return { ok: false, message: `rapidd build failed (exit ${result.code})`, output: output.trim() };
         }
         return { ok: true, message: 'rapidd build finished', output: output.trim() };
+    }
+
+    // Changing the schema takes its owner — the admin connection, when the API's role isn't it
+    if ((name === 'push' || name === 'migrate') && values.DATABASE_URL_ADMIN) {
+        env.DATABASE_URL = cliDatabaseUrl(values.DATABASE_URL_ADMIN);
     }
 
     const prisma = findBin('prisma', root)!;

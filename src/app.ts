@@ -219,6 +219,9 @@ export async function buildApp(options: RapiddOptions = {}): Promise<FastifyInst
     if (production) {
         await app.register(fastifyCors, {
             delegator: (request: FastifyRequest, callback: (err: Error | null, options?: Record<string, unknown>) => void) => {
+                // An identity provider's answer (SAML POST) comes from its own origin — the route
+                // checks it by signature and binds it to the browser, and needs no CORS headers
+                if (request.routeOptions?.config?.anyOrigin) return callback(null, { origin: false });
                 const origin = request.headers.origin;
                 // A page served by this API (e.g. a login form) posting to itself is same-origin
                 const allowed = !origin
@@ -390,8 +393,8 @@ function registerHealthRoutes(app: FastifyInstance): void {
 
 // ─── Route Loader ───────────────────────────────────
 
-async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void> {
-    const basePath = process.env.ROUTES_PATH!;
+/** Register the route files under `routePath` — URL prefixes follow their path below `basePath` */
+async function loadRoutes(app: FastifyInstance, routePath: string, basePath: string = routePath): Promise<void> {
     const relativePath = '/' + path.relative(basePath, routePath).replace(/\\/g, '/');
 
     const entries = fs.readdirSync(routePath, { withFileTypes: true })
@@ -402,7 +405,7 @@ async function loadRoutes(app: FastifyInstance, routePath: string): Promise<void
 
     for (const entry of entries) {
         if (entry.isDirectory()) {
-            await loadRoutes(app, path.join(routePath, entry.name));
+            await loadRoutes(app, path.join(routePath, entry.name), basePath);
         } else {
             const ext = path.extname(entry.name);
             if ((ext === '.js' || ext === '.ts') && entry.name[0] !== '_' && !entry.name.endsWith('.d.ts')) {

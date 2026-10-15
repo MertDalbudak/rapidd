@@ -177,6 +177,19 @@ describe('CORS in production', () => {
         await app.close();
     });
 
+    it("a route marked anyOrigin — an identity provider's form POST — passes from any origin, without CORS headers", async () => {
+        const app = await build({ plugins: [fp(async (f) => {
+            f.post('/idp-answer', { config: { anyOrigin: true } }, async () => ({ ok: true }));
+            f.post('/other', async () => ({ ok: true }));
+        })] });
+        const answer = await app.inject({ method: 'POST', url: '/idp-answer', headers: { origin: 'https://idp.example.com' } });
+        expect(answer.statusCode).toBe(200);
+        expect(answer.headers['access-control-allow-origin']).toBeUndefined();
+        const other = await app.inject({ method: 'POST', url: '/other', headers: { origin: 'https://idp.example.com' } });
+        expect(other.statusCode).toBe(403);
+        await app.close();
+    });
+
     it("allows the API's own origin (pages it serves posting back)", async () => {
         const app = await build();
         const res = await app.inject({ method: 'GET', url: '/health', headers: { origin: 'http://api.internal', host: 'api.internal' } });

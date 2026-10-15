@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import fp from 'fastify-plugin';
 import { Auth, setCurrentAuth, LoginResult } from '../auth/Auth';
@@ -21,7 +22,7 @@ const STATE_COOKIE = 'rapidd_auth_state';
  * Authentication plugin for Fastify.
  * Authenticates every request with the configured strategies (bearer / basic / cookie /
  * header) and sets request.user. Registers the /auth/* routes: password login, logout,
- * refresh, me, the provider list, and redirect login (OAuth2 / OIDC) with ticket exchange.
+ * refresh, me, the provider list, and redirect login (OAuth2 / OIDC, SAML) with ticket exchange.
  * Gracefully disables auth when there is neither a user table nor an external provider.
  */
 const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, options) => {
@@ -38,13 +39,8 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         fastify.decorate('requireAuth', function requireAuth(_request: FastifyRequest) {
             throw new ErrorResponse(401, 'authentication_not_available');
         });
-        fastify.decorate('requireRole', function requireRole(..._roles: string[]) {
-            return async function (_request: FastifyRequest) {
-                throw new ErrorResponse(401, 'authentication_not_available');
-            };
-        });
         // Sign-in is off on purpose (AUTH_PROVIDERS=none): every request is the anonymous user,
-        // so routes serve it and access rules decide what it may do. (Without a user table but
+        // so routes serve it and src/config/acl.ts decides what it may do. (Without a user table but
         // with sign-in configured, requests stay without a user — routes refuse them.)
         if (auth.isAnonymous?.()) {
             fastify.addHook('onRequest', async (request) => {
@@ -111,10 +107,11 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         reply.clearCookie(refreshCookie, { ...cookieBase, path: '/auth' });
     };
 
-    /** Login/refresh/exchange response body: tokens, unless they live in cookies only */
+    /** Login/exchange response body: tokens, unless they live in cookies only — and the user as clients see it */
     const loginResponse = (reply: FastifyReply, result: LoginResult) => {
         if (usesCookie) setAuthCookies(reply, result);
-        return cookieOnly ? { user: result.user } : result;
+        const user = auth.publicUser(result.user);
+        return cookieOnly ? { user } : { ...result, user };
     };
 
     // ── Request authentication ──────────────────────
@@ -244,7 +241,7 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         });
     });
 
-    // ── Redirect login (OAuth2 / OpenID Connect) ────
+    // ── Redirect login (OAuth2 / OpenID Connect, SAML) ──
 
     const loginRedirect = auth.config.loginRedirect || '/';
     const loginRedirectOrigin = (() => {
@@ -266,6 +263,13 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
         return `${requestOrigin(request)}/auth/${providerName}/callback`;
     };
 
+    // One cookie per sign-in the browser began, named after its state — tabs may begin them at
+    // the same instant, and none rewrites another's. SameSite=Lax: it must survive the IdP's
+    // top-level redirect back to us.
+    const stateCookie = (state: string): string =>
+        `${STATE_COOKIE}_${crypto.createHash('sha256').update(state).digest('hex').slice(0, 16)}`;
+    const stateCookieOptions = (provider: string) => ({ ...cookieBase, sameSite: 'lax' as const, path: `/auth/${provider}/callback` });
+
     fastify.get('/auth/:provider/login', async (request, reply) => {
         const { provider } = request.params as { provider: string };
         const { redirect } = request.query as { redirect?: string };
@@ -279,24 +283,20 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
             returnTo,
         });
 
-        // SameSite=Lax: the cookie must survive the IdP's top-level redirect back to us
-        reply.setCookie(STATE_COOKIE, state, {
-            ...cookieBase,
-            sameSite: 'lax',
-            path: `/auth/${provider}/callback`,
-            maxAge: 600,
-            signed: signCookies,
-        });
+        reply.setCookie(stateCookie(state), state, { ...stateCookieOptions(provider), maxAge: 600, signed: signCookies });
         return reply.redirect(url);
     });
 
     fastify.get('/auth/:provider/callback', async (request, reply) => {
         const { provider } = request.params as { provider: string };
         const query = request.query as Record<string, string | undefined>;
-        reply.clearCookie(STATE_COOKIE, { ...cookieBase, sameSite: 'lax', path: `/auth/${provider}/callback` });
+        // This sign-in's state cookie is spent — another tab's stays
+        const name = typeof query.state === 'string' && query.state ? stateCookie(query.state) : null;
+        const browserState = name ? readCookie(request, name) : undefined;
+        if (name) reply.clearCookie(name, stateCookieOptions(provider));
 
         try {
-            const { result, returnTo } = await auth.completeRedirectLogin(provider, query, readCookie(request, STATE_COOKIE));
+            const { result, returnTo } = await auth.completeRedirectLogin(provider, query, browserState);
             if (usesCookie) setAuthCookies(reply, result);
             // Tokens never travel in a URL: SPAs redeem a single-use, 60s ticket at /auth/exchange
             const target = cookieOnly ? returnTo : appendQuery(returnTo, { auth_ticket: await auth.issueLoginTicket(result) });
@@ -306,6 +306,32 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
             if (!(err instanceof ErrorResponse)) Logger.error(err as Error, { route: 'auth callback', provider });
             return reply.redirect(appendQuery(loginRedirect, { auth_error: key }));
         }
+    });
+
+    // Identity providers that answer with a form POST (SAML's HTTP-POST binding). The POST is
+    // cross-site, so the browser sends no SameSite cookie with it: the answer is validated and
+    // parked, and the browser sent on (303) to the GET callback — which carries the state cookie
+    // that binds the login to the browser that began it. It comes from the IdP's origin.
+    fastify.post('/auth/:provider/callback', { config: { anyOrigin: true } }, async (request, reply) => {
+        const { provider } = request.params as { provider: string };
+        try {
+            const redirectUri = callbackUrl(request, provider);
+            const query = await auth.receiveRedirectPost(provider, (request.body ?? {}) as Record<string, unknown>, { redirectUri });
+            return reply.redirect(appendQuery(redirectUri, query), 303);
+        } catch (err) {
+            const key = err instanceof ErrorResponse ? err.message : 'auth_login_failed';
+            if (!(err instanceof ErrorResponse)) Logger.error(err as Error, { route: 'auth callback (POST)', provider });
+            return reply.redirect(appendQuery(loginRedirect, { auth_error: key }), 303);
+        }
+    });
+
+    // This API's metadata for the identity provider (SAML: entity id, assertion consumer URL)
+    fastify.get('/auth/:provider/metadata', async (request, reply) => {
+        const { provider } = request.params as { provider: string };
+        const instance = auth.getProvider(provider);
+        if (!instance?.serviceMetadata) throw new ErrorResponse(404, 'auth_provider_not_found', { provider });
+        const { contentType, body } = await instance.serviceMetadata({ redirectUri: callbackUrl(request, provider) });
+        return reply.type(contentType).send(body);
     });
 
     fastify.post('/auth/exchange', async (request, reply) => {
@@ -321,19 +347,6 @@ const authPlugin: FastifyPluginAsync<AuthPluginOptions> = async (fastify, option
             throw new ErrorResponse(401, 'authentication_required');
         }
     });
-    fastify.decorate('requireRole', function requireRole(...roles: string[]) {
-        const allowedRoles = roles.flat().map((r: string) => r.toLowerCase());
-
-        return async function (request: FastifyRequest) {
-            if (!request.user) {
-                throw new ErrorResponse(401, 'authentication_required');
-            }
-            const userRole = request.user.role?.toLowerCase();
-            if (!userRole || !allowedRoles.includes(userRole)) {
-                throw new ErrorResponse(403, 'insufficient_permissions');
-            }
-        };
-    });
 };
 
 export default fp(authPlugin, { name: 'rapidd-auth' });
@@ -344,7 +357,6 @@ declare module 'fastify' {
     interface FastifyInstance {
         auth: Auth;
         requireAuth(request: FastifyRequest): void;
-        requireRole(...roles: string[]): (request: FastifyRequest) => Promise<void>;
     }
 
     interface FastifyRequest {
@@ -354,5 +366,7 @@ declare module 'fastify' {
 
     interface FastifyContextConfig {
         auth?: RouteAuthConfig;
+        /** Accept requests from any origin — an identity provider's form POST comes from its own */
+        anyOrigin?: boolean;
     }
 }

@@ -1,13 +1,14 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
-import { authPrisma, dbProvider } from '../core/prisma';
+import { authPrisma, dbProvider, getAcl } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { createStore } from './stores';
-import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField, getPrimaryKey, getScalarFields } from '../core/dmmf';
+import { loadDMMF, findUserModel, findIdentifierFields, findPasswordField, getPrimaryKey, getScalarFields, getDMMFSync } from '../core/dmmf';
+import { parseScalar } from '../orm/values';
 import { Logger } from '../utils/Logger';
 import { createProviders, providerConfigsFromEnv } from './providers';
-import { IdentityResolver, linkFromEnv, rolesFromEnv } from './identity';
+import { IdentityResolver, linkFromEnv } from './identity';
 import type {
     RapiddUser, AuthOptions, AuthStrategy, ISessionStore, AuthConfig, AuthProvider,
     ExternalIdentity, AuthEventContext,
@@ -30,7 +31,7 @@ const LOGIN_FLOW_TTL_S = 600;
 const LOGIN_TICKET_TTL_S = 60;
 
 const AUTH_CONFIG_KEYS = [
-    'providers', 'link', 'roles', 'provision', 'resolveUser', 'loginRedirect', 'validateUser', 'onLogin',
+    'providers', 'link', 'provision', 'resolveUser', 'loginRedirect', 'validateUser', 'onLogin',
 ] as const;
 
 /**
@@ -126,7 +127,7 @@ function safeEqual(a: string, b: string): boolean {
  * - **Providers** verify who a user is: the app's user table (`local`), LDAP / Active
  *   Directory, WebDAV, OpenID Connect / OAuth2 (bearer tokens and redirect login), or custom.
  * - **Identities** from external providers are mapped to app users (link, provision,
- *   claims, role mapping) — see IdentityResolver.
+ *   claims) — see IdentityResolver.
  * - **Sessions**: HS256 access/refresh JWTs bound to a server-side session (Redis or memory),
  *   with refresh-token rotation, reuse detection and per-user revocation.
  *
@@ -217,7 +218,11 @@ export class Auth {
             const envLink = linkFromEnv();
             if (envLink !== undefined) config.link = envLink;
         }
-        config.roles ??= rolesFromEnv();
+        // Role mapping was removed: code that read user.role from it now sees no role
+        const retired = ['AUTH_ROLE_MAP', 'AUTH_DEFAULT_ROLE'].filter((key) => process.env[key]);
+        if (retired.length > 0) {
+            Logger.warn(`${retired.join(' and ')} ${retired.length === 1 ? 'is' : 'are'} no longer used — users without a user-table row carry their identity provider's groups and roles (user.groups, user.roles); check those in src/config/acl.ts.`);
+        }
         config.loginRedirect ??= process.env.AUTH_LOGIN_REDIRECT || '/';
         this.config = config;
 
@@ -298,6 +303,7 @@ export class Auth {
         }
 
         this._warnOnBadLinkField(modelName);
+        this._warnOnExposedPassword(modelName);
 
         // Discovery, connectivity... providers never throw for transient outages
         await Promise.all(providers.map(async (provider) => {
@@ -330,6 +336,34 @@ export class Auth {
         }
     }
 
+    /**
+     * The password column in API responses: src/config/acl.ts doesn't hide it — written before
+     * the column was known (DB_USER_PASSWORD_FIELD), or by hand. Every reader would get the hashes.
+     */
+    private _warnOnExposedPassword(modelName: string | undefined): void {
+        const field = this.options.passwordField;
+        let hidden: boolean;
+        let limited: boolean;
+        try {
+            if (!modelName || !field || !getScalarFields(modelName)[field]) return;
+            const entry = getAcl().model[modelName];
+            const user = { id: null } as RapiddUser;
+            const omitted = entry?.getOmitFields?.(user);
+            hidden = Array.isArray(omitted) && omitted.includes(field);
+            // A list of writable fields: the app decided about the password column
+            limited = Array.isArray(entry?.getWritableFields?.(user));
+        } catch {
+            // A hook that needs a real user, or no DMMF (tests) — nothing to tell
+            return;
+        }
+        if (!hidden) {
+            Logger.warn(`Auth: the password column ${modelName}.${field} is in API responses — src/config/acl.ts doesn't hide it. Add it to getOmitFields of ${modelName}`);
+        }
+        if (!limited) {
+            Logger.warn(`Auth: the password column ${modelName}.${field} is writable through the API — ${modelName} has no getWritableFields in src/config/acl.ts, so whoever may update a row can set its password. List the writable fields without it (as rapidd build writes them for a new acl.ts)`);
+        }
+    }
+
     private _warnOnBadLinkField(modelName: string | undefined): void {
         if (!modelName || this.config.resolveUser) return;
         const links = [this.config.link, ...this.providers.map(p => p.link)]
@@ -355,7 +389,7 @@ export class Auth {
 
     /**
      * Sign-in is off on purpose — no identity providers (AUTH_PROVIDERS=none): every request
-     * is the anonymous user, and access rules decide what it may do
+     * is the anonymous user, and src/config/acl.ts decides what it may do
      */
     isAnonymous(): boolean {
         return this._anonymous;
@@ -366,7 +400,7 @@ export class Auth {
     /** Configured providers, in order (created on first access) */
     get providers(): AuthProvider[] {
         if (!this._providers) {
-            this._providers = createProviders(this.config.providers ?? providerConfigsFromEnv(), this);
+            this._providers = createProviders(this.config.providers ?? providerConfigsFromEnv(), this, { sessionStore: () => this.getSessionStore() });
         }
         return this._providers;
     }
@@ -437,27 +471,78 @@ export class Auth {
     sanitizeUser(user: Record<string, unknown> | null): RapiddUser | null {
         if (!user) return null;
         const { [this.options.passwordField]: _, ...sanitized } = user;
+        // user.id is the row's key, whatever its column is called — sessions, tokens and
+        // revocation are filed under it, and access control compares it. Composite: "a~b"
+        const key = this._userKeyFields();
+        if (key.length > 1) {
+            if (key.every((f) => sanitized[f] != null)) sanitized.id = key.map((f) => String(sanitized[f])).join('~');
+        } else if (key[0] !== 'id' && sanitized[key[0]] != null) {
+            sanitized.id = sanitized[key[0]];
+        }
         return sanitized as RapiddUser;
     }
 
-    /** Re-read a user-table row (refresh) so role/status changes take effect. null if it is gone. */
+    /**
+     * The user as clients see it — in access tokens, login responses and /auth/me: without the
+     * password column and without the fields the user model's access control hides from this
+     * user (getOmitFields in src/config/acl.ts). The session keeps the whole row.
+     */
+    publicUser(user: Record<string, unknown>): RapiddUser {
+        const sanitized = this.sanitizeUser(user)!;
+        const model = this._userModelName();
+        const omit = model ? getAcl().model[model]?.getOmitFields?.(sanitized) : undefined;
+        if (!omit?.length) return sanitized;
+        const visible: Record<string, unknown> = { ...sanitized };
+        for (const field of omit) delete visible[field];
+        return visible as RapiddUser;
+    }
+
+    /** The user table's Prisma model name — DB_USER_TABLE may differ from it in case, as the client lookup allows */
+    private _userModelName(): string | null {
+        const name = this.options.userModel;
+        if (!name) return null;
+        try {
+            const models = getDMMFSync()?.datamodel.models ?? [];
+            return (models.find((m) => m.name === name) ?? models.find((m) => m.name.toLowerCase() === name.toLowerCase()))?.name ?? name;
+        } catch {
+            return name; // schema unavailable — the configured name as it is
+        }
+    }
+
+    /** The user table's key columns — ['id'] while the table or its schema is unknown */
+    private _userKeyFields(): string[] {
+        const model = this._userModelName();
+        if (!model) return ['id'];
+        try {
+            const pk = getPrimaryKey(model) || 'id';
+            return Array.isArray(pk) ? pk : [pk];
+        } catch {
+            return ['id']; // schema unavailable — the conventional key
+        }
+    }
+
+    /** Re-read a user-table row (refresh) so changes to it take effect. null if it is gone. */
     private async _reloadUser(user: RapiddUser): Promise<RapiddUser | null> {
         const User = this.getUserModel();
         if (!User) return user;
 
-        let pk: string | string[] = 'id';
+        // By the key's own columns, else by user.id — a token's sub ("a~b" for composite keys)
+        const key = this._userKeyFields();
+        const parts = key.length > 1 ? String(user.id ?? '').split('~') : [user.id];
+        let fields: Record<string, any> = {};
         try {
-            pk = getPrimaryKey(this.options.userModel!) || 'id';
+            const model = this._userModelName();
+            if (model) fields = getScalarFields(model);
         } catch {
-            // DMMF unavailable — fall back to the conventional 'id'
+            // schema unavailable — values are used as they are
         }
-        const fields = Array.isArray(pk) ? pk : [pk];
-        const where = Object.fromEntries(fields.map((f) => [f, user[f] ?? (f === 'id' ? user.id : undefined)]));
+        const where = Object.fromEntries(key.map((f, i) => [f, parseScalar(fields[f], user[f] ?? parts[i])]));
         if (Object.values(where).some((v) => v === undefined || v === null)) return null;
 
         const row = await User.findFirst({ where, ...this.buildUserQuery(false) });
         return this.sanitizeUser(row);
     }
+
 
     // ── Session Store ───────────────────────────────
 
@@ -494,9 +579,8 @@ export class Auth {
             throw new Error('[Auth] JWT_SECRET is required');
         }
 
-        const sanitizedUser = this.sanitizeUser(user);
         return jwt.sign(
-            { sub: user.id, sessionId, user: sanitizedUser },
+            { sub: user.id, sessionId, user: this.publicUser(user) },
             this.options.jwt.secret,
             { algorithm: 'HS256', expiresIn: expiresIn(this.options.jwt.accessExpiry) as any }
         );
@@ -737,7 +821,7 @@ export class Auth {
         const subject = verified.user?.id ?? verified.sub;
         if (await this._revokedSince(subject, verified.iat)) return null;
         if (verified.user) return { user: verified.user, sessionId: null };
-        if (verified.sub) return { user: { id: verified.sub, role: 'user' } as RapiddUser, sessionId: null };
+        if (verified.sub) return { user: { id: verified.sub } as RapiddUser, sessionId: null };
         return null;
     }
 
@@ -827,6 +911,10 @@ export class Auth {
         }
 
         const providers = this._passwordProviders(providerName);
+        // Sign-in only through redirects (OIDC, SAML): there is no password sign-in to answer
+        if (providers.length === 0) {
+            throw new ErrorResponse(400, 'auth_provider_not_found', { provider: 'password' });
+        }
         if (providers.every(p => p.type === 'local') && !this.getUserModel()) {
             throw new ErrorResponse(500, 'auth_not_configured');
         }
@@ -975,7 +1063,7 @@ export class Auth {
             throw new ErrorResponse(401, 'invalid_refresh_token');
         }
 
-        const user = await this._reloadUser({ id: decoded.sub as string | number, role: null });
+        const user = await this._reloadUser({ id: decoded.sub as string | number });
         if (!user) {
             throw new ErrorResponse(401, 'user_not_found');
         }
@@ -989,7 +1077,7 @@ export class Auth {
         if (!user) {
             throw new ErrorResponse(401, 'not_authenticated');
         }
-        return { user };
+        return { user: this.publicUser(user) };
     }
 
     // ── Redirect Login (OAuth2 / OIDC) ──────────────
@@ -1014,16 +1102,44 @@ export class Auth {
     }
 
     /**
+     * An identity provider's form POST to the callback (SAML's HTTP-POST binding) — validated
+     * by the provider, parked single-use (60s), and the query to send the browser on with to the
+     * GET callback. The POST is cross-site: the browser sends no SameSite cookie with it, so the
+     * login is bound to the browser there, not here.
+     */
+    async receiveRedirectPost(
+        providerName: string,
+        body: Record<string, unknown>,
+        options: { redirectUri: string }
+    ): Promise<{ state: string; response: string }> {
+        const provider = this.getProvider(providerName);
+        if (!provider?.receivePost) {
+            throw new ErrorResponse(404, 'auth_provider_not_found', { provider: providerName });
+        }
+        const { state, data } = await provider.receivePost(body, options);
+        // Only the answer to a login this API began, while it is open
+        const flow = await this.getSessionStore().get(`flow:${state}`);
+        if (!flow || flow.provider !== provider.name) {
+            throw new ErrorResponse(400, 'auth_login_failed', { provider: providerName });
+        }
+        const response = crypto.randomBytes(32).toString('base64url');
+        await this.getSessionStore().create(`posted:${sha256(response)}`, { provider: provider.name, state, data }, { ttl: LOGIN_TICKET_TTL_S });
+        return { state, response };
+    }
+
+    /**
      * Finish a redirect login. `browserState` is the state bound to the browser at
      * beginRedirectLogin — it must match the callback's (login-CSRF protection).
      */
     async completeRedirectLogin(
         providerName: string,
         query: Record<string, string | undefined>,
-        browserState: string | undefined
+        browserState: string | string[] | undefined
     ): Promise<{ result: LoginResult; returnTo: string }> {
+        // The states of the sign-ins this browser began (one per tab signing in)
         const state = query.state;
-        if (!state || !browserState || !safeEqual(state, browserState)) {
+        const began = Array.isArray(browserState) ? browserState : browserState ? [browserState] : [];
+        if (!state || !began.some((known: string) => safeEqual(state, known))) {
             throw new ErrorResponse(400, 'auth_login_failed', { provider: providerName });
         }
 
@@ -1034,7 +1150,17 @@ export class Auth {
             throw new ErrorResponse(400, 'auth_login_failed', { provider: providerName });
         }
 
-        const identity = await provider.completeLogin(query, record.flow);
+        // What the identity provider posted for this state (receiveRedirectPost)
+        let posted: Record<string, unknown> | undefined;
+        if (provider.receivePost) {
+            const parked = query.response ? await takeEntry(this.getSessionStore(), `posted:${sha256(query.response)}`) : null;
+            if (!parked || parked.provider !== provider.name || parked.state !== state) {
+                throw new ErrorResponse(400, 'auth_login_failed', { provider: providerName });
+            }
+            posted = parked.data as Record<string, unknown>;
+        }
+
+        const identity = await provider.completeLogin(query, record.flow, posted);
         const result = await this._completeLogin(identity, provider);
         return { result, returnTo: record.returnTo };
     }

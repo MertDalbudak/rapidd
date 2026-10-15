@@ -1,16 +1,12 @@
 import fs from 'fs';
 import path from 'path';
-import { isRulesEntry } from '../core/aclRules';
-import { describeUserModel } from './project';
-import { listItems } from './catalog';
-import { ANONYMOUS_ROLE } from '../core/user';
 import { relationFields, type RelationField } from './schema';
-import type { DMMF, DMMFField, DMMFModel } from '../types';
+import { keyOf } from '../core/dmmf';
+import type { AclConfig, DMMF, DMMFField, DMMFModel } from '../types';
 
 /**
- * The data model as the wizard shows it: per model the generated code (model class, REST
- * route) and whether code owns its access control — plus what the access rule editor
- * needs: fields, the user's attributes and the known roles.
+ * The data model as the wizard shows it: per model its fields, the generated code (model
+ * class, REST route) and whether src/config/acl.ts has an entry for it.
  */
 
 export interface ModelField {
@@ -38,28 +34,14 @@ export interface ModelOverview {
     modelFile: { path: string; exists: boolean };
     /** Its REST route: a file of its own, nested under its parents (a join table), or none */
     route: { kind: 'route' | 'nested' | 'none'; url: string | null; file: string | null; exists: boolean; parents?: string[]; reason?: string };
-    /** An entry in src/config/acl.ts takes the model over — its rules are not used */
+    /** src/config/acl.ts has an entry for the model — else ACL_DEFAULT applies */
     code: boolean;
-    /** Credential-like fields: hidden by the default rules */
+    /** Credential-like fields — returned by the API unless acl.ts hides them */
     sensitive: string[];
 }
 
-export interface AclContext {
-    models: ModelOverview[];
-    /** Fields of the user table that can hold a role */
-    roleFieldCandidates: string[];
-    /** Roles the project knows of: enum values of the role field, AUTH_ROLE_MAP, AUTH_DEFAULT_ROLE */
-    roles: string[];
-    userModel: string | null;
-    /** For "$user.<attribute>" in row filters */
-    userAttributes: string[];
-    codeFile: string | null;
-    codeError?: string;
-}
-
-/** Same as @rapidd/build: credential columns are hidden by default rules */
+/** Same as @rapidd/build: credential columns its generated acl.ts hides */
 const SENSITIVE = /^(password|passwd|pwd|hash|password_?hash|hashed_?password)$|secret|token$|_token|api_?key/i;
-const ROLE_FIELD = /role|group|type|level|permission|kind/i;
 
 /** @rapidd/build's file name for a model class */
 export function className(model: string): string {
@@ -72,8 +54,7 @@ function exists(root: string, ...candidates: string[]): string | null {
 
 /** The model's REST route, as @rapidd/build generates it (join tables become sub-routes of their parents) */
 function routeOf(root: string, model: DMMFModel): ModelOverview['route'] {
-    const key = model.primaryKey?.fields ?? [];
-    if (key.length > 2) return { kind: 'none', url: null, file: null, exists: false, reason: 'A key of three or more columns has no REST route' };
+    const key = keyOf(model);
     if (key.length === 2) {
         const parents = key.map((k) => model.fields.find((f) => f.kind === 'object' && f.relationFromFields?.includes(k))?.type).filter(Boolean) as string[];
         if (parents.length === 2) return { kind: 'nested', url: null, file: null, exists: false, parents };
@@ -83,28 +64,42 @@ function routeOf(root: string, model: DMMFModel): ModelOverview['route'] {
     return { kind: 'route', url: `/api/v1/${model.name}`, file: file ?? path.join(dir, `${model.name}.ts`), exists: !!file };
 }
 
-/** Models with an entry written in src/config/acl.ts (entries from config/acl.json are not code) */
-export function codeAcl(root: string): { file: string | null; models: string[]; error?: string } {
+/** src/config/acl.ts as the app loads it — fresh on every call: a build may have just written it */
+export function loadCodeAcl(root: string): { file: string | null; acl: AclConfig | null; error?: string } {
     const file = exists(root, 'src/config/acl.ts', 'src/config/acl.js', 'dist/src/config/acl.js');
-    if (!file) return { file: null, models: [] };
+    if (!file) return { file: null, acl: null };
     try {
-        // Fresh on every call: a build may have just written it. Resolved next to this module,
-        // so the compiled app (dist/) loads its compiled acl.js
+        // Resolved next to this module, so the compiled app (dist/) loads its compiled acl.js
         const resolved = require.resolve('../config/acl');
         delete require.cache[resolved];
         // eslint-disable-next-line @typescript-eslint/no-require-imports
         const loaded = require(resolved);
-        const model = (loaded.default || loaded)?.model ?? {};
-        return { file, models: Object.keys(model).filter((name) => !isRulesEntry(model[name])) };
+        return { file, acl: (loaded.default || loaded) as AclConfig };
     } catch (err) {
-        return { file, models: [], error: (err as Error).message.split('\n')[0] };
+        return { file, acl: null, error: (err as Error).message.split('\n')[0] };
     }
 }
 
-export function modelsOverview(root: string, dmmf: DMMF | null, code: string[] = codeAcl(root).models): ModelOverview[] {
+/** Models with an entry in src/config/acl.ts */
+export function codeAcl(root: string): { file: string | null; models: string[]; error?: string } {
+    const { file, acl, error } = loadCodeAcl(root);
+    return { file, models: Object.keys(acl?.model ?? {}), ...(error ? { error } : {}) };
+}
+
+/**
+ * `userModel`: the user table and its password column (DB_USER_PASSWORD_FIELD may name one the
+ * credential pattern doesn't know)
+ */
+export function modelsOverview(
+    root: string,
+    dmmf: DMMF | null,
+    code: string[] = codeAcl(root).models,
+    userModel: { model: string; passwordField: string | null } | null = null,
+): ModelOverview[] {
     return (dmmf?.datamodel.models ?? []).map((model) => {
         const scalars = model.fields.filter((f) => f.kind !== 'object');
-        const key = model.primaryKey?.fields?.length ? model.primaryKey.fields : scalars.filter((f) => f.isId).map((f) => f.name);
+        const password = model.name === userModel?.model ? userModel.passwordField : null;
+        const key = keyOf(model);
         const modelFile = path.join('src', 'models', `${className(model.name)}.ts`);
         return {
             name: model.name,
@@ -124,44 +119,9 @@ export function modelsOverview(root: string, dmmf: DMMF | null, code: string[] =
             modelFile: { path: modelFile, exists: fs.existsSync(path.join(root, modelFile)) },
             route: routeOf(root, model),
             code: code.includes(model.name),
-            sensitive: scalars.filter((f) => SENSITIVE.test(f.name)).map((f) => f.name),
+            sensitive: scalars.filter((f) => SENSITIVE.test(f.name) || f.name === password).map((f) => f.name),
         };
     });
-}
-
-/** What the access rule editor needs to know about the project */
-export function aclContext(root: string, dmmf: DMMF | null, env: Record<string, string | undefined> = process.env, roleField = 'role'): AclContext {
-    const code = codeAcl(root);
-    const models = modelsOverview(root, dmmf, code.models);
-    const userModel = dmmf ? describeUserModel(dmmf, env)?.model : undefined;
-    const user = dmmf?.datamodel.models.find((m) => m.name === userModel);
-    const scalars = user?.fields.filter((f) => f.kind === 'scalar' || f.kind === 'enum') ?? [];
-
-    const roles = new Set<string>();
-    const field = scalars.find((f) => f.name === roleField);
-    if (field?.kind === 'enum') {
-        const enums = (dmmf?.datamodel as { enums?: { name: string; values: { name: string }[] }[] }).enums ?? [];
-        for (const v of enums.find((e) => e.name === field.type)?.values ?? []) roles.add(v.name);
-    }
-    try {
-        const map = env.AUTH_ROLE_MAP ? JSON.parse(env.AUTH_ROLE_MAP) : {};
-        for (const role of Object.values(map ?? {})) if (typeof role === 'string' && role) roles.add(role);
-    } catch {
-        // invalid AUTH_ROLE_MAP is reported on the sign-in page
-    }
-    if (env.AUTH_DEFAULT_ROLE) roles.add(env.AUTH_DEFAULT_ROLE);
-    // Sign-in off: every request has this role
-    if (listItems(env.AUTH_PROVIDERS).includes('none')) roles.add(ANONYMOUS_ROLE);
-
-    return {
-        models,
-        roleFieldCandidates: scalars.filter((f) => !f.isList && (f.kind === 'enum' || f.type === 'String') && ROLE_FIELD.test(f.name)).map((f) => f.name),
-        roles: [...roles],
-        userModel: user?.name ?? null,
-        userAttributes: scalars.filter((f) => !SENSITIVE.test(f.name)).map((f) => f.name),
-        codeFile: code.file,
-        ...(code.error ? { codeError: code.error } : {}),
-    };
 }
 
 /** Path prefixes worth a rate limit: sign-in endpoints and the model routes */

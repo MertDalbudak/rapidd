@@ -168,52 +168,6 @@ export function renameRelations(source: string, dmmf: DMMF, renames: Renames): s
     return out;
 }
 
-const RELATION_FILTERS = ['some', 'every', 'none', 'is', 'isNot'];
-
-/**
- * Access rules (config/acl.json) with the renamed relations: row filters (`where`, at any depth
- * of a relation path) and the hide / write lists
- */
-export function renameInRules<T>(rules: T, dmmf: DMMF, renames: Renames): T {
-    const r = rules as any;
-    if (!r || typeof r !== 'object' || !r.models || typeof r.models !== 'object') return rules;
-    const models = new Map(dmmf.datamodel.models.map((m) => [m.name, m]));
-    const where = (value: unknown, model: string): unknown => {
-        if (Array.isArray(value)) return value.map((v) => where(v, model));
-        if (!value || typeof value !== 'object') return value;
-        return Object.fromEntries(Object.entries(value).map(([key, v]) => {
-            if (key === 'AND' || key === 'OR' || key === 'NOT') return [key, where(v, model)];
-            const field = models.get(model)?.fields.find((f) => f.name === key);
-            if (field?.kind !== 'object') return [key, v];
-            const operators = !!v && typeof v === 'object' && !Array.isArray(v) && Object.keys(v).some((k) => RELATION_FILTERS.includes(k));
-            const filter = operators
-                ? Object.fromEntries(Object.entries(v as object).map(([op, inner]) => [op, RELATION_FILTERS.includes(op) ? where(inner, field.type) : inner]))
-                : where(v, field.type);
-            return [renames[model]?.[key] ?? key, filter];
-        }));
-    };
-    const out: any = { ...r, models: {} };
-    for (const [model, entry] of Object.entries(r.models as Record<string, any>)) {
-        if (!entry || typeof entry !== 'object') {
-            out.models[model] = entry;
-            continue;
-        }
-        const next: any = { ...entry };
-        for (const action of ['read', 'update', 'delete']) {
-            if (!next[action] || typeof next[action] !== 'object') continue;
-            next[action] = Object.fromEntries(Object.entries(next[action]).map(([role, scope]: [string, any]) =>
-                [role, scope && typeof scope === 'object' && 'where' in scope ? { ...scope, where: where(scope.where, model) } : scope]));
-        }
-        for (const action of ['hide', 'write']) {
-            if (!next[action] || typeof next[action] !== 'object') continue;
-            next[action] = Object.fromEntries(Object.entries(next[action]).map(([role, names]) =>
-                [role, Array.isArray(names) ? names.map((n) => (typeof n === 'string' ? renames[model]?.[n] ?? n : n)) : names]));
-        }
-        out.models[model] = next;
-    }
-    return out;
-}
-
 export interface JsonColumn {
     table: string;
     column: string;

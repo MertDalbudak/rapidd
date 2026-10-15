@@ -5,11 +5,12 @@ import type { RlsContextFn, RLSVariables } from '../types';
 /**
  * Declarative row-level security variables: config/rls.json, edited in the setup wizard.
  *
- *   { "variables": { "current_user_id": "user.id", "current_tenant_id": "header.x-tenant-id" } }
+ *   { "variables": { "current_user_id": "user.id", "current_tenant_id": "user.tenant_id" } }
  *
  * Before every query, each variable is set as the SQL session variable `app.<name>` (see
  * RLS_NAMESPACE) from the signed-in user (`user.<attribute>`) or a request header
- * (`header.<name>`); a missing value is not set. PostgreSQL policies read them with
+ * (`header.<name>` — whatever the client sends, unless a gateway sets it); a missing value
+ * is not set. PostgreSQL policies read them with
  * current_setting('app.current_user_id', true). src/config/rls.ts uses this unless it
  * defines its own function.
  */

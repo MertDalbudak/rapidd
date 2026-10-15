@@ -42,7 +42,7 @@ export interface Setting {
     advanced?: boolean;
 }
 
-export type CheckName = 'database' | 'redis' | 'ldap' | 'oidc' | 'webdav';
+export type CheckName = 'database' | 'redis' | 'ldap' | 'oidc' | 'saml' | 'webdav';
 
 export interface Section {
     id: string;
@@ -61,7 +61,9 @@ export type Values = Record<string, string | undefined>;
 const has = (key: string, item: string): Condition => ({ key, includes: item });
 const is = (key: string, value: string): Condition => ({ key, equals: value });
 const set = (key: string): Condition => ({ key, set: true });
-const EXTERNAL: Condition = { any: [has('AUTH_PROVIDERS', 'ldap'), has('AUTH_PROVIDERS', 'oidc'), has('AUTH_PROVIDERS', 'webdav')] };
+const EXTERNAL: Condition = { any: [has('AUTH_PROVIDERS', 'ldap'), has('AUTH_PROVIDERS', 'oidc'), has('AUTH_PROVIDERS', 'saml'), has('AUTH_PROVIDERS', 'webdav')] };
+/** Browser single sign-on: OIDC or SAML */
+const SSO: Condition = { any: [has('AUTH_PROVIDERS', 'oidc'), has('AUTH_PROVIDERS', 'saml')] };
 const PRODUCTION = is('NODE_ENV', 'production');
 /** Sign-in is on — everything but AUTH_PROVIDERS=none */
 const SIGN_IN: Condition = { not: has('AUTH_PROVIDERS', 'none') };
@@ -179,14 +181,14 @@ export const SECTIONS: Section[] = [
         id: 'access',
         group: 'Security',
         title: 'Access control',
-        description: 'The default for models without ACL rules, and row-level security in the database.',
+        description: 'The default for models without an entry in src/config/acl.ts, and row-level security in the database.',
         settings: [
             { key: 'ACL_DEFAULT', label: 'Models without an ACL entry', type: 'enum', options: ['allow', 'deny'], default: 'allow',
-                help: 'For models without access rules (Access control page, or code in src/config/acl.ts). allow: unrestricted — every signed-in user (without sign-in: everyone) may read and change them · deny: closed to everyone but the system user.' },
-            { key: 'RLS_ENABLED', label: 'Row-level security', type: 'boolean', default: 'true on PostgreSQL, false on MySQL',
-                help: 'Sets SQL session variables (Row-level security page, config/rls.json) on every query, so PostgreSQL policies can use them.' },
+                help: 'For models without an entry in src/config/acl.ts. allow: unrestricted — every signed-in user (without sign-in: everyone) may read and change them · deny: closed to everyone but the system user.' },
+            { key: 'RLS_ENABLED', label: 'Row-level security', type: 'boolean', default: 'true on PostgreSQL',
+                help: 'PostgreSQL: sets the variables (Row-level security page, config/rls.json) in every transaction, so policies can use them. MySQL and MariaDB have no row-level security.' },
             { key: 'RLS_NAMESPACE', label: 'RLS variable namespace', type: 'string', default: 'app', advanced: true,
-                help: 'Prefix of the session variables — letters, digits and _. app gives app.current_user_id on PostgreSQL, @app_current_user_id on MySQL.' },
+                help: 'Prefix of the variables — letters, digits and _. app gives app.current_user_id.' },
         ],
     },
     {
@@ -280,9 +282,9 @@ export const SECTIONS: Section[] = [
         title: 'Sign-in providers',
         description: 'Where users sign in — or none, for an API without sign-in. Every provider you enable gets its own page.',
         settings: [
-            { key: 'AUTH_PROVIDERS', label: 'Identity providers', type: 'multi', options: ['local', 'ldap', 'oidc', 'webdav', 'none'], default: 'local',
+            { key: 'AUTH_PROVIDERS', label: 'Identity providers', type: 'multi', options: ['local', 'ldap', 'oidc', 'saml', 'webdav', 'none'], default: 'local',
                 exclusive: ['none'], labels: { none: 'none — no sign-in' },
-                help: 'In order — password logins try them one after another. local: your user table · ldap: LDAP / Active Directory · oidc: OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, Google) · webdav: a WebDAV server (Nextcloud) · none: no sign-in — every request is anonymous, access rules decide what it may do.' },
+                help: 'In order — password logins try them one after another. local: your user table · ldap: LDAP / Active Directory · oidc: OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, Google) · saml: SAML 2.0 single sign-on (Entra ID, ADFS, Okta, Keycloak, Shibboleth) · webdav: a WebDAV server (Nextcloud) · none: no sign-in — every request is anonymous, src/config/acl.ts decides what it may do.' },
         ],
     },
     {
@@ -355,16 +357,13 @@ export const SECTIONS: Section[] = [
         id: 'identities',
         group: 'Authentication',
         title: 'External identities',
-        description: 'How LDAP, OIDC and WebDAV users become app users: linked to a user-table row, or roles from their claims.',
+        description: 'How LDAP, OIDC, SAML and WebDAV users become app users: linked to a user-table row, or made from their claims.',
         when: EXTERNAL,
         settings: [
             { key: 'AUTH_LINK', label: 'Link external identities by', type: 'string', default: 'email', placeholder: 'email',
                 help: 'How a directory or identity provider sign-in finds its user-table row — see the values below.' },
-            { key: 'AUTH_ROLE_MAP', label: 'Role mapping', type: 'json',
-                placeholder: '{"CN=App Admins,OU=Groups,DC=corp,DC=example,DC=com":"admin","role:editor":"editor"}',
-                help: 'Roles for users that come from claims only (no user-table row) — a JSON object, see below.' },
-            { key: 'AUTH_DEFAULT_ROLE', label: 'Default role', type: 'string',
-                help: 'Role of claims-only users that no AUTH_ROLE_MAP entry matched. Empty: no role — the rules for everyone (*) apply.' },
+            { key: 'AUTH_LOGIN_REDIRECT', label: 'After single sign-on, go to', type: 'string', default: '/', when: SSO,
+                help: 'Where browser logins land without ?redirect= — a path (/app) or a URL (https://app.example.com/). ?redirect= may name a path, the API’s own origin, an ALLOWED_ORIGINS entry (not *) or this URL’s origin.' },
         ],
     },
     {
@@ -420,8 +419,43 @@ export const SECTIONS: Section[] = [
             { key: 'OIDC_LOGIN', label: 'Browser login', type: 'boolean', default: 'true', help: 'Offer /auth/oidc/login (authorization code + PKCE).' },
             { key: 'OIDC_INTROSPECTION', label: 'Token introspection', type: 'boolean', default: 'false', advanced: true,
                 help: 'Validate opaque (non-JWT) tokens via RFC 7662.' },
-            { key: 'AUTH_LOGIN_REDIRECT', label: 'After single sign-on, go to', type: 'string', default: '/',
-                help: 'Where browser logins land without ?redirect= — a path (/app) or a URL (https://app.example.com/). ?redirect= may name a path, the API’s own origin, an ALLOWED_ORIGINS entry (not *) or this URL’s origin.' },
+        ],
+    },
+    {
+        id: 'saml',
+        group: 'Authentication',
+        title: 'SAML 2.0',
+        description: 'Browser single sign-on through a SAML identity provider — Entra ID, ADFS, Okta, Keycloak, Shibboleth, Google Workspace. Needs the @node-saml/node-saml package.',
+        when: has('AUTH_PROVIDERS', 'saml'),
+        check: 'saml',
+        settings: [
+            { key: 'SAML_IDP_METADATA_URL', label: 'Metadata URL', type: 'url', placeholder: 'https://login.microsoftonline.com/<tenant-id>/federationmetadata/2007-06/federationmetadata.xml?appid=<app-id>',
+                help: 'The identity provider’s metadata, read again daily — certificate rollovers need nothing. Without one, upload the metadata file below.' },
+            { key: 'SAML_IDP_METADATA_FILE', label: 'Metadata file', type: 'string', default: 'config/saml-idp-metadata.xml', when: { not: set('SAML_IDP_METADATA_URL') },
+                help: 'The identity provider’s metadata, used without a URL — an upload is saved here.' },
+            { key: 'SAML_IDP_ENTITY_ID', label: 'Identity provider', type: 'string', advanced: true,
+                help: 'The entity id of one identity provider, when the metadata (of a federation) describes several.' },
+            { key: 'SAML_SP_ENTITY_ID', label: 'This API’s entity id', type: 'string', default: '<PUBLIC_URL>/auth/saml/metadata',
+                help: 'How the identity provider knows this API (Entra ID: Identifier). Register the values below there — or upload this API’s metadata.' },
+            { key: 'SAML_CALLBACK_URL', label: 'Assertion consumer URL', type: 'url', default: '<PUBLIC_URL>/auth/saml/callback', advanced: true,
+                help: 'Where the identity provider posts sign-ins (Entra ID: Reply URL).' },
+            { key: 'SAML_NAMEID_FORMAT', label: 'NameID format', type: 'string', default: 'unspecified — the IdP’s choice', advanced: true,
+                placeholder: 'urn:oasis:names:tc:SAML:2.0:nameid-format:persistent',
+                help: 'The NameID is the user’s id when there is no user-table row — ask for a persistent one if the IdP sends a transient (per sign-in) id.' },
+            { key: 'SAML_ATTRIBUTE_EMAIL', label: 'Email attribute', type: 'string', default: 'email, mail, …', advanced: true,
+                help: 'The attribute names are found for Entra ID, ADFS, Okta, Keycloak, Shibboleth and Google — set one if yours differs.' },
+            { key: 'SAML_ATTRIBUTE_NAME', label: 'Name attribute', type: 'string', default: 'displayName, name, cn, …', advanced: true, help: 'Else given name and surname.' },
+            { key: 'SAML_ATTRIBUTE_USERNAME', label: 'Username attribute', type: 'string', default: 'username, uid, upn, …', advanced: true, help: 'The sign-in name.' },
+            { key: 'SAML_ATTRIBUTE_GROUPS', label: 'Groups attribute', type: 'string', default: 'groups, memberOf, …', advanced: true, help: 'Becomes the user’s groups — for src/config/acl.ts.' },
+            { key: 'SAML_ATTRIBUTE_ROLES', label: 'Roles attribute', type: 'string', default: 'roles, role, …', advanced: true, help: 'Becomes the user’s roles — for src/config/acl.ts.' },
+            { key: 'SAML_WANT_ASSERTIONS_SIGNED', label: 'Require signed assertions', type: 'boolean', default: 'false', advanced: true,
+                help: 'A valid signature of the identity provider is always required, on the response or the assertion. This requires it on the assertion.' },
+            { key: 'SAML_WANT_RESPONSE_SIGNED', label: 'Require signed responses', type: 'boolean', default: 'false', advanced: true,
+                help: '… and this on the response.' },
+            { key: 'SAML_SP_PRIVATE_KEY_FILE', label: 'Private key file', type: 'string', advanced: true, placeholder: '/run/secrets/saml-sp.key',
+                help: 'PEM. Signs sign-in requests and decrypts encrypted assertions — for identity providers that want either.' },
+            { key: 'SAML_SP_CERT_FILE', label: 'Certificate file', type: 'string', advanced: true, placeholder: '/run/secrets/saml-sp.crt', required: set('SAML_SP_PRIVATE_KEY_FILE'),
+                help: 'PEM — the private key’s certificate, published in this API’s metadata.' },
         ],
     },
     {

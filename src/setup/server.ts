@@ -14,9 +14,11 @@ import { adminStatus, createFirstUser } from './admin';
 import { envFilePath } from './envfile';
 import { CONFIG_FILES, isConfigFileId, readConfigText, validateConfigFile, writeConfigFiles } from './files';
 import type { ConfigFileId } from './files';
-import { modelsOverview, aclContext, routePrefixes } from './models';
+import { modelsOverview, routePrefixes } from './models';
 import { rlsStatus, rlsStatements, applyRls, RlsSpecError } from './rls';
-import { renameRelations, renameInRules, jsonTextColumns, typeJsonColumns, writeSchema, SchemaEditError } from './schema';
+import { renameRelations, jsonTextColumns, typeJsonColumns, writeSchema, SchemaEditError } from './schema';
+import { analyzeIndexes, applyIndexes } from './indexes';
+import { samlIdpSummary, samlServiceValues, samlServiceMetadataXml, uploadsToDefault, idpMetadataPath } from './saml';
 import { proxyView } from './proxy';
 import type { ProxyView } from './proxy';
 import type { Renames } from './schema';
@@ -183,7 +185,7 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return out;
         };
         const context = async (files: StagedFiles = {}) => {
-            const project = await inspectProject(root, plainValues(currentValues(buildSections())), { app: files.app });
+            const project = await inspectProject(root, plainValues(currentValues(buildSections())), { app: files.app, samlIdp: files.samlIdp });
             return { project, sections: buildSections(project) };
         };
         /** Current values with the client's changes applied (keys set by the real environment stay) */
@@ -198,16 +200,10 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return values;
         };
         const changesOf = (request: FastifyRequest): Values => ((request.body as any)?.changes ?? {}) as Values;
-        /** Field names per model — rules files are checked against them */
-        const schemaFields = async (): Promise<Record<string, string[]> | undefined> => {
-            const { dmmf } = await readSchema(root);
-            return dmmf ? Object.fromEntries(dmmf.datamodel.models.map((m) => [m.name, m.fields.map((f) => f.name)])) : undefined;
-        };
         const fileProblems = async (files: StagedFiles): Promise<Partial<Record<ConfigFileId, string[]>>> => {
-            const fields = await schemaFields();
             const problems: Partial<Record<ConfigFileId, string[]>> = {};
             for (const [id, text] of Object.entries(files) as [ConfigFileId, string][]) {
-                const found = validateConfigFile(id, text, fields);
+                const found = validateConfigFile(id, text);
                 if (found.length) problems[id] = found;
             }
             return problems;
@@ -292,9 +288,10 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
         api.post('/check/:name', async (request, reply) => {
             const name = (request.params as { name: string }).name as CheckName;
             if (!CHECK_NAMES.includes(name)) return reply.code(404).send({ error: 'Unknown check' });
-            const { sections } = await context();
+            const files = filesOf(request);
+            const { sections } = await context(files);
             const body = (request.body ?? {}) as { username?: string; password?: string };
-            return runCheck(name, merged(sections, changesOf(request)), { username: body.username, password: body.password });
+            return runCheck(name, merged(sections, changesOf(request)), { username: body.username, password: body.password, root, files: { samlIdp: files.samlIdp } });
         });
 
         /** The schema, generated code per model, and what the actions can do */
@@ -303,7 +300,7 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const values = merged(sections, changesOf(request));
             const project = await inspectProject(root, values);
             const { dmmf } = await readSchema(root);
-            const models = modelsOverview(root, dmmf);
+            const models = modelsOverview(root, dmmf, undefined, project.userModel);
             const actions: Record<string, string | null> = {};
             for (const name of ACTIONS) actions[name] = await actionBlocker(name, values, root);
             return { project, actions, models, build: await buildSupport(root), routes: routePrefixes(models) };
@@ -317,7 +314,7 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const body = ((request.body as any)?.build ?? {}) as BuildOptions;
             const build: BuildOptions = {
                 models: Array.isArray(body.models) ? body.models.filter((m) => typeof m === 'string') : undefined,
-                components: Array.isArray(body.components) ? body.components.filter((c) => c === 'model' || c === 'route') : undefined,
+                components: Array.isArray(body.components) ? body.components.filter((c) => c === 'model' || c === 'route' || c === 'acl') : undefined,
             };
             const result = await runAction(name, values, root, build);
             forgetConfigModules();
@@ -343,9 +340,9 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             return { dmmf, generated };
         };
 
-        /** Relation fields renamed — introspection names them after models; the staged access rules follow */
+        /** Relation fields renamed — introspection names them after models */
         api.post('/schema/relations', async (request, reply) => {
-            const body = (request.body ?? {}) as { renames?: unknown; acl?: unknown };
+            const body = (request.body ?? {}) as { renames?: unknown };
             const renames = body.renames as Renames;
             const valid = !!renames && typeof renames === 'object' && Object.values(renames).every((map) =>
                 !!map && typeof map === 'object' && Object.values(map).every((name) => typeof name === 'string'));
@@ -359,7 +356,6 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
                 ok: result.generated.ok,
                 message: result.generated.ok ? `${what} — Prisma client generated` : `${what}; ${result.generated.message}`,
                 output: result.generated.output,
-                ...(body.acl && typeof body.acl === 'object' ? { acl: renameInRules(body.acl, result.dmmf, renames) } : {}),
             };
         });
 
@@ -390,13 +386,22 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             };
         });
 
-        /** What the access rule editor needs: models, fields, code-owned models, roles, user attributes */
-        api.post('/acl/context', async (request) => {
+        /** The lookups the API makes that no index serves — each with Prisma's SQL for its index */
+        api.post('/schema/indexes', async (request) => {
             const { sections } = await context();
-            const values = merged(sections, changesOf(request));
-            const { dmmf } = await readSchema(root);
-            const roleField = String((request.body as any)?.roleField || 'role');
-            return aclContext(root, dmmf, values, roleField);
+            return analyzeIndexes(root, merged(sections, changesOf(request)));
+        });
+
+        /** Add the chosen indexes: a migration (prisma/migrations), or built in the database and added to the schema */
+        api.post('/schema/indexes/apply', async (request, reply) => {
+            const ids = (request.body as { ids?: unknown } | undefined)?.ids;
+            if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+                return reply.code(400).send({ error: 'ids: ["<model>:<field>,…"]' });
+            }
+            const { sections } = await context();
+            const result = await applyIndexes(root, merged(sections, changesOf(request)), ids);
+            Logger.log(`Setup: ${result.message}`);
+            return result;
         });
 
         /** Row-level security as the database enforces it */
@@ -405,7 +410,15 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
             const values = merged(sections, changesOf(request));
             const project = await inspectProject(root, values);
             const { dmmf } = await readSchema(root);
-            return { ...(await rlsStatus(values, modelsOverview(root, dmmf), project.userModel?.model ?? null)), variablesSource: project.rls.source };
+            const models = modelsOverview(root, dmmf, undefined, project.userModel);
+            const userModel = project.userModel?.model ?? null;
+            // The signed-in user's attributes, offered as variable sources: the user table's
+            // columns without credentials, or the claims of users without a row
+            const user = models.find((m) => m.name === userModel);
+            const userAttributes = user
+                ? user.fields.map((f) => f.name).filter((name) => !user.sensitive.includes(name))
+                : ['id', 'email', 'name', 'username', 'provider'];
+            return { ...(await rlsStatus(values, models, userModel)), variablesSource: project.rls.source, userAttributes };
         });
 
         /** The SQL of a row-level security change — preview (apply: false) or run it */
@@ -429,6 +442,33 @@ export async function startWizardServer(options: WizardOptions): Promise<WizardH
         };
         api.post('/rls/sql', (request, reply) => rlsChange(request, reply, false));
         api.post('/rls/apply', (request, reply) => rlsChange(request, reply, true));
+
+        /**
+         * SAML: the identity provider as its metadata describes it (the unsaved upload, the URL or
+         * the file), and what to register for this API there
+         */
+        api.post('/saml/idp', async (request) => {
+            const files = filesOf(request);
+            const { sections } = await context(files);
+            const values = merged(sections, changesOf(request));
+            const out = { service: samlServiceValues(values), uploads: uploadsToDefault(values), metadataFile: idpMetadataPath(values) };
+            try {
+                return { ...out, idp: await samlIdpSummary(root, values, files.samlIdp) };
+            } catch (err) {
+                const cause = (err as { cause?: { code?: string } }).cause;
+                return { ...out, idp: null, error: `${(err as Error).message.replace(/^\[Auth\]\s*/, '')}${cause?.code ? ` (${cause.code})` : ''}` };
+            }
+        });
+
+        /** This API's SAML metadata with the settings as they are on screen — downloaded and uploaded at the IdP */
+        api.post('/saml/metadata', async (request, reply) => {
+            const { sections } = await context();
+            try {
+                return { xml: samlServiceMetadataXml(root, merged(sections, changesOf(request))) };
+            } catch (err) {
+                return reply.code(400).send({ error: (err as Error).message.replace(/^\[Auth\]\s*/, '') });
+            }
+        });
 
         /** A test call of a service endpoint, with the unsaved configuration */
         api.post('/services/test', async (request) => {

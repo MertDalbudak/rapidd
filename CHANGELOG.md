@@ -6,6 +6,228 @@ All notable changes to `@rapidd/core` are documented here. This project follows
 (the framework source is copied into your project rather than installed), framework fixes below
 do **not** reach existing projects via `npm update` — see the linked section for how to adopt them.
 
+## [Unreleased]
+
+Access control is code only, and Rapidd no longer assumes a role: users with roles in a column,
+in their own table, in directory groups or as flags all work the same way.
+
+> **Read before upgrading — breaking changes:**
+> 1. **`config/acl.json` is removed** (the setup wizard's access rules) — its rules no longer
+>    apply. Move them into `src/config/acl.ts`: a model without an entry there follows
+>    `ACL_DEFAULT` (unrestricted by default; the boot log lists such models). While acl.ts has
+>    no entry, `npx rapidd build --only acl` writes a starting one.
+> 2. **`AUTH_ROLE_MAP` / `AUTH_DEFAULT_ROLE` and the `roles` option** (in `src/config/auth.ts`
+>    and per provider) are removed. Users without a user-table row carry the identity
+>    provider's `groups` and `roles` as data — check them in `src/config/acl.ts`. A leftover
+>    variable is reported at startup.
+> 3. **`fastify.requireRole()` is removed** — guard routes with a preHandler of your own.
+> 4. **`RapiddUser` has no `role`.** The anonymous user is `{ id: null }` (was `role: 'anonymous'`),
+>    the system user `{ id: null }`, a token with only `sub` is `{ id }` (was `role: 'user'`).
+>    `ResolveUserHelpers.mapRole` and `RoleMappingConfig` are gone.
+> 5. **ApiClient retries POST and PATCH again by default.** Set `"retry": false` in
+>    `config/app.json` for services or endpoints whose calls must not run twice.
+> 6. **`RLS_ENABLED=true` no longer does anything on MySQL / MariaDB.** It set the RLS
+>    variables as `@app_<name>` session variables for views or triggers of your own; they are not
+>    set any more (a startup warning names a leftover setting). Row-level security is PostgreSQL's.
+
+### Added — SAML 2.0 single sign-on
+
+- `AUTH_PROVIDERS=saml`: browser sign-in through a SAML identity provider — Entra ID, ADFS, Okta,
+  Keycloak, Shibboleth, Google Workspace. The IdP's metadata comes from a URL (read again daily)
+  or a file; `GET /auth/saml/metadata` is this API's metadata for the IdP. Needs the
+  `@node-saml/node-saml` package (`npm install @node-saml/node-saml`), loaded only when SAML is
+  configured.
+- A response must carry a valid IdP signature (on the response or the assertion), answer a
+  request this API sent — each once, also across instances with Redis — be for this API, from
+  this IdP and within its validity period, and is bound to the browser that started the sign-in.
+  IdP-initiated logins are refused; single logout is not supported.
+- Attributes for email, name, username, groups and roles are found under the names the common
+  IdPs use (`SAML_ATTRIBUTE_*` to set them); groups and roles are data for
+  `src/config/acl.ts`. An optional key and certificate sign requests and decrypt encrypted
+  assertions.
+- The callback accepts the IdP's form POST from any origin — production's CORS check would have
+  refused it (a route opts out with `config: { anyOrigin: true }`).
+- Setup wizard: a SAML section on *Sign-in* — upload the IdP's metadata (or give its URL), see its
+  entity id, sign-on URL and certificates, the values to register this API there, and test it.
+
+### Added — setup wizard: indexes
+
+- *Data model & API* checks the lookups the API makes for an index: foreign keys (includes,
+  nested routes, deletes — PostgreSQL does not index them by itself; MySQL only lacks them with
+  `relationMode = "prisma"`), the columns `src/config/acl.ts` filters every read by, and sign-in.
+  With the database readable it decides what exists, lists the indexes the schema has but the
+  database lacks, and ranks by table size. *Indexes* adds the chosen ones with Prisma's SQL
+  (`prisma migrate diff`): as a deployed migration when `prisma/migrations` exists, else built in
+  the database (PostgreSQL: `CREATE INDEX CONCURRENTLY`) — and as `@@index` in the schema.
+
+### Changed — access control
+
+- `src/config/acl.ts` is the only access control. One that does not load — a syntax error, a
+  broken import — stops the API; it used to be logged and its entries dropped, and a missing
+  import inside it was mistaken for no acl.ts at all.
+- `rapidd build` (`@rapidd/build`, same release) writes `src/config/acl.ts` while it has no entry:
+  one entry per model, credential columns hidden with `getOmitFields`, and the user table's
+  password column (`DB_USER_TABLE` / `DB_USER_PASSWORD_FIELD`, else detected by name) left out
+  of `getWritableFields` — hiding it alone kept a required password writable, so any user could
+  set any user's. A user table without a password column gets no such rule. An acl.ts with
+  entries is never changed — check yours for the same gap.
+- Setup wizard: the Access control page is gone. *Data model & API* shows per model whether
+  acl.ts has an entry — warning when credential columns would be returned — and generates
+  acl.ts; the RLS page offers the user's columns as variable sources and no role preset.
+
+### Changed — ORM: keys, links, order
+
+- **Lists come in the order of the model's key** when no `sort` is given — offset pages could
+  repeat or skip rows without one.
+- **Nested writes:** foreign keys inside nested items link (`{ orders: [{ customer_id: 3 }] }`
+  connects the customer, held to its access rule — see Security); the foreign key back to the
+  parent is the nesting's, a client's copy of it is ignored; the create half of a nested upsert
+  creates its own nested rows (it used `upsert` there, which Prisma refuses). A nested create that
+  links relations leaves an autoincrement key to the database — Prisma takes such a key only
+  without relations.
+- **A requested sort is tie-broken by the key** — rows that tie (`sort=status`) had no order of
+  their own and could repeat or go missing across offset pages.
+- **Nested rows whose key includes the parent's** — tenant-first composite keys, join tables like
+  `org_members (org_id, user_ref)` — take the parent's part from the parent and are addressed by
+  their whole key: upserted, linked when there and created when they can be (join rows). They
+  were always created — a `409` for every existing one.
+- **In a create, a nested item with its key and data is created** with that key (`409` when it is
+  taken). It was linked when the key existed — moving the row under the new parent and dropping
+  the data sent.
+- **A nested item with its key and data is upserted only when it can be a new row** (every
+  required column and relation) — otherwise it is an update. Prisma checks an upsert's create half
+  even when the row exists: a partial update of a nested row failed with "Argument … is missing".
+- **Composite foreign keys that share a column** (`tenant_id` in `(tenant_id, project_no)` and
+  `(tenant_id, assignee_no)`): a relation is named by a column only it has; the shared column is
+  completed from the parent, or in an update from the row's key, and written in an update it
+  moves every link through it. Unlinking such a relation sets its own columns null — `disconnect`
+  nulled the shared `tenant_id` too. Together with a link in the same request it is
+  `400 foreign_key_unlink_conflict`.
+- **A required foreign key set null, or missing from a create**, is `400 foreign_key_required`
+  naming its columns (was Prisma's "Unknown argument `disconnect`" / "Argument `…` is missing").
+- **Update and delete outside the update / delete rule answer 403**, as documented — Prisma's "not
+  found" made them 404. A row that doesn't exist is `404 record_not_found`.
+- **Fields a before-hook sets are written.** The requesting user's `getWritableFields` and
+  `getOmitFields` stripped them; they now apply to the client's data before the hooks run.
+- Filters: Decimal values keep their digits; enum values are checked; Json `#NULL` matches the
+  database's NULL and JSON's null; Json wildcards and an unclosed `OR(` are 400s with Rapidd's
+  keys; the same field twice (`id=gt:3,id=lt:6`, or repeated `q=`) applies both — the last won.
+- Errors: a duplicate names the model and fields behind the database's index name (`posts_pkey`,
+  MySQL's `PRIMARY`, a legacy unique index), with the values the request sent;
+  `no_permission_to_create` names the model; a BigInt sent as a JSON number past 2^53 — its
+  digits lost on the way — is `400 unsafe_integer`. Lists in messages read `a, b`.
+
+### Changed — ApiClient
+
+- **Every method is retried again by default** — POST and PATCH too, as before 3.0.0.
+  `config/app.json` decides where that must not happen: `"retry": false` on a service turns it
+  off for its endpoints, `"retry"` on an endpoint overrides its service (setup wizard: *Services*).
+  A `retries` count passed in code wins over both.
+
+### Security
+- **A relation named alone in `fields=` skipped its model's access rule.** `?fields=id,author`
+  returned the author row whole — password hashes and other omitted fields included — and lists
+  without their row filter or the include row cap. It now comes under the rule as
+  `include=author` does.
+- **Filters through a relation probed rows the user can't read** —
+  `GET /users?q=posts.body=%secret%` found the author of someone else's draft, `price=gt:500`
+  could binary-search a hidden price. A relation filter counts only the related rows the user
+  can read; a model the rule denies can't be filtered or sorted through (403). A sort through a
+  restricted relation still orders by all its rows — Prisma takes no filter in `orderBy`.
+- **Linking existing rows through a parent moved rows the user may not update.**
+  `PATCH /posts/2 { comments: [{ id: 9 }] }` rewrote another user's comment's `post_id`, held only
+  to the read rule — so did raw `connect` / `set` / `connectOrCreate` / `disconnect`. Linking rows
+  that hold the foreign key now needs the related model's update rule too (implicit
+  many-to-many links are rows of their own and don't).
+- **A plain object for a to-one relation ignored the related update rule** —
+  `PATCH /tasks/1 { project: { name } }` renamed a project the user may not update. It is held
+  to the rule (`false`: 403); with a rule it updates the linked row only.
+- **Foreign keys inside nested writes skipped the related model's access rule.**
+  `POST /shops { orders: [{ customer_id: 6 }] }` linked any customer, while a top-level foreign
+  key was held to the customer rule. Nested ones are now too.
+
+- **Includes dropped part of the related model's access rule.** Conditions that went through
+  the relation back to the parent were removed — a comment rule `{ post: { authorId: user.id } }`
+  did not apply to `GET /posts?include=comments`, which returned every comment of every
+  readable post. The rule now applies as it is.
+- **A deny was ignored when Rapidd built a link.** A foreign key in a write payload
+  (`{ categoryId: 3 }`) linked to a model whose access rule returns `false`, and a nested update
+  went through an update rule that returns `false`. Both now answer 403, as raw `connect`
+  operations already did.
+- **A user table whose key isn't called `id`** left `user.id` undefined: a rule such as
+  `{ author_id: user.id }` matched every row (Prisma ignores undefined), and sessions and "log
+  out everywhere" were filed under nothing. `user.id` is now the row's key, whatever the column
+  is called (composite keys as `"a~b"`). Independently, a rule filter with an `undefined` value
+  now denies and is logged.
+- **The whole user row reached clients**: in the access token (readable by anyone holding it),
+  the login and ticket-exchange responses and `/auth/me` — secrets and reset tokens included.
+  They now show what the user model's `getOmitFields` lets the user read; the session keeps the
+  row for access control.
+- Setup wizard: the RLS preset that took the tenant from the client-controlled `X-Tenant-Id`
+  header is gone, and a variable read from any header is flagged — clients choose its value.
+
+### Fixed
+- **Keys and links that assumed a column `id`:**
+  - A model identified by `@unique` / `@@unique` alone (`prisma db pull` makes them from tables
+    with a unique index but no primary key) was looked up by a column `id` — get, update,
+    delete, `upsertMany` and a user table like that failed. Its unique is its key now.
+  - Composite foreign keys linked their first column only (`{ orgId: 1, userId: 2 }` became
+    `connect: { orgId: 1 }` next to a stray `userId`). They link through the compound selector,
+    with all columns — half a key is `400 incomplete_foreign_key`.
+  - Nested writes two levels deep: creates left the second list level unconverted, and items
+    that only name a record were linked by `id` instead of their key. Rows with a composite key
+    were addressed with plain fields instead of the compound selector.
+  - `@rapidd/build` generates routes for keys of three or more columns (`/:id` = `a~b~c`) — they
+    were skipped — and finds the key of a model without `@id` as the core does.
+
+- `file.saveTo()` failed in the Docker image: the temporary file and the uploads volume are on
+  different filesystems, which `rename` can't cross. It copies there instead.
+- `buildApp({ routesPath })` mounted the routes under prefixes computed from `ROUTES_PATH`.
+- `upsertMany` never updated rows whose key is a DateTime (the database returns a Date, the
+  request ISO text), a Decimal written differently (`1.50` / `1.5`) or an upper-case UUID —
+  they were only counted as skipped.
+- A foreign key of `0` was dropped on create.
+- Two browser tabs signing in at the same time both failed: the second sign-in replaced the
+  first's state cookie, and a failed callback deleted it. Each sign-in has a state cookie of its
+  own now (`rapidd_auth_state_<id>`), which only its callback takes.
+- `POST /auth/login` on an API with only redirect sign-in (OIDC, SAML) answered 500 and logged an
+  error — it is `400 auth_provider_not_found`.
+- Readiness reported sessions `ok` while Redis was down once they had fallen back to memory —
+  `degraded` until Redis is back.
+- ApiClient: a non-numeric `API_MAX_RETRIES` (or `REQUEST_TIMEOUT`) or a negative `retries` made
+  no request and threw `null`. Invalid settings fall back to the default with a warning; a
+  negative count is 0.
+- A DateTime key part was read leniently — `10` as 2001-10-01, a time without a zone in the
+  server's timezone. ISO 8601 only; without a zone, UTC.
+- The boot log names the models `ACL_DEFAULT=deny` denies (they appeared at `LOG_LEVEL=fine`
+  only), and warns when `src/config/acl.ts` returns the user table's password column or lets it
+  be written (no `getWritableFields` for the user table — as acl.ts files written by earlier
+  builds have).
+- SAML messages (`SAMLRequest`, `SAMLResponse`, `RelayState` — in URLs, also on the way to the
+  identity provider, and in logged bodies) and the callback's `response` key are redacted in
+  request logs.
+- Setup wizard:
+  - With `prisma/migrations`, adding indexes deployed with the API's `DATABASE_URL`: a role that
+    doesn't own the tables failed, leaving a failed migration that blocked every later deploy
+    (P3009) and an `@@index` the database lacked. `migrate deploy` and `db push` run with
+    `DATABASE_URL_ADMIN` when set; a failed index migration is rolled back and removed, the
+    indexes its first statements had built are dropped, and the schema is restored.
+  - The database check, and the guard that lets *Create tables* (`db push`) run only on a
+    database without the schema's tables, listed tables through `information_schema` — which
+    shows a role only the tables it may use. With the API's own role an existing database looked
+    empty. They read PostgreSQL's catalog now, through the connection that pushes.
+  - Two index additions at once failed with `EEXIST` (500) — they run one after the other.
+  - A suggestion took over the reason of a narrower lookup an existing index already served.
+  - A service test named an internal cache key instead of the service.
+- `@rapidd/build`:
+  - A join table added after its parent route was generated got a sub-route nothing loaded.
+    New parent routes register every `_<name>` sub-route next to them by themselves; for an
+    existing one, the build prints the line to add.
+  - Models whose names become the same class (`user_role` and `UserRole`) shared one model
+    file, so one route served the other table — the build now stops and names them. A model
+    named like the template's imports (`model Model`) no longer fails to compile.
+  - The delete response names the model, not its class (`TaskLabels successfully deleted`).
+
 ## [3.0.1] - 2026-10-11
 
 ### Changed — ORM

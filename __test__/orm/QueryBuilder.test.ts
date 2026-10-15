@@ -857,9 +857,9 @@ describe('QueryBuilder (TypeScript)', () => {
         it('should strip non-whitelisted fields from nested relation items but keep identifiers', () => {
             const usersQb = new QueryBuilder('users');
             const result: any = usersQb.update(1, { messages: [{ id: 5, content: 'hi', createdAt: '2024-01-01' }] }, { id: 7, role: 'restricted' });
-            expect(result.messages.upsert).toHaveLength(1);
-            // id kept (identifier), content kept (whitelisted), createdAt stripped
-            expect(result.messages.upsert[0].create).toEqual({ id: 5, content: 'hi' });
+            // id kept (it addresses the row), content kept (whitelisted), createdAt stripped — without
+            // it (required, no default) the item can't be a new row: an update
+            expect(result.messages.update).toEqual([{ where: { id: 5 }, data: { content: 'hi' } }]);
         });
 
         it('should bypass the whitelist for the application role', () => {
@@ -886,10 +886,16 @@ describe('QueryBuilder (TypeScript)', () => {
 
         it('should build per-item upsert entries for PK+data items', () => {
             const usersQb = new QueryBuilder('users');
-            const result: any = usersQb.update(1, { messages: [{ id: 5, content: 'hi' }] }, { id: 7, role: 'user' });
+            // The item carries what a new row needs — it may be created
+            const item = { id: 5, content: 'hi', userId: 7, createdAt: '2024-01-01T00:00:00.000Z' };
+            const result: any = usersQb.update(1, { messages: [item] }, { id: 7, role: 'user' });
             expect(result.messages.upsert).toHaveLength(1);
             expect(result.messages.upsert[0].where).toEqual({ id: 5 });
-            expect(result.messages.upsert[0].create).toEqual({ id: 5, content: 'hi' });
+            expect(result.messages.upsert[0].create).toEqual(item);
+            // Without them: an update of the row only
+            expect(usersQb.update(1, { messages: [{ id: 5, content: 'hi' }] }, { id: 7, role: 'user' })).toEqual({
+                messages: { update: [{ where: { id: 5 }, data: { content: 'hi' } }] },
+            });
         });
     });
 

@@ -1,12 +1,13 @@
-import { prisma, prismaTransaction, getAcl } from '../core/prisma';
+import { prisma, prismaTransaction, getAcl, Prisma } from '../core/prisma';
 import { ErrorResponse } from '../core/errors';
 import { LanguageDict } from '../core/i18n';
 import { Logger } from '../utils/Logger';
 import { isSystemUser } from '../core/user';
+import { guardAclFilter } from '../core/acl';
 import * as dmmf from '../core/dmmf';
 import { dayRange, filterTimeZone, startOfDay } from './dates';
-import { PRISMA_WRITE_OPS, isRawOperation, secureNestedOperations } from './nestedOperations';
-import { parseScalar } from './values';
+import { PRISMA_WRITE_OPS, isRawOperation, linkRewritesRelated, secureNestedOperations } from './nestedOperations';
+import { keyText, parseScalar } from './values';
 import type {
     RelationConfig,
     DMMFField,
@@ -145,6 +146,84 @@ function uniqueFieldName(target: string, modelName: string): string {
 }
 
 /**
+ * The model and fields of a duplicate-key error. Prisma names the constraint by its fields —
+ * or, through driver adapters, by the database's index name: a name the schema maps
+ * (`@unique(map: "setting_key")`), Prisma's default `<table>_pkey` / `<table>_<columns>_key`, or
+ * MySQL's `PRIMARY` (the key of the model written — of the table when MySQL names it).
+ */
+function duplicateTarget(error: any, body: Record<string, unknown> = {}): { model: string; fields: string[] } {
+    const constraint = error?.meta?.driverAdapterError?.cause?.constraint;
+    const target = error?.meta?.target ?? constraint?.fields ?? constraint?.index;
+    const written = String(error?.meta?.modelName || '');
+    // An error handler that throws hides the error — no schema, no mapping
+    const schema = typeof dmmf.getDMMFSync === 'function' ? dmmf.getDMMFSync() : null;
+    const models = (schema?.datamodel.models ?? []) as DMMFModel[];
+    const tableOf = (model: DMMFModel): string => (model as { dbName?: string | null }).dbName || model.name;
+    const columnOf = (model: DMMFModel, field: string): string =>
+        (model.fields.find((f: DMMFField) => f.name === field) as { dbName?: string | null } | undefined)?.dbName || field;
+
+    if (Array.isArray(target)) {
+        // Field names — or the database's column names behind @map
+        const model = models.find((m: DMMFModel) => m.name === written);
+        const fields = target.map((name: unknown) => {
+            const field = model?.fields.find((f: DMMFField) => f.name === name || (f as { dbName?: string | null }).dbName === name);
+            return field?.name ?? String(name);
+        });
+        return { model: written, fields };
+    }
+    if (typeof target !== 'string' || target === '') return { model: written, fields: [] };
+
+    const indexes = (schema?.datamodel.indexes ?? []) as { model: string; type: string; dbName?: string | null; fields: { name: string }[] }[];
+    const keys = indexes.filter((index) => index.type === 'id' || index.type === 'unique');
+    const of = (index: { model: string; fields: { name: string }[] }) => ({ model: index.model, fields: index.fields.map((f) => f.name) });
+    const named = keys.find((index) => index.dbName === target);
+    if (named) return of(named);
+    const primary = /^(?:(.+)\.)?PRIMARY$/.exec(target);
+    // MariaDB names no table: the key of the model written — unless the body doesn't carry it,
+    // when the clash is a nested row's: the one nested model whose items carry their key
+    const primaryModel = primary && !primary[1] ? primaryOwner(models, written, body) : null;
+    if (primary && !primary[1] && !primaryModel) return { model: written, fields: [] };
+    for (const index of keys) {
+        const model = models.find((m: DMMFModel) => m.name === index.model);
+        if (!model || index.dbName) continue;
+        const table = tableOf(model);
+        if (index.type === 'id' && (target === `${table}_pkey` || (primary && (primary[1] ? primary[1] === table : model.name === primaryModel)))) return of(index);
+        if (index.type === 'unique' && target === `${table}_${index.fields.map((f) => columnOf(model, f.name)).join('_')}_key`) return of(index);
+    }
+    return { model: written, fields: [uniqueFieldName(target, written)] };
+}
+
+/** The model whose primary key a bare `PRIMARY` clash is on: the one written, or a nested one */
+function primaryOwner(models: DMMFModel[], written: string, body: Record<string, unknown>): string | null {
+    const keyOf = (name: string): string[] | null => {
+        try {
+            const key = dmmf.getPrimaryKey(name);
+            return Array.isArray(key) ? key : [key];
+        } catch {
+            return null; // no schema loaded — nothing to tell
+        }
+    };
+    const carries = (name: string, row: Record<string, unknown>) => keyOf(name)?.every((field) => row[field] != null) ?? false;
+    if (carries(written, body)) return written;
+    const found = new Set<string>();
+    const walk = (name: string, row: Record<string, unknown>, depth: number): void => {
+        const model = models.find((m: DMMFModel) => m.name === name);
+        if (!model || depth > MAX_NESTING_DEPTH) return;
+        for (const field of model.fields) {
+            const value = row[field.name];
+            if (field.kind !== 'object' || !value || typeof value !== 'object') continue;
+            for (const item of Array.isArray(value) ? value : [value]) {
+                if (!item || typeof item !== 'object') continue;
+                if (carries(field.type, item as Record<string, unknown>)) found.add(field.type);
+                walk(field.type, item as Record<string, unknown>, depth + 1);
+            }
+        }
+    };
+    walk(written, body, 0);
+    return found.size === 1 ? [...found][0] : null;
+}
+
+/**
  * Database errors Prisma passes on unclassified (driver adapters report check constraints,
  * invalid values and row-level security rejections as DriverAdapterError): they are client
  * errors, not 500s.
@@ -248,12 +327,12 @@ class QueryBuilder {
         return this._relatedByName.get(name);
     }
 
-    /** O(1) lookup of relation by field (foreign key field name) */
+    /** O(1) lookup of relation by field (foreign key column — each column of a composite one) */
     getRelationByField(field: string): RelationConfig | undefined {
         if (!this._relatedByField) {
             const map = new Map<string, RelationConfig>();
             for (const rel of this.relatedObjects) {
-                if (rel.field) map.set(rel.field, rel);
+                for (const column of rel.fields ?? (rel.field ? [rel.field] : [])) map.set(column, rel);
             }
             this._relatedByField = map;
         }
@@ -272,6 +351,11 @@ class QueryBuilder {
      */
     getPrimaryKey(modelName: string = this.name): string | string[] {
         return dmmf.getPrimaryKey(modelName);
+    }
+
+    /** A model's fields — this model's own, or a related one's */
+    #fieldsOf(modelName: string): Record<string, any> {
+        return modelName === this.name ? this.fields : this.#getRelatedModelFields(modelName);
     }
 
     /**
@@ -301,17 +385,7 @@ class QueryBuilder {
         if (!relatedObject.relation && relatedObject.object) {
             const targetRelations = dmmf.getRelations(relatedObject.object);
             if (targetRelations.length > 0) {
-                relatedObject.relation = targetRelations.map((nested: DMMFField) => ({
-                    name: nested.name,
-                    object: nested.type,
-                    isList: nested.isList,
-                    field: nested.relationFromFields?.[0],
-                    foreignKey: nested.relationToFields?.[0] || 'id',
-                    ...(nested.relationFromFields && nested.relationFromFields.length > 1 ? {
-                        fields: nested.relationFromFields,
-                        foreignKeys: nested.relationToFields,
-                    } : {}),
-                }));
+                relatedObject.relation = targetRelations.map((nested: DMMFField) => dmmf.relationConfig(nested));
             }
         }
         return relatedObject;
@@ -405,6 +479,9 @@ class QueryBuilder {
         }
 
         const groupMatch = part.match(/^(or|and)\s*\(([\s\S]*)\)$/i);
+        if (!groupMatch && /^(or|and)\s*\(/i.test(part)) {
+            throw new ErrorResponse(400, "unbalanced_filter_group", { condition: part.slice(0, 100) });
+        }
         if (groupMatch) {
             const op = groupMatch[1].toLowerCase() === 'or' ? 'OR' : 'AND';
             const inner = groupMatch[2];
@@ -466,7 +543,12 @@ class QueryBuilder {
         }
 
         const { filter: filterContext, modelName } = this.#navigateToFilterContext(rootFilter, relationPath, user);
-        this.#applyFilterValue(filterContext, fieldName, trimmedValue, modelName, user);
+        // Into its own object first: a field filtered here already is ANDed, not overwritten
+        const leaf: Record<string, any> = {};
+        this.#applyFilterValue(leaf, fieldName, trimmedValue, modelName, user);
+        for (const [key, condition] of Object.entries(leaf)) {
+            this.#mergeCondition(filterContext, key, condition);
+        }
     }
 
     /**
@@ -542,7 +624,10 @@ class QueryBuilder {
     }
 
     /**
-     * Navigate through relation path and return the filter context object and current model name
+     * Navigate through relation path and return the filter context object and current model name.
+     * Related rows count only where their model's access rule lets this user read them — a filter
+     * through a relation can't probe rows the user can't see; through a model the rule denies, it
+     * is refused.
      */
     #navigateToFilterContext(rootFilter: Record<string, any>, relationPath: string[], user: any = null): { filter: Record<string, any>; modelName: string } {
         let filter: Record<string, any> = rootFilter;
@@ -565,25 +650,55 @@ class QueryBuilder {
                 });
             }
 
-            // Create or navigate to the relation filter
-            if (!filter[rel.name]) {
-                const isListRel = rel.isList || dmmf.isListRelation(currentModelName, rel.name);
-
-                if (isListRel) {
-                    filter[rel.name] = { some: {} };
-                    filter = filter[rel.name].some;
-                } else {
-                    filter[rel.name] = {};
-                    filter = filter[rel.name];
-                }
+            const isListRel = rel.isList || dmmf.isListRelation(currentModelName, rel.name);
+            const existing = filter[rel.name];
+            // A relation filtered here already (posts.title=a,posts.body=b) — the same related row;
+            // not one tested for existence (posts=#NULL: { none: {} }, author=#NULL: { is: null })
+            const reusable = existing && typeof existing === 'object' && (isListRel
+                ? existing.some && typeof existing.some === 'object'
+                : !('is' in existing) && !('isNot' in existing));
+            if (reusable) {
+                filter = isListRel ? existing.some : existing;
             } else {
-                filter = filter[rel.name].some || filter[rel.name];
+                const context: Record<string, any> = {};
+                const access = this.#relationAccess(rel.object, relationName, currentModelName, user);
+                if (access) context.AND = [access];
+                this.#mergeCondition(filter, rel.name, isListRel ? { some: context } : context);
+                filter = context;
             }
 
             currentModelName = rel.object;
         }
 
         return { filter, modelName: currentModelName };
+    }
+
+    /**
+     * The access rule of a model reached through a relation in a filter or sort: null when it
+     * doesn't restrict this user; a model the rule denies can't be queried through (403).
+     */
+    #relationAccess(model: string, relationName: string, parentModel: string, user: any): Record<string, any> | null {
+        const { accessFilter } = this.#resolveAclContext(model, user);
+        if (accessFilter === false) {
+            throw new ErrorResponse(403, "field_not_filterable", { field: relationName, modelName: parentModel });
+        }
+        return accessFilter && typeof accessFilter === 'object' && Object.keys(accessFilter).length > 0 ? accessFilter : null;
+    }
+
+    /** Write a condition into a where object — a key set there already is ANDed with it, not overwritten */
+    #mergeCondition(target: Record<string, any>, key: string, condition: any): void {
+        if (!(key in target)) {
+            target[key] = condition;
+            return;
+        }
+        const list = (value: any): any[] => (value == null ? [] : Array.isArray(value) ? value : [value]);
+        if (key === 'AND' || key === 'NOT') {
+            // Lists of conditions that all apply
+            target[key] = [...list(target[key]), ...list(condition)];
+            return;
+        }
+        // The same field twice (id=gt:3,id=lt:6): both apply
+        target.AND = [...list(target.AND), { [key]: condition }];
     }
 
     /**
@@ -607,24 +722,25 @@ class QueryBuilder {
         // Handle explicit null filter tokens
         if (value === '#NULL') {
             if (isRelation) {
-                // To-one relations use { is: null }; list relations can't be null — "no related rows" is { none: {} }
-                filter[fieldName] = field.isList ? { none: {} } : { is: null };
+                // To-one relations use { is: null }; list relations can't be null — "no related rows"
+                // is { none: {} }, counting only rows the user can read
+                filter[fieldName] = field.isList ? { none: this.#relationAccess(field.type, fieldName, modelName, user) ?? {} } : { is: null };
             } else if (field.isRequired) {
                 // Non-nullable scalar fields can never be null — reject the filter
                 throw new ErrorResponse(400, "field_not_nullable", { field: fieldName });
             } else {
-                filter[fieldName] = { equals: null };
+                filter[fieldName] = this.#nullCondition(field, false);
             }
             return;
         }
         if (value === 'not:#NULL') {
             if (isRelation) {
-                filter[fieldName] = field.isList ? { some: {} } : { isNot: null };
+                filter[fieldName] = field.isList ? { some: this.#relationAccess(field.type, fieldName, modelName, user) ?? {} } : { isNot: null };
             } else if (field.isRequired) {
                 // Non-nullable scalar fields are always not-null — skip (always true)
                 return;
             } else {
-                filter[fieldName] = { not: { equals: null } };
+                filter[fieldName] = this.#nullCondition(field, true);
             }
             return;
         }
@@ -656,8 +772,8 @@ class QueryBuilder {
             const raw = negated ? value.substring(4) : value;
             const type = this.#resolveFilterType(field);
             const condition = raw.startsWith('[') && raw.endsWith(']')
-                ? { hasSome: this.#coerceArrayValues(this.#parseArrayValue(raw), fieldName, type) }
-                : { has: this.#coerceArrayValues([raw], fieldName, type)[0] };
+                ? { hasSome: this.#coerceArrayValues(this.#parseArrayValue(raw, type === 'Number'), fieldName, type, field) }
+                : { has: this.#coerceArrayValues([raw], fieldName, type, field)[0] };
             if (negated) filter.NOT = (filter.NOT || []).concat([{ [fieldName]: condition }]);
             else filter[fieldName] = condition;
             return;
@@ -671,6 +787,16 @@ class QueryBuilder {
 
         // Apply typed filter based on the field's declared type
         this.#applyTypedFilter(filter, fieldName, value, field);
+    }
+
+    /**
+     * A column is (not) null. In a Json column null is the database's NULL or JSON's null — a
+     * null the API wrote — both of which Prisma matches with AnyNull only.
+     */
+    #nullCondition(field: DMMFField, negated: boolean): Record<string, any> {
+        const anyNull = field.type === 'Json' ? Prisma?.AnyNull : undefined;
+        if (anyNull) return negated ? { not: anyNull } : { equals: anyNull };
+        return negated ? { not: { equals: null } } : { equals: null };
     }
 
     /**
@@ -712,30 +838,31 @@ class QueryBuilder {
         }
 
         const fieldType = this.#resolveFilterType(field);
+        const decimal = field?.type === 'Decimal';
 
         // not:[array]
         if (value.startsWith('[') && value.endsWith(']')) {
-            const arr = this.#parseArrayValue(value);
+            const arr = this.#parseArrayValue(value, fieldType === 'Number');
             if ((fieldType === 'String' || fieldType === null) && arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
                 // Append — assignment would clobber a previous field's not:[...] group.
                 // Prisma NOT arrays AND their entries, which is the right semantics here.
                 if (!filter.NOT) filter.NOT = [];
                 filter.NOT.push(...arr.map((v: unknown) => ({ [fieldName]: this.#filterString(String(v), fieldType === null) })));
             } else {
-                filter[fieldName] = { notIn: this.#coerceArrayValues(arr, fieldName, fieldType) };
+                filter[fieldName] = { notIn: this.#coerceArrayValues(arr, fieldName, fieldType, field) };
             }
             return;
         }
 
         // not:between:
         if (value.startsWith('between:')) {
-            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType, dateZone(field));
+            this.#applyNotBetween(filter, fieldName, value.substring(8), fieldType, dateZone(field), decimal);
             return;
         }
 
         switch (fieldType) {
             case 'Number': {
-                const numFilter = this.#filterNumber(value);
+                const numFilter = this.#filterNumber(value, decimal);
                 if (!numFilter) {
                     throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value, expected: 'number' });
                 }
@@ -752,7 +879,7 @@ class QueryBuilder {
                 filter[fieldName] = { not: this.#filterString(value, false) };
                 return;
             case 'Enum':
-                filter[fieldName] = { not: { equals: this.#safeDecode(value) } };
+                filter[fieldName] = { not: { equals: this.#enumValue(fieldName, field, value) } };
                 return;
         }
 
@@ -773,7 +900,7 @@ class QueryBuilder {
     /**
      * Apply not:between: filter
      */
-    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null, zone: string | undefined = filterTimeZone()): void {
+    #applyNotBetween(filter: Record<string, any>, fieldName: string, rangeValue: string, fieldType: string | null = null, zone: string | undefined = filterTimeZone(), decimal: boolean = false): void {
         const [start, end] = rangeValue.split(';').map((v: string) => v.trim());
 
         if (!start || !end) {
@@ -784,8 +911,8 @@ class QueryBuilder {
             (fieldType === null && FILTER_PATTERNS.PURE_NUMBER.test(start) && FILTER_PATTERNS.PURE_NUMBER.test(end));
 
         if (treatAsNumber) {
-            const startNum = this.#parseNumericValue(start);
-            const endNum = this.#parseNumericValue(end);
+            const startNum = this.#parseNumericValue(start, decimal);
+            const endNum = this.#parseNumericValue(end, decimal);
             if (startNum == null || endNum == null) {
                 throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value: rangeValue, expected: 'number' });
             }
@@ -823,10 +950,11 @@ class QueryBuilder {
      */
     #applyTypedFilter(filter: Record<string, any>, fieldName: string, value: string, field?: DMMFField): void {
         const fieldType = this.#resolveFilterType(field);
+        const decimal = field?.type === 'Decimal';
 
         // Arrays are handled per type so values can be coerced to the column type
         if (value.startsWith('[') && value.endsWith(']')) {
-            const arr = this.#parseArrayValue(value);
+            const arr = this.#parseArrayValue(value, fieldType === 'Number');
             if ((fieldType === 'String' || fieldType === null) && arr.some((v: unknown) => typeof v === 'string' && v.includes('%'))) {
                 // Each field's wildcard list is its own OR group nested under AND —
                 // a shared top-level OR would merge groups across fields:
@@ -835,14 +963,14 @@ class QueryBuilder {
                 if (!filter.AND) filter.AND = [];
                 filter.AND.push({ OR: orGroup });
             } else {
-                filter[fieldName] = { in: this.#coerceArrayValues(arr, fieldName, fieldType) };
+                filter[fieldName] = { in: this.#coerceArrayValues(arr, fieldName, fieldType, field) };
             }
             return;
         }
 
         switch (fieldType) {
             case 'Number': {
-                const numFilter = this.#filterNumber(value);
+                const numFilter = this.#filterNumber(value, decimal);
                 if (!numFilter) {
                     throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value, expected: 'number' });
                 }
@@ -860,8 +988,13 @@ class QueryBuilder {
                 return;
             case 'Enum':
                 // Wildcards aren't supported on enum columns — exact match only
-                filter[fieldName] = { equals: this.#safeDecode(value) };
+                filter[fieldName] = { equals: this.#enumValue(fieldName, field, value) };
                 return;
+        }
+
+        // A JSON column matches a JSON value — Prisma has no wildcards for it
+        if (field?.type === 'Json' && /^%|%$/.test(value)) {
+            throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value, expected: 'a JSON value or #NULL' });
         }
 
         // Unknown field type — value-based detection (legacy behavior)
@@ -936,11 +1069,11 @@ class QueryBuilder {
     /**
      * Coerce array filter values ([a,b,c] / not:[a,b,c]) to the column type
      */
-    #coerceArrayValues(arr: any[], fieldName: string, fieldType: string | null): any[] {
+    #coerceArrayValues(arr: any[], fieldName: string, fieldType: string | null, field?: DMMFField): any[] {
         switch (fieldType) {
             case 'Number':
                 return arr.map((v: any) => {
-                    const parsed = this.#parseNumericValue(String(v));
+                    const parsed = this.#parseNumericValue(String(v), field?.type === 'Decimal');
                     if (parsed == null) {
                         throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value: String(v), expected: 'number' });
                     }
@@ -957,11 +1090,22 @@ class QueryBuilder {
             case 'Boolean':
                 return arr.map((v: any) => typeof v === 'boolean' ? v : this.#parseBooleanValue(fieldName, String(v)));
             case 'String':
-            case 'Enum':
                 return arr.map((v: any) => typeof v === 'string' ? this.#safeDecode(v) : String(v));
+            case 'Enum':
+                return arr.map((v: any) => this.#enumValue(fieldName, field, String(v)));
             default:
                 return arr;
         }
+    }
+
+    /** A value of an enum column: one of its values (400 otherwise — not Prisma's validation text) */
+    #enumValue(fieldName: string, field: DMMFField | undefined, value: string): string {
+        const decoded = this.#safeDecode(value);
+        const values = field ? dmmf.getEnumValues?.(field.type) : null;
+        if (values && !values.includes(decoded)) {
+            throw new ErrorResponse(400, "invalid_filter_value", { field: fieldName, value: decoded.slice(0, 100), expected: values.join(', ') });
+        }
+        return decoded;
     }
 
     /**
@@ -992,12 +1136,13 @@ class QueryBuilder {
     }
 
     /**
-     * Parse array value from string
+     * Parse array value from string. `numeric`: elements stay text, to be read by the column's
+     * type — JSON would round 12345678901234.5678 and integers past 2^53.
      */
-    #parseArrayValue(value: string): any[] {
+    #parseArrayValue(value: string, numeric: boolean = false): any[] {
         let arr: any[];
         try {
-            const parsed = JSON.parse(value);
+            const parsed = numeric ? null : JSON.parse(value);
             arr = Array.isArray(parsed) ? parsed : value.slice(1, -1).split(',').map((v: string) => v.trim());
         } catch {
             arr = value.slice(1, -1).split(',').map((v: string) => v.trim());
@@ -1022,7 +1167,7 @@ class QueryBuilder {
     /**
      * Parse numeric filter operators
      */
-    #filterNumber(value: string): Record<string, number | bigint> | null {
+    #filterNumber(value: string, decimal: boolean = false): Record<string, number | bigint | string> | null {
         const foundOperator = FILTER_PATTERNS.NUMERIC_OPS.find((op: string) => value.startsWith(op));
         let numValue: string = value;
         let prismaOp = 'equals';
@@ -1043,25 +1188,30 @@ class QueryBuilder {
                     if (!startStr || !endStr) {
                         throw new ErrorResponse(400, "between_requires_two_values");
                     }
-                    const start = this.#parseNumericValue(startStr);
-                    const end = this.#parseNumericValue(endStr);
+                    const start = this.#parseNumericValue(startStr, decimal);
+                    const end = this.#parseNumericValue(endStr, decimal);
                     if (start == null || end == null) return null;
                     return { gte: start, lte: end };
                 }
             }
         }
 
-        const parsed = this.#parseNumericValue(numValue);
+        const parsed = this.#parseNumericValue(numValue, decimal);
         if (parsed == null) return null;
 
         return { [prismaOp]: parsed };
     }
 
     /**
-     * Parse a numeric string, returning BigInt for integers beyond safe range
+     * Parse a numeric string, returning BigInt for integers beyond safe range — and for a
+     * Decimal column the number's text: a float would round 12345678901234.5678
      */
-    #parseNumericValue(value: string): number | bigint | null {
+    #parseNumericValue(value: string, decimal: boolean = false): number | bigint | string | null {
         if (value == null) return null;
+        if (decimal) {
+            const text = value.trim();
+            return /^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(text) ? text : null;
+        }
         if (value.includes('.')) {
             const num = parseFloat(value);
             return isNaN(num) ? null : num;
@@ -1225,7 +1375,7 @@ class QueryBuilder {
         // Check ACL access for the related model (system users bypass — never run the
         // app's access-filter builder with the null-id system identity)
         if (!isSystemUser(user) && relation.object && acl.model[relation.object]?.getAccessFilter) {
-            const accessFilter = acl.model[relation.object].getAccessFilter!(user);
+            const accessFilter = guardAclFilter(acl.model[relation.object].getAccessFilter!(user), relation.object, 'getAccessFilter');
 
             // ACL explicitly denies access — skip this relation entirely
             if (accessFilter === false) {
@@ -1239,10 +1389,11 @@ class QueryBuilder {
             const isOptionalToOne = !isListRelation && parentRelField?.isRequired === false;
 
             if ((isListRelation || isOptionalToOne) && accessFilter && typeof accessFilter === 'object') {
+                // The related model's rule as it is — including conditions through the relation
+                // back to this parent: the parent row passed the parent's rule, not this one
                 const cleanedFilter = this.cleanFilter(accessFilter);
-                const simplifiedFilter = this.#simplifyNestedFilter(cleanedFilter, parentModel, relation.object);
-                if (simplifiedFilter && typeof simplifiedFilter === 'object' && Object.keys(simplifiedFilter).length > 0) {
-                    content.where = simplifiedFilter;
+                if (cleanedFilter && typeof cleanedFilter === 'object' && Object.keys(cleanedFilter).length > 0) {
+                    content.where = cleanedFilter;
                     hasContent = true;
                 }
             } else if (!isListRelation && !isOptionalToOne && accessFilter && typeof accessFilter === 'object') {
@@ -1668,11 +1819,15 @@ class QueryBuilder {
         // Add top-level omit fields to exclude from selection
         const omitFields = this.omit(user);
 
-        // Add scalar fields
+        // Add scalar fields — a relation named alone (fields=id,author) is the whole relation,
+        // included under its model's rule as include=author is
         for (const field of scalars) {
-            if (!omitFields[field]) {
-                select[field] = true;
+            if (omitFields[field]) continue;
+            if (this.getRelationByName(field)) {
+                availableRelations.add(field);
+                continue;
             }
+            select[field] = true;
         }
 
         // Add relations from the include param and the fields
@@ -1680,8 +1835,8 @@ class QueryBuilder {
             const rel = this.getRelationByName(relationName);
             if (!rel) throw new ErrorResponse(400, "relation_not_exist", { relation: relationName, modelName: this.name });
 
-            // Get ACL content for this relation (where, omit)
-            const { content, denied } = this.#buildBaseIncludeContent(rel, user, this.name);
+            // Get ACL content for this relation (where, omit, row cap)
+            const { content, hasContent, denied } = this.#buildBaseIncludeContent(rel, user, this.name);
             if (denied) continue;
 
             const relationFields = relations.get(relationName);
@@ -1700,12 +1855,8 @@ class QueryBuilder {
                 if (content.take != null) entry.take = content.take;
                 select[relationName] = entry;
             } else {
-                // Relation is in include but no specific fields → include with all fields
-                if (content.where || content.omit) {
-                    select[relationName] = content;
-                } else {
-                    select[relationName] = true;
-                }
+                // No specific fields → the relation with all its fields, under its rule
+                select[relationName] = hasContent ? content : true;
             }
         }
 
@@ -1756,6 +1907,10 @@ class QueryBuilder {
             if (!rel) {
                 throw new ErrorResponse(400, "invalid_sort_field", { sortBy, relation: relationName, modelName: currentModel });
             }
+
+            // Not through a model the rule denies (an order can't be limited to readable rows —
+            // Prisma takes no filter in orderBy — so a restricted model's rows all count)
+            this.#relationAccess(rel.object, relationName, currentModel, user);
 
             lastRelationIsList = rel.isList || dmmf.isListRelation(currentModel, rel.name);
 
@@ -1808,34 +1963,48 @@ class QueryBuilder {
      * omit, writable whitelist, connect access filters) are skipped. Model always passes a
      * user (defaulting to the framework system user, which bypasses ACL) — only pass null
      * deliberately for trusted internal transformations.
+     *
+     * `stripped`: the top level was cleared of what the user may not write already (sanitizeRow)
+     * — before middleware ran, so what a hook sets there stays.
      */
-    create(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+    create(data: Record<string, unknown>, user: any = null, { stripped = false }: { stripped?: boolean } = {}): Record<string, unknown> {
         // One working copy; the per-key processors edit it in place
         const result: Record<string, any> = { ...data };
 
         // Remove fields user shouldn't be able to set
-        const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
-        for (const field of omitFields) {
-            delete result[field];
-        }
-        this.#applyWritableWhitelist(result, modelAcl, user);
+        if (!stripped) this.#stripUnwritable(result, user);
 
-        const keys = Object.keys(result);
-        for (const key of keys) {
+        // The row's own values first — nested items take their foreign key back to it from them
+        const own = this.#writeScalars(result, this.fields);
+        for (const key of Object.keys(result)) {
             const field = this.fields[key];
-            const isRelationField = field?.kind === 'object';
-
             // Handle relation fields or unknown keys
-            if (field == null || isRelationField) {
-                this.#processCreateRelation(result, key, user);
-            } else {
-                result[key] = writeDate(field, result[key]);
-                // Check if this scalar field is a FK that should become a connect
-                this.#processForeignKeyField(result, key, user, false);
+            if (field == null || field.kind === 'object') {
+                this.#processCreateRelation(result, key, user, own);
             }
         }
+        // Foreign-key columns become connects of their relations
+        this.#linkForeignKeys(result, this.relatedObjects, user, 'create', { model: this.name, whole: true });
 
         return result;
+    }
+
+    /**
+     * The scalar values of a write as the database takes them (dates, integers past 2^53
+     * refused) — set in `data`, and returned as the row's known values
+     */
+    #writeScalars(data: Record<string, any>, fields: Record<string, any>): Record<string, any> {
+        const values: Record<string, any> = {};
+        for (const [key, value] of Object.entries(data)) {
+            const field = fields[key];
+            if (field == null || field.kind === 'object') continue;
+            // A JSON number past 2^53 has lost digits before it got here — strings carry them
+            if (field.type === 'BigInt' && typeof value === 'number' && !Number.isSafeInteger(value)) {
+                throw new ErrorResponse(400, "unsafe_integer", { field: key });
+            }
+            values[key] = data[key] = writeDate(field, value);
+        }
+        return values;
     }
 
     /**
@@ -1844,7 +2013,8 @@ class QueryBuilder {
     #processCreateRelation(
         data: Record<string, any>,
         key: string,
-        user: any = null
+        user: any = null,
+        parent: Record<string, any> | null = null
     ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
@@ -1858,128 +2028,75 @@ class QueryBuilder {
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
             data[key] = this.#processCreateArrayRelation(
-                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, key, user
+                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, key, user, 0, parent
             );
         } else {
             // Clone the nested object to avoid mutating original
             data[key] = this.#processCreateSingleRelation(
-                { ...data[key] }, relatedObject, key, user
+                { ...data[key] }, relatedObject, key, user, 0, parent
             );
         }
     }
 
     /**
-     * Process array relation for create operation
+     * Process array relation for create operation. The items are rows of a new parent: created —
+     * with the key they carry (409 when it is taken). An item with only its key links an
+     * existing row instead, which moves it here: held to the related model's update rule as well
+     * as its read rule. Not where the key includes the parent's: such rows can't exist yet.
      */
     #processCreateArrayRelation(
         items: Record<string, any>[],
         relatedObject: RelationConfig,
         relationName: string,
         user: any = null,
-        depth: number = 0
+        depth: number = 0,
+        parent: Record<string, any> | null = null
     ): Record<string, any> {
         if (depth > MAX_NESTING_DEPTH) {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
 
         this.#ensureRelations(relatedObject);
-
-        for (let i = 0; i < items.length; i++) {
-            this.#validateAndTransformRelationItem(items[i], relatedObject, relationName);
+        for (const item of items) {
+            this.#assertKnownFields(item, relatedObject.object, relationName);
+            this.#dropBackReference(item, relatedObject);
         }
 
-        const relatedPrimaryKey = this.getPrimaryKey(relatedObject.object);
-        const pkFields = Array.isArray(relatedPrimaryKey) ? relatedPrimaryKey : [relatedPrimaryKey];
-        const foreignKey = relatedObject.foreignKey || pkFields[0];
+        const model = relatedObject.object;
+        const keyFields = this.#keyFields(model);
+        const inherited = this.#inherited(relatedObject, parent);
+        const keyed = (item: Record<string, any>): Record<string, any> => ({ ...item, ...inherited });
+        const linksOnly = (item: Record<string, any>): boolean => !this.#keyIncludesParent(relatedObject, keyFields)
+            && keyFields.every((field: string) => keyed(item)[field] != null)
+            && Object.keys(item).every((key: string) => keyFields.includes(key));
 
-        // For composite keys, check if ALL PK fields are present
-        const hasCompletePK = (item: Record<string, any>): boolean => pkFields.every((field: string) => item[field] != null);
+        const { modelAcl: relatedAcl, accessFilter, updateFilter, omitFields } = this.#resolveAclContext(model, user);
 
-        // Check if an item has ONLY primary key fields (no additional data)
-        const hasOnlyPKFields = (item: Record<string, any>): boolean => {
-            const itemKeys = Object.keys(item);
-            return itemKeys.every((key: string) => pkFields.includes(key));
+        // The key addresses records in nested payloads — exempt from the writable whitelist
+        const clean = (item: Record<string, any>): Record<string, any> => {
+            const cleaned: Record<string, any> = { ...item };
+            for (const field of omitFields) {
+                delete cleaned[field];
+            }
+            this.#applyWritableWhitelist(cleaned, relatedAcl, user, keyFields);
+            return cleaned;
         };
 
-        const createItems: Record<string, any>[] = [];
-        const connectOnlyItems: Record<string, any>[] = [];
-        const upsertItems: Record<string, any>[] = [];
-        for (const item of items) {
-            if (!hasCompletePK(item)) {
-                createItems.push(item);
-            } else if (hasOnlyPKFields(item)) {
-                connectOnlyItems.push(item);
-            } else {
-                upsertItems.push(item);
-            }
-        }
-
-        // Get ACL context for the related model
-        const { modelAcl: relatedAcl, accessFilter, omitFields } = this.#resolveAclContext(relatedObject.object, user);
-
-        // Identifier fields address records in nested payloads — exempt from the writable
-        // whitelist (n:m composite FK fields included, aligned with the update path)
-        const identifierExempt = [...pkFields, foreignKey, ...(Array.isArray(relatedObject.fields) ? relatedObject.fields : [])];
-
+        const createItems = items.filter((item: Record<string, any>) => !linksOnly(item));
+        const connectItems = items.filter(linksOnly);
         const result: Record<string, any> = {};
 
         if (createItems.length > 0) {
-            // Check canCreate permission for nested creates
-            this.#assertCanCreateAll(createItems, relatedAcl, user, relatedObject.object);
-
-            // Remove omitted and non-writable fields from create items
-            result.create = createItems.map((item: Record<string, any>) => {
-                const cleanedItem: Record<string, any> = { ...item };
-                for (const field of omitFields) {
-                    delete cleanedItem[field];
-                }
-                this.#applyWritableWhitelist(cleanedItem, relatedAcl, user, identifierExempt);
-                return cleanedItem;
-            });
+            this.#assertCanCreateAll(createItems, relatedAcl, user, model);
+            result.create = createItems.map((item: Record<string, any>) =>
+                this.#nestedData(clean(item), relatedObject, user, 'create', relationName, depth, inherited));
         }
 
-        if (connectOnlyItems.length > 0) {
-            if (pkFields.length > 1) {
-                // Composite key - build composite where clause with ACL
-                result.connect = connectOnlyItems.map((e: Record<string, any>) => {
-                    const where: Record<string, any> = {};
-                    pkFields.forEach((field: string) => { where[field] = e[field]; });
-                    return this.#mergeAclIntoUniqueWhere(where, accessFilter);
-                });
-            } else {
-                // Simple key with ACL
-                result.connect = connectOnlyItems.map((e: Record<string, any>) => {
-                    const where: Record<string, any> = { [foreignKey]: e[foreignKey] || e[pkFields[0]] };
-                    return this.#mergeAclIntoUniqueWhere(where, accessFilter);
-                });
-            }
-        }
-
-        if (upsertItems.length > 0) {
-            // Check canCreate permission for nested connectOrCreate
-            this.#assertCanCreateAll(upsertItems, relatedAcl, user, relatedObject.object);
-
-            // Remove omitted and non-writable fields from connectOrCreate items
-            result.connectOrCreate = upsertItems.map((item: Record<string, any>) => {
-                const cleanedItem: Record<string, any> = { ...item };
-                for (const field of omitFields) {
-                    delete cleanedItem[field];
-                }
-                this.#applyWritableWhitelist(cleanedItem, relatedAcl, user, identifierExempt);
-
-                // Build where clause from PK fields
-                const where: Record<string, any> = {};
-                if (pkFields.length > 1) {
-                    pkFields.forEach((field: string) => { where[field] = cleanedItem[field]; });
-                } else {
-                    where[foreignKey] = cleanedItem[foreignKey] || cleanedItem[pkFields[0]];
-                }
-
-                return {
-                    where: this.#mergeAclIntoUniqueWhere(where, accessFilter),
-                    create: cleanedItem,
-                };
-            });
+        if (connectItems.length > 0) {
+            const rules: [any, string][] = [[accessFilter, 'no_permission']];
+            if (linkRewritesRelated(relatedObject)) rules.push([updateFilter, 'no_permission_to_update']);
+            result.connect = connectItems.map((item: Record<string, any>) =>
+                this.#scopeUnique(this.#keyWhere(model, keyFields, keyed(item)), model, rules));
         }
 
         return result;
@@ -1997,7 +2114,8 @@ class QueryBuilder {
         relatedObject: RelationConfig,
         relationName: string,
         user: any = null,
-        depth: number = 0
+        depth: number = 0,
+        parent: Record<string, any> | null = null
     ): Record<string, any> {
         if (depth > MAX_NESTING_DEPTH) {
             throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
@@ -2016,140 +2134,301 @@ class QueryBuilder {
             throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
         }
 
-        // Apply omit fields
+        // Apply omit fields, then the writable-fields whitelist (the related key is an identifier, not data)
         for (const field of omitFields) {
             delete item[field];
         }
+        this.#applyWritableWhitelist(item, relatedAcl, user, this.#keyFields(relatedObject.object));
 
-        // Apply writable-fields whitelist (related model's PK is an identifier, not data)
-        const relatedPk = this.getPrimaryKey(relatedObject.object);
-        this.#applyWritableWhitelist(item, relatedAcl, user, Array.isArray(relatedPk) ? relatedPk : [relatedPk]);
-
-        // Ensure nested relations are resolved for deep processing
         this.#ensureRelations(relatedObject);
+        this.#assertKnownFields(item, relatedObject.object, relationName);
+        this.#dropBackReference(item, relatedObject);
 
-        for (const fieldKey of Object.keys(item)) {
-            if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
-                throw new ErrorResponse(400, "unexpected_key", { key: `${relationName}.${fieldKey}` });
-            }
+        return { create: this.#nestedData(item, relatedObject, user, 'create', relationName, depth, this.#inherited(relatedObject, parent)) };
+    }
 
-            // Check if this field is a FK that should become a nested connect
-            const childRelation = relatedObject?.relation?.find((e: RelationConfig) => e.field === fieldKey);
-            if (childRelation && item[fieldKey]) {
-                const targetPrimaryKey = childRelation.foreignKey || this.getPrimaryKey(childRelation.object);
-                const connectWhere: Record<string, any> = {};
+    /** The fields that identify a row of a model — its @id / @@id, or its unique */
+    #keyFields(model: string): string[] {
+        const key = this.getPrimaryKey(model);
+        return Array.isArray(key) ? key : [key];
+    }
 
-                // Handle composite primary keys
-                if (Array.isArray(targetPrimaryKey)) {
-                    if (typeof item[fieldKey] === 'object' && item[fieldKey] !== null) {
-                        targetPrimaryKey.forEach((pk: string) => {
-                            if (item[fieldKey][pk] != null) {
-                                connectWhere[pk] = item[fieldKey][pk];
-                            }
-                        });
-                    } else {
-                        connectWhere[targetPrimaryKey[0]] = item[fieldKey];
-                    }
-                } else {
-                    connectWhere[targetPrimaryKey] = item[fieldKey];
-                }
+    /** A unique where for a row by these key fields: { id: 1 } — or the compound selector { a_b: { a: 1, b: 2 } } */
+    #keyWhere(model: string, keyFields: string[], values: Record<string, any>): Record<string, any> {
+        if (keyFields.length === 1) return { [keyFields[0]]: values[keyFields[0]] };
+        const selector: Record<string, any> = {};
+        for (const field of keyFields) selector[field] = values[field];
+        return { [dmmf.compoundKeyName(model, keyFields)]: selector };
+    }
 
-                // Apply ACL access filter for connect
-                const { accessFilter: childAccessFilter } = this.#resolveAclContext(childRelation.object, user);
-
-                item[childRelation.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, childAccessFilter) };
-                delete item[fieldKey];
-                continue;
-            }
-
-            // Check if this field is a nested relation object that needs recursive processing
-            const nestedRelation = relatedObject?.relation?.find((e: RelationConfig) => e.name === fieldKey);
-            if (nestedRelation && item[fieldKey] && typeof item[fieldKey] === 'object') {
-                this.#ensureRelations(nestedRelation);
-                if (Array.isArray(item[fieldKey])) {
-                    item[fieldKey] = this.#processCreateArrayRelation(
-                        item[fieldKey].map((i: Record<string, any>) => ({ ...i })), nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
-                    );
-                } else {
-                    item[fieldKey] = this.#processCreateSingleRelation(
-                        { ...item[fieldKey] }, nestedRelation, `${relationName}.${fieldKey}`, user, depth + 1
-                    );
-                }
+    /** Every field of a nested item must exist on its model */
+    #assertKnownFields(item: Record<string, any>, model: string, path: string): void {
+        for (const key of Object.keys(item)) {
+            if (!this.#fieldExistsOnModel(model, key)) {
+                throw new ErrorResponse(400, "unexpected_key", { key: `${path}.${key}` });
             }
         }
+    }
 
-        return { create: { ...item } };
+    /** The nested model's side of the relation a nested write goes through — the way back to the parent */
+    #backRelation(relatedObject: RelationConfig): RelationConfig | undefined {
+        if (!relatedObject.relationName) return undefined;
+        const sides = (relatedObject.relation ?? []).filter((r: RelationConfig) => r.relationName === relatedObject.relationName);
+        // A relation of a model to itself has both sides on it
+        return sides.length > 1 ? sides.find((r: RelationConfig) => r.name !== relatedObject.name) : sides[0];
+    }
+
+    /** The foreign key back to the parent is the nesting's to decide — a client's copy of it is dropped */
+    #dropBackReference(item: Record<string, any>, relatedObject: RelationConfig): void {
+        const back = this.#backRelation(relatedObject);
+        for (const column of back?.fields ?? (back?.field ? [back.field] : [])) {
+            delete item[column];
+        }
+    }
+
+    /** What a nested item takes from its parent: its foreign key back to it, where the parent's values are known */
+    #inherited(relatedObject: RelationConfig, parent: Record<string, any> | null): Record<string, any> {
+        const values: Record<string, any> = {};
+        const back = this.#backRelation(relatedObject);
+        if (!back || !parent) return values;
+        const columns = back.fields ?? (back.field ? [back.field] : []);
+        const targets = back.foreignKeys?.length ? back.foreignKeys : (back.foreignKey ? [back.foreignKey] : []);
+        columns.forEach((column: string, i: number) => {
+            if (targets[i] != null && parent[targets[i]] != null) values[column] = parent[targets[i]];
+        });
+        return values;
+    }
+
+    /** Whether a nested model's key includes its foreign key back to the parent — its rows are that parent's alone */
+    #keyIncludesParent(relatedObject: RelationConfig, keyFields: string[]): boolean {
+        const back = this.#backRelation(relatedObject);
+        return (back?.fields ?? (back?.field ? [back.field] : [])).some((column: string) => keyFields.includes(column));
+    }
+
+    /** A row's key as { field: value } — from its key value, or an object holding its fields; null when unknown */
+    #keyValues(model: string, id: unknown): Record<string, any> | null {
+        if (id == null) return null;
+        const keyFields = this.#keyFields(model);
+        if (typeof id === 'object' && !(id instanceof Date)) {
+            const values: Record<string, any> = {};
+            for (const field of keyFields) {
+                if ((id as Record<string, any>)[field] != null) values[field] = (id as Record<string, any>)[field];
+            }
+            return Object.keys(values).length > 0 ? values : null;
+        }
+        return keyFields.length === 1 ? { [keyFields[0]]: id } : null;
+    }
+
+    /** A unique where held to some of a model's rules at once — each a filter, null (none) or false (refused) */
+    #scopeUnique(where: Record<string, any>, model: string, rules: [any, string][]): Record<string, any> {
+        const conditions: Record<string, any>[] = [];
+        for (const [rule, denied] of rules) {
+            if (rule === false) throw new ErrorResponse(403, denied, { model });
+            if (rule && typeof rule === 'object' && Object.keys(rule).length > 0) conditions.push(rule);
+        }
+        return conditions.length > 0 ? { ...where, AND: conditions } : where;
     }
 
     /**
-     * Validate relation item fields and transform nested FK references
+     * Whether `data` — a nested create as #nestedData writes it — has what a new row of `model`
+     * needs: every required column without a default, every required relation (the one back to
+     * the parent is the nesting's). Prisma validates an upsert's create half even when the row
+     * exists — an item without it can only update.
      */
-    #validateAndTransformRelationItem(
+    #creatable(model: string, data: Record<string, any>, back: RelationConfig | undefined, relations: RelationConfig[]): boolean {
+        const linked = new Set<string>();
+        for (const relation of relations) {
+            if (relation === back || data[relation.name] != null) {
+                for (const column of relation.fields ?? (relation.field ? [relation.field] : [])) linked.add(column);
+            }
+        }
+        const complete = Object.values(this.#fieldsOf(model)).every((field: any) => {
+            if (!field.isRequired || field.isList || field.hasDefaultValue || field.isUpdatedAt) return true;
+            if (field.kind === 'object') {
+                return !field.relationFromFields?.length || field.name === back?.name || data[field.name] != null
+                    || field.relationFromFields.every((column: string) => data[column] != null);
+            }
+            return data[field.name] != null || linked.has(field.name);
+        });
+        if (!complete) return false;
+        // The rows it creates with it, at every level, must be new rows too
+        for (const relation of relations) {
+            const ops = data[relation.name];
+            if (relation === back || !ops || typeof ops !== 'object') continue;
+            const creates = [
+                ...(Array.isArray(ops.create) ? ops.create : ops.create ? [ops.create] : []),
+                ...(Array.isArray(ops.connectOrCreate) ? ops.connectOrCreate : ops.connectOrCreate ? [ops.connectOrCreate] : []).map((c: any) => c?.create),
+            ].filter((item: unknown) => item && typeof item === 'object');
+            if (creates.length === 0) continue;
+            this.#ensureRelations(relation);
+            const nestedBack = this.#backRelation(relation);
+            if (!creates.every((item: Record<string, any>) => this.#creatable(relation.object, item, nestedBack, relation.relation ?? []))) return false;
+        }
+        return true;
+    }
+
+    /**
+     * Foreign-key columns become connects of their relations, held to the related model's access
+     * rule — a composite foreign key with all its columns, through its compound selector:
+     * { orgId: 1, userId: 2 } → { member: { connect: { orgId_userId: { orgId: 1, userId: 2 } } } }.
+     *
+     * A relation is named by a column only its foreign key has (assignee_no). A column several
+     * foreign keys share (tenant_id) is completed from what is known — the parent's values in a
+     * nested item, the row's key in an update — and changed in an update, it moves every link
+     * through it. A missing link (null — in creates also an empty form field) is left
+     * out of a create and unlinks in an update: `disconnect` — or, where the foreign key shares a
+     * column that disconnect would null too, its own columns set null. A required relation can't
+     * be unlinked — nor left out of a create of the `whole` row. Edits `data`; true when it linked
+     * a relation.
+     */
+    #linkForeignKeys(
+        data: Record<string, any>,
+        relations: RelationConfig[],
+        user: any,
+        mode: 'create' | 'update',
+        { model, back, inherited = {}, whole = false }: { model: string; back?: RelationConfig; inherited?: Record<string, any>; whole?: boolean }
+    ): boolean {
+        const columnsOf = (relation: RelationConfig): string[] => relation.fields ?? (relation.field ? [relation.field] : []);
+        const owning = relations.filter((relation: RelationConfig) => columnsOf(relation).length > 0);
+        const holders = new Map<string, number>();
+        for (const relation of owning) {
+            for (const column of columnsOf(relation)) holders.set(column, (holders.get(column) ?? 0) + 1);
+        }
+        const ownColumns = (relation: RelationConfig): string[] => columnsOf(relation).filter((column: string) => holders.get(column) === 1);
+        const given: Record<string, any> = { ...inherited, ...data };
+        const present = (column: string): boolean => given[column] != null && !(mode === 'create' && given[column] === '');
+        const incomplete = (relation: RelationConfig): never => {
+            throw new ErrorResponse(400, "incomplete_foreign_key", { relation: relation.name, fields: columnsOf(relation) });
+        };
+        const fields = this.#fieldsOf(model);
+        const required = (relation: RelationConfig): boolean => fields[relation.name]?.isRequired === true;
+        const linkable = owning.filter((relation: RelationConfig) => relation !== back);
+
+        // Relations named by a column of their own: linked — or unlinked, those columns all null
+        const plan = new Map<RelationConfig, 'link' | 'unlink'>();
+        for (const relation of linkable) {
+            const own = ownColumns(relation);
+            if (!own.some((column: string) => column in data)) continue;
+            if (columnsOf(relation).every(present)) plan.set(relation, 'link');
+            else if (own.every((column: string) => !present(column))) plan.set(relation, 'unlink');
+            else incomplete(relation);
+        }
+        // An update of a shared column moves every link through it (in a create, a relation not
+        // named is left out)
+        for (const column of mode === 'update' ? Object.keys(data) : []) {
+            if ((holders.get(column) ?? 0) < 2) continue;
+            for (const relation of linkable) {
+                if (!columnsOf(relation).includes(column) || plan.has(relation)) continue;
+                if (columnsOf(relation).every(present)) plan.set(relation, 'link');
+                else incomplete(relation);
+            }
+        }
+
+        const used = new Set<string>();
+        let linked = false;
+        let nulled: RelationConfig | null = null;
+        for (const [relation, action] of plan) {
+            const columns = columnsOf(relation);
+            if (action === 'link') {
+                // The columns it references — usually the related model's key
+                const targets = relation.foreignKeys?.length ? relation.foreignKeys : [relation.foreignKey ?? this.#keyFields(relation.object)[0]];
+                const values: Record<string, any> = {};
+                targets.forEach((target: string, i: number) => { values[target] = given[columns[i]]; });
+                const { accessFilter } = this.#resolveAclContext(relation.object, user);
+                data[relation.name] = { connect: this.#mergeAclIntoUniqueWhere(this.#keyWhere(relation.object, targets, values), accessFilter, relation.object) };
+                columns.forEach((column: string) => used.add(column));
+                linked = true;
+            } else if (required(relation)) {
+                throw new ErrorResponse(400, "foreign_key_required", { relation: relation.name, fields: columns });
+            } else if (mode === 'create') {
+                // Nothing to link to: left out
+                ownColumns(relation).forEach((column: string) => used.add(column));
+            } else if (columns.every((column: string) => holders.get(column) === 1)) {
+                data[relation.name] = { disconnect: true };
+                columns.forEach((column: string) => used.add(column));
+            } else {
+                for (const column of ownColumns(relation)) data[column] = null;
+                nulled = relation;
+            }
+        }
+        for (const column of used) {
+            delete data[column];
+        }
+
+        // Prisma takes foreign-key columns only without relation writes next to them
+        if (nulled && owning.some((relation: RelationConfig) => data[relation.name] != null && typeof data[relation.name] === 'object')) {
+            throw new ErrorResponse(400, "foreign_key_unlink_conflict", { relation: nulled.name, fields: ownColumns(nulled) });
+        }
+
+        // A required relation a create of the whole row leaves out — named by its columns, not
+        // Prisma's argument (a nested create may have it from the nesting)
+        if (mode === 'create' && whole) {
+            for (const relation of linkable) {
+                if (plan.has(relation) || data[relation.name] != null || !required(relation)) continue;
+                const own = ownColumns(relation);
+                if (own.length === 0 || own.some((column: string) => fields[column]?.hasDefaultValue)) continue;
+                throw new ErrorResponse(400, "foreign_key_required", { relation: relation.name, fields: columnsOf(relation) });
+            }
+        }
+        return linked;
+    }
+
+    /** An autoincrement key column — Prisma takes it in a create only as plain columns, never next to a relation */
+    #isAutoincrement(model: string, field: string): boolean {
+        const def = this.#getRelatedModelFields(model)[field]?.default as { name?: string } | undefined;
+        return def?.name === 'autoincrement';
+    }
+
+    /**
+     * A nested item written as a create or an update of its model: relations inside it are
+     * written the same way, one level deeper, and foreign keys become connects held to the
+     * related model's rule — completed by what the item takes from its parent (`inherited`).
+     * Its key addresses it (the where), it is no data: an update leaves it out, and so does a
+     * create that links relations when the database assigns it.
+     */
+    #nestedData(
         item: Record<string, any>,
         relatedObject: RelationConfig,
-        relationName: string
-    ): void {
-        this.#ensureRelations(relatedObject);
-
-        for (const fieldKey of Object.keys(item)) {
-            if (!this.#fieldExistsOnModel(relatedObject.object, fieldKey)) {
-                throw new ErrorResponse(400, "unexpected_key", { key: `${relationName}.${fieldKey}` });
-            }
-
-            // Handle composite FK fields
-            if (relatedObject.fields?.includes(fieldKey)) {
-                const index = relatedObject.fields.findIndex((f: string) => f === fieldKey);
-                if (index > 0 && relatedObject.relation?.[index - 1]) {
-                    const rel = relatedObject.relation[index - 1];
-                    const relPrimaryKey = rel.foreignKey || this.getPrimaryKey(rel.object);
-                    const restData: Record<string, any> = { ...item };
-                    delete restData[fieldKey];
-
-                    Object.assign(item, {
-                        [rel.name]: { connect: { [relPrimaryKey as string]: item[fieldKey] } },
-                        ...restData,
-                    });
-                    delete item[fieldKey];
-                } else {
-                    delete item[fieldKey];
-                }
-            }
-        }
-    }
-
-    /**
-     * Process a scalar field that is a FK to a to-one relation, turning it into a
-     * relation connect. In update mode (allowDisconnect) a null value becomes a
-     * disconnect; in create mode falsy values are simply dropped.
-     * Shared by the create and update write transformers; edits `data`, their working copy.
-     */
-    #processForeignKeyField(
-        data: Record<string, any>,
-        key: string,
         user: any,
-        allowDisconnect: boolean
-    ): void {
-        const relatedObject = this.getRelationByField(key);
-        if (!relatedObject) return;
-
-        const value = data[key];
-        // Create mode keeps the historical truthy check; update mode connects on any non-null value
-        const shouldConnect = allowDisconnect ? value != null : Boolean(value);
-
-        if (shouldConnect) {
-            const targetPrimaryKey = this.getPrimaryKey(relatedObject.object);
-            const foreignKey = relatedObject.foreignKey || (Array.isArray(targetPrimaryKey) ? targetPrimaryKey[0] : targetPrimaryKey);
-            // Build connect where clause
-            const connectWhere: Record<string, any> = { [foreignKey]: value };
-
-            // Apply ACL access filter for connect
-            const { accessFilter } = this.#resolveAclContext(relatedObject.object, user);
-
-            data[relatedObject.name] = { connect: this.#mergeAclIntoUniqueWhere(connectWhere, accessFilter) };
-        } else if (allowDisconnect) {
-            data[relatedObject.name] = { disconnect: true };
+        mode: 'create' | 'update',
+        path: string,
+        depth: number,
+        inherited: Record<string, any> = {}
+    ): Record<string, any> {
+        const model = relatedObject.object;
+        const data: Record<string, any> = { ...item };
+        const relations = this.#ensureRelations(relatedObject).relation ?? [];
+        // The item's values and what it takes from its parent: what its own items take from it
+        const known = { ...this.#writeScalars(data, this.#fieldsOf(model)), ...inherited };
+        for (const [key, value] of Object.entries(item)) {
+            const nested = relations.find((r: RelationConfig) => r.name === key);
+            if (!nested || !value || typeof value !== 'object') continue;
+            this.#ensureRelations(nested);
+            const at = `${path}.${key}`;
+            if (mode === 'create') {
+                data[key] = Array.isArray(value)
+                    ? this.#processCreateArrayRelation(value.map((v: Record<string, any>) => ({ ...v })), nested, at, user, depth + 1, known)
+                    : this.#processCreateSingleRelation({ ...value }, nested, at, user, depth + 1, known);
+            } else if (Array.isArray(value)) {
+                data[key] = this.#processArrayRelation(value.map((v: Record<string, any>) => ({ ...v })), nested, known, user, depth + 1);
+            } else {
+                const written = this.#processSingleRelation({ ...value }, nested, user, depth + 1, known);
+                if (written) data[key] = written;
+                else delete data[key];
+            }
         }
-        delete data[key];
+
+        const keyFields = this.#keyFields(model);
+        if (mode === 'update') {
+            for (const field of keyFields) delete data[field];
+        }
+        const linked = this.#linkForeignKeys(data, relations, user, mode, { model, back: this.#backRelation(relatedObject), inherited: known });
+        if (mode === 'create' && linked) {
+            for (const field of keyFields) {
+                if (this.#isAutoincrement(model, field)) delete data[field];
+            }
+        }
+        return data;
     }
 
     /**
@@ -2158,12 +2437,17 @@ class QueryBuilder {
      */
     sanitizeRow(data: Record<string, unknown>, user: any = null): Record<string, unknown> {
         const row: Record<string, any> = { ...data };
+        this.#stripUnwritable(row, user);
+        return row;
+    }
+
+    /** Remove what the ACL hides from this user or doesn't let them write (edits `row`) */
+    #stripUnwritable(row: Record<string, any>, user: any): void {
         const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
         for (const field of omitFields) {
             delete row[field];
         }
         this.#applyWritableWhitelist(row, modelAcl, user);
-        return row;
     }
 
     /**
@@ -2171,39 +2455,39 @@ class QueryBuilder {
      * Transforms nested relation data into Prisma update/upsert/connect/disconnect syntax
      * Does NOT mutate the input data - returns a new transformed object
      */
-    update(id: string | number | null, data: Record<string, unknown>, user: any = null): Record<string, unknown> {
+    update(
+        id: string | number | Record<string, any> | null,
+        data: Record<string, unknown>,
+        user: any = null,
+        { stripped = false }: { stripped?: boolean } = {}
+    ): Record<string, unknown> {
         // One working copy; the per-key processors edit it in place
         const result: Record<string, any> = { ...data };
 
-        // Remove fields user shouldn't be able to modify
-        const { modelAcl, omitFields } = this.#resolveAclContext(this.name, user);
-        for (const field of omitFields) {
-            delete result[field];
-        }
-        this.#applyWritableWhitelist(result, modelAcl, user);
+        // Remove fields user shouldn't be able to modify (see create: `stripped`)
+        if (!stripped) this.#stripUnwritable(result, user);
 
-        // The record's own key, unchanged, is not a write (clients echo it back; upserts carry
-        // it). Dropping it avoids a pointless key update — and Prisma's checked update input,
-        // used once a foreign key becomes a connect, has no autoincrement id at all.
-        const pk = this.getPrimaryKey();
-        if (id != null && typeof pk === 'string' && result[pk] != null && String(result[pk]) === String(id)) {
-            delete result[pk];
-        }
-
-        const keys = Object.keys(result);
-        for (const key of keys) {
-            const field = this.fields[key];
-            const isRelationField = field?.kind === 'object';
-
-            // Handle relation fields or unknown keys
-            if (field == null || isRelationField) {
-                this.#processUpdateRelation(result, key, id, user);
-            } else {
-                result[key] = writeDate(field, result[key]);
-                // Check if this scalar field is a FK that should become a connect/disconnect
-                this.#processForeignKeyField(result, key, user, true);
+        // The record's key (`id`: its value, or an object of its fields): it completes a foreign
+        // key the payload names in part, and nested items take theirs from it. Unchanged, it is
+        // no write (clients echo it back; upserts carry it) — dropping it avoids a pointless key
+        // update, and Prisma's checked input, used once a foreign key becomes a connect, has no
+        // autoincrement id at all.
+        const key = this.#keyValues(this.name, id) ?? {};
+        for (const [field, value] of Object.entries(key)) {
+            if (result[field] != null && keyText(this.fields[field], result[field]) === keyText(this.fields[field], value)) {
+                delete result[field];
             }
         }
+
+        const own = { ...this.#writeScalars(result, this.fields), ...key };
+        for (const field of Object.keys(result)) {
+            // Handle relation fields or unknown keys
+            if (this.fields[field] == null || this.fields[field].kind === 'object') {
+                this.#processUpdateRelation(result, field, user, own);
+            }
+        }
+        // Foreign-key columns become connects (null: unlinks) of their relations
+        this.#linkForeignKeys(result, this.relatedObjects, user, 'update', { model: this.name, inherited: key });
 
         return result;
     }
@@ -2214,8 +2498,8 @@ class QueryBuilder {
     #processUpdateRelation(
         data: Record<string, any>,
         key: string,
-        parentId: string | number | null,
-        user: any
+        user: any,
+        parent: Record<string, any> | null = null
     ): void {
         const relatedObject = this.getRelationByName(key);
         if (!relatedObject) {
@@ -2229,47 +2513,14 @@ class QueryBuilder {
         if (Array.isArray(data[key])) {
             // Clone each item to avoid mutating original nested objects
             data[key] = this.#processArrayRelation(
-                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, parentId, user
+                data[key].map((item: Record<string, any>) => ({ ...item })), relatedObject, parent, user
             );
         } else {
             // Clone the nested object to avoid mutating original
-            data[key] = this.#processSingleRelation(
-                { ...data[key] }, relatedObject, user
-            );
+            const written = this.#processSingleRelation({ ...data[key] }, relatedObject, user, 0, parent);
+            if (written) data[key] = written;
+            else delete data[key];
         }
-    }
-
-    /**
-     * Build the composite-key pair object for an n:m join-table where clause.
-     * Values from the item take precedence; the parent id fills the first FK field when missing.
-     * Throws when the composite key is incomplete (e.g. nested n:m updates where no parent id is available).
-     */
-    #buildCompositePairId(
-        item: Record<string, any>,
-        relatedObject: RelationConfig,
-        parentId: string | number | null
-    ): Record<string, any> {
-        const fields = relatedObject.fields!;
-        const pair_id: Record<string, any> = {};
-
-        if (parentId != null) {
-            pair_id[fields[0]] = parentId;
-        }
-        for (const field in item) {
-            if (fields.includes(field)) {
-                pair_id[field] = item[field];
-            }
-        }
-
-        const missing = fields.filter((f: string) => pair_id[f] == null);
-        if (missing.length > 0) {
-            throw new ErrorResponse(400, "incomplete_composite_key", {
-                relation: relatedObject.name,
-                missing,
-            });
-        }
-
-        return pair_id;
     }
 
     /**
@@ -2307,7 +2558,9 @@ class QueryBuilder {
      * one of id arguments"). Nesting also prevents filter keys from overwriting the unique
      * key when they collide (e.g. an ACL filter on `id`).
      */
-    #mergeAclIntoUniqueWhere(where: Record<string, any>, aclFilter: any): Record<string, any> {
+    #mergeAclIntoUniqueWhere(where: Record<string, any>, aclFilter: any, model: string, denied = 'no_permission'): Record<string, any> {
+        // A deny is a refusal, not "no filter" — as for raw nested operations
+        if (aclFilter === false) throw new ErrorResponse(403, denied, { model });
         if (!aclFilter || typeof aclFilter !== 'object' || Object.keys(aclFilter).length === 0) {
             return where;
         }
@@ -2372,9 +2625,10 @@ class QueryBuilder {
      */
     #resolveAclContext(modelName: string, user: any): {
         modelAcl: any;
-        accessFilter: Record<string, any> | null;
-        updateFilter: Record<string, any> | null;
-        deleteFilter: Record<string, any> | null;
+        /** A filter, null (no restriction) or false (denied) */
+        accessFilter: Record<string, any> | false | null;
+        updateFilter: Record<string, any> | false | null;
+        deleteFilter: Record<string, any> | false | null;
         omitFields: string[];
     } {
         const modelAcl = getAcl().model[modelName];
@@ -2385,13 +2639,13 @@ class QueryBuilder {
         return {
             modelAcl,
             get accessFilter() {
-                return active && modelAcl?.getAccessFilter ? self.cleanFilter(modelAcl.getAccessFilter(user)) : null;
+                return active && modelAcl?.getAccessFilter ? self.cleanFilter(guardAclFilter(modelAcl.getAccessFilter(user), modelName, 'getAccessFilter')) : null;
             },
             get updateFilter() {
-                return active && modelAcl?.getUpdateFilter ? self.cleanFilter(modelAcl.getUpdateFilter(user)) : null;
+                return active && modelAcl?.getUpdateFilter ? self.cleanFilter(guardAclFilter(modelAcl.getUpdateFilter(user), modelName, 'getUpdateFilter')) : null;
             },
             get deleteFilter() {
-                return active && modelAcl?.getDeleteFilter ? self.cleanFilter(modelAcl.getDeleteFilter(user)) : null;
+                return active && modelAcl?.getDeleteFilter ? self.cleanFilter(guardAclFilter(modelAcl.getDeleteFilter(user), modelName, 'getDeleteFilter')) : null;
             },
             get omitFields() {
                 if (!active || !modelAcl?.getOmitFields) return [];
@@ -2417,347 +2671,160 @@ class QueryBuilder {
     }
 
     /**
-     * Process array relations for update operations
+     * Process array relations for update operations. An item is addressed by its key — the part
+     * the parent holds taken from the parent (task_no under a project: the project's tenant and
+     * number with it). Only its key: the row is linked — a row of another parent moves here,
+     * held to the related model's update rule; a row whose key includes this parent's is linked
+     * already, and created when missing and it can be. Its key and data: upserted — updated only,
+     * when the user may not create it or it lacks what a new row needs. No key: created.
      */
     #processArrayRelation(
         dataArray: Record<string, any>[],
         relatedObject: RelationConfig,
-        parentId: string | number | null,
-        user: any = null
+        parent: Record<string, any> | null,
+        user: any = null,
+        depth: number = 0
     ): Record<string, any> {
-        this.#ensureRelations(relatedObject);
-
-        for (let i = 0; i < dataArray.length; i++) {
-            // Validate all fields exist on the related model
-            for (const _key in dataArray[i]) {
-                if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
-                    throw new ErrorResponse(400, "unexpected_key", { key: `${relatedObject.name}.${_key}` });
-                }
-            }
-
-            // Process nested relations recursively if they exist
-            if (relatedObject.relation) {
-                dataArray[i] = this.#processNestedRelations(dataArray[i], relatedObject.relation, user);
-            }
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
         }
 
-        // Get primary key for the related model
-        const relatedPrimaryKey = this.getPrimaryKey(relatedObject.object);
-        const pkFields = Array.isArray(relatedPrimaryKey) ? relatedPrimaryKey : [relatedPrimaryKey];
-        const foreignKey = relatedObject.foreignKey || pkFields[0];
-        const isCompositePK = pkFields.length > 1;
+        this.#ensureRelations(relatedObject);
+        for (const item of dataArray) {
+            this.#assertKnownFields(item, relatedObject.object, relatedObject.name);
+            this.#dropBackReference(item, relatedObject);
+        }
 
-        // Get ACL context for the related model
-        const { modelAcl: relatedAcl, accessFilter, updateFilter, omitFields } = this.#resolveAclContext(relatedObject.object, user);
+        const model = relatedObject.object;
+        const keyFields = this.#keyFields(model);
+        const inherited = this.#inherited(relatedObject, parent);
+        const ownedByParent = this.#keyIncludesParent(relatedObject, keyFields);
+        const back = this.#backRelation(relatedObject);
+        const { modelAcl: relatedAcl, accessFilter, updateFilter, omitFields } = this.#resolveAclContext(model, user);
 
-        // Identifier fields address records — exempt from the writable whitelist
-        const identifierExempt = [...pkFields, foreignKey, ...(Array.isArray(relatedObject.fields) ? relatedObject.fields : [])];
-
-        // Helper to remove omitted and non-writable fields from an object
-        const removeOmitFields = (obj: Record<string, any>): Record<string, any> => {
+        // The key addresses records — exempt from the writable whitelist
+        const clean = (obj: Record<string, any>): Record<string, any> => {
             const cleaned: Record<string, any> = { ...obj };
             for (const field of omitFields) {
                 delete cleaned[field];
             }
-            this.#applyWritableWhitelist(cleaned, relatedAcl, user, identifierExempt);
+            this.#applyWritableWhitelist(cleaned, relatedAcl, user, keyFields);
             return cleaned;
         };
 
-        // Helper to check if item has ALL PK fields
-        const hasCompletePK = (item: Record<string, any>): boolean => pkFields.every((field: string) => item[field] != null);
+        const keyed = (item: Record<string, any>): Record<string, any> => ({ ...item, ...inherited });
+        const hasKey = (item: Record<string, any>): boolean => keyFields.every((field: string) => keyed(item)[field] != null);
+        const onlyKey = (item: Record<string, any>): boolean => Object.keys(item).every((key: string) => keyFields.includes(key));
+        const mayCreate = (item: Record<string, any>): boolean =>
+            !user || isSystemUser(user) || !relatedAcl?.canCreate || relatedAcl.canCreate(user, item);
+        const where = (item: Record<string, any>, rules: [any, string][]): Record<string, any> =>
+            this.#scopeUnique(this.#keyWhere(model, keyFields, keyed(item)), model, rules);
+        const readRule: [any, string] = [accessFilter, 'no_permission'];
+        const updateRule: [any, string] = [updateFilter, 'no_permission_to_update'];
 
-        // Helper to check if item has ONLY the PK/FK fields (for connect)
-        // For n:m relations (composite FK), checks if only the join table FK fields are present
-        const hasOnlyPkFields = (item: Record<string, any>): boolean => {
-            const keys = Object.keys(item);
-
-            // For n:m relations with composite FK (e.g., PostTag with postId, tagId)
-            if (Array.isArray(relatedObject.fields)) {
-                // Check if all keys are part of the composite FK fields
-                // e.g., { tagId: 5 } should be connect, { tagId: 5, weight: 3 } should be upsert
-                return keys.every((k: string) => relatedObject.fields!.includes(k));
-            }
-
-            if (isCompositePK) {
-                // For composite PK: all keys must be PK fields, and all PK fields must be present
-                return keys.length === pkFields.length && keys.every((k: string) => pkFields.includes(k));
-            }
-            // For simple: only 1 key which is FK or PK
-            return keys.length === 1 && (keys[0] === foreignKey || keys[0] === pkFields[0]);
+        const result: Record<string, any[]> = {};
+        const add = (op: string, entry: Record<string, any>): void => {
+            (result[op] ??= []).push(entry);
         };
-
-        // Logic:
-        // - connect: item has ONLY the PK/FK fields (just linking an existing record)
-        // - upsert: item has PK AND additional data fields (update if exists, create if not)
-        // - create: item has NO PK (always create new record)
-        // For n:m relations: { tagId: 5 } -> connect, { tagId: 5, weight: 3 } -> upsert
-        const connectItems: Record<string, any>[] = [];
-        const upsertItems: Record<string, any>[] = [];
-        const createItems: Record<string, any>[] = [];
-
         for (const item of dataArray) {
-            if (hasOnlyPkFields(item)) {
-                // Only PK/FK fields provided - connect to existing record
-                connectItems.push(item);
-            } else if (hasCompletePK(item) || Array.isArray(relatedObject.fields)) {
-                // Has PK + data fields OR is n:m relation with extra data - upsert
-                upsertItems.push(item);
+            if (!hasKey(item)) {
+                if (!mayCreate(item)) {
+                    throw new ErrorResponse(403, "no_permission_to_create", { model });
+                }
+                add('create', this.#nestedData(clean(item), relatedObject, user, 'create', relatedObject.name, depth, inherited));
+                continue;
+            }
+
+            const cleaned = clean(item);
+            const createData = this.#nestedData(cleaned, relatedObject, user, 'create', relatedObject.name, depth, inherited);
+            const creatable = mayCreate(item) && this.#creatable(model, createData, back, relatedObject.relation ?? []);
+
+            if (onlyKey(item)) {
+                if (!ownedByParent) {
+                    // Linking moves the row here — an update of it, unless the links are rows of their own
+                    add('connect', where(item, linkRewritesRelated(relatedObject) ? [readRule, updateRule] : [readRule]));
+                } else {
+                    add(creatable ? 'connectOrCreate' : 'connect', creatable
+                        ? { where: where(item, [readRule]), create: createData }
+                        : where(item, [readRule]));
+                }
+                continue;
+            }
+
+            const updateData = this.#nestedData(cleaned, relatedObject, user, 'update', relatedObject.name, depth, inherited);
+            if (creatable) {
+                add('upsert', { where: where(item, [updateRule]), create: createData, update: updateData });
             } else {
-                // No PK - create new record
-                createItems.push(item);
+                add('update', { where: where(item, [updateRule]), data: updateData });
             }
-        }
-
-        // Per-item create permission — items without a PK always create; reject outright when not allowed
-        if (user && relatedAcl?.canCreate && createItems.length > 0) {
-            for (const item of createItems) {
-                if (!relatedAcl.canCreate(user, item)) {
-                    throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
-                }
-            }
-        }
-
-        // For PK+data items an upsert may create — decided per item (upsert vs update-only)
-        const itemCanCreate = (item: Record<string, any>): boolean =>
-            !user || !relatedAcl?.canCreate || relatedAcl.canCreate(user, item);
-
-        const result: Record<string, any> = {};
-
-        // Build connect array with ACL access filter
-        if (connectItems.length > 0) {
-            result.connect = connectItems.map((e: Record<string, any>) => {
-                const where: Record<string, any> = {};
-                if (Array.isArray(relatedObject.fields)) {
-                    // n:m relation - build composite key where clause
-                    // e.g., { postId_tagId: { postId: parentId, tagId: e.tagId } }
-                    where[relatedObject.field!] = this.#buildCompositePairId(e, relatedObject, parentId);
-                } else if (isCompositePK) {
-                    pkFields.forEach((field: string) => { where[field] = e[field]; });
-                } else {
-                    where[foreignKey] = e[foreignKey] || e[pkFields[0]];
-                }
-                // Apply access filter - user must have access to connect to this record
-                return this.#mergeAclIntoUniqueWhere(where, accessFilter);
-            });
-        }
-
-        // Build upsert or update arrays — per item, based on canCreate(user, item)
-        if (upsertItems.length > 0) {
-            const buildWhereClause = (e: Record<string, any>): Record<string, any> => {
-                const where: Record<string, any> = {};
-                if (Array.isArray(relatedObject.fields)) {
-                    // Composite key relation (n:m via join table)
-                    where[relatedObject.field!] = this.#buildCompositePairId(e, relatedObject, parentId);
-                } else if (isCompositePK) {
-                    // Composite PK - all fields must be present
-                    pkFields.forEach((field: string) => { where[field] = e[field]; });
-                } else {
-                    // Simple PK present
-                    where[pkFields[0]] = e[pkFields[0]];
-                }
-                // Apply update filter - user must have permission to update
-                return this.#mergeAclIntoUniqueWhere(where, updateFilter);
-            };
-
-            const upsertable: Record<string, any>[] = [];
-            const updateOnly: Record<string, any>[] = [];
-            for (const e of upsertItems) {
-                (itemCanCreate(e) ? upsertable : updateOnly).push(e);
-            }
-
-            if (upsertable.length > 0) {
-                // User can create these - use upsert (update if exists, create if not)
-                result.upsert = upsertable.map((e: Record<string, any>) => {
-                    const cleanedData = removeOmitFields(e);
-                    return {
-                        'where': buildWhereClause(e),
-                        'create': cleanedData,
-                        'update': cleanedData,
-                    };
-                });
-            }
-            if (updateOnly.length > 0) {
-                // User cannot create these - use update only (fails if record doesn't exist)
-                result.update = updateOnly.map((e: Record<string, any>) => {
-                    const cleanedData = removeOmitFields(e);
-                    return {
-                        'where': buildWhereClause(e),
-                        'data': cleanedData,
-                    };
-                });
-            }
-        }
-
-        // Build create array for items without PK (already validated per item above)
-        if (createItems.length > 0) {
-            result.create = createItems.map((e: Record<string, any>) => removeOmitFields(e));
         }
 
         return result;
     }
 
     /**
-     * Process single relation for update operations with create/update separation
+     * Process single relation for update operations: a plain object writes the related record —
+     * the linked one updated, under the related model's update rule, or created when none is
+     * linked: if the user may create it, it has what a new row needs and the related model has
+     * no update rule (an upsert can't be held to one — Prisma's upsert-with-where fails
+     * whenever the where misses)
      */
     #processSingleRelation(
         dataObj: Record<string, any>,
         relatedObject: RelationConfig,
-        user: any = null
+        user: any = null,
+        depth: number = 0,
+        parent: Record<string, any> | null = null
     ): Record<string, any> | null {
+        if (depth > MAX_NESTING_DEPTH) {
+            throw new ErrorResponse(400, "max_nesting_depth_exceeded", { depth: MAX_NESTING_DEPTH });
+        }
+
         // Raw Prisma operations (connect, deleteMany, ...) — held to the related model's ACL
         if (isRawOperation(dataObj)) {
-            return this.#secureRawOperations(dataObj, relatedObject, user);
+            return this.#secureRawOperations(dataObj, relatedObject, user, depth);
         }
 
-        // Get ACL context for the related model
-        const { modelAcl: relatedAcl, omitFields } = this.#resolveAclContext(relatedObject.object, user);
-
-        // A plain object payload becomes an upsert, which may create the related record
-        if (user && !isSystemUser(user) && relatedAcl?.canCreate && !relatedAcl.canCreate(user, dataObj)) {
-            throw new ErrorResponse(403, "no_permission_to_create", { model: relatedObject.object });
+        const model = relatedObject.object;
+        const { modelAcl: relatedAcl, updateFilter, omitFields } = this.#resolveAclContext(model, user);
+        if (updateFilter === false) {
+            throw new ErrorResponse(403, "no_permission_to_update", { model });
         }
 
-        // Remove omitted fields from input
+        // Remove omitted fields, then apply the writable-fields whitelist (the related key is an identifier, not data)
         for (const field of omitFields) {
             delete dataObj[field];
         }
+        this.#applyWritableWhitelist(dataObj, relatedAcl, user, this.#keyFields(model));
 
-        // Apply writable-fields whitelist (related model's PK is an identifier, not data)
-        const singleRelPk = this.getPrimaryKey(relatedObject.object);
-        this.#applyWritableWhitelist(dataObj, relatedAcl, user, Array.isArray(singleRelPk) ? singleRelPk : [singleRelPk]);
-
-        // Validate all fields exist on the related model
-        for (const _key in dataObj) {
-            if (!this.#fieldExistsOnModel(relatedObject.object, _key)) {
-                throw new ErrorResponse(400, "unexpected_key", { key: `${relatedObject.name}.${_key}` });
-            }
-        }
-
-        // Ensure nested relations are resolved for deep processing
         this.#ensureRelations(relatedObject);
+        this.#assertKnownFields(dataObj, model, relatedObject.name);
+        this.#dropBackReference(dataObj, relatedObject);
 
-        // Process nested relations recursively if they exist
-        let processedData: Record<string, any> = dataObj;
-        if (relatedObject.relation) {
-            processedData = this.#processNestedRelations(dataObj, relatedObject.relation, user);
+        const inherited = this.#inherited(relatedObject, parent);
+        const createData = this.#nestedData(dataObj, relatedObject, user, 'create', relatedObject.name, depth, inherited);
+        const updateData = this.#nestedData(dataObj, relatedObject, user, 'update', relatedObject.name, depth, inherited);
+        const restricted = !!updateFilter && typeof updateFilter === 'object' && Object.keys(updateFilter).length > 0;
+        const mayCreate = !user || isSystemUser(user) || !relatedAcl?.canCreate || relatedAcl.canCreate(user, dataObj);
+
+        if (!restricted && mayCreate && this.#hasMeaningfulContent(createData)
+            && this.#creatable(model, createData, this.#backRelation(relatedObject), relatedObject.relation ?? [])) {
+            return { upsert: { create: createData, update: updateData } };
         }
-
-        // Prepare separate data objects for create and update
-        const createData: Record<string, any> = { ...processedData };
-        const updateData: Record<string, any> = { ...processedData };
-        let hasDisconnects = false;
-
-        // Process direct relations
-        if (relatedObject.relation) {
-            for (const relation_key in processedData) {
-                const rel = relatedObject.relation.find((e: RelationConfig) => e.field === relation_key);
-                if (rel) {
-                    if (processedData[relation_key] != null) {
-                        // Build connect where clause
-                        const targetPK = this.getPrimaryKey(rel.object);
-                        const connectKey = rel.foreignKey || (Array.isArray(targetPK) ? targetPK[0] : targetPK);
-                        const connectWhere: Record<string, any> = {
-                            [connectKey]: processedData[relation_key],
-                        };
-
-                        // Apply ACL access filter for connect
-                        const { accessFilter: childAccessFilter } = this.#resolveAclContext(rel.object, user);
-
-                        const connectObj = { 'connect': this.#mergeAclIntoUniqueWhere(connectWhere, childAccessFilter) };
-                        createData[rel.name] = connectObj;
-                        updateData[rel.name] = connectObj;
-                    } else {
-                        // For update, use disconnect when value is null
-                        updateData[rel.name] = {
-                            'disconnect': true,
-                        };
-                        hasDisconnects = true;
-                        // For create, remove the relation entirely
-                        delete createData[rel.name];
-                    }
-                    // Remove the original field from both
-                    delete createData[relation_key];
-                    delete updateData[relation_key];
-                }
-            }
-        }
-
-        // Check if we have meaningful content for create and update
-        const hasCreateContent = this.#hasMeaningfulContent(createData);
-        const hasUpdateContent = this.#hasMeaningfulContent(updateData) || hasDisconnects;
-
-        // Build upsert object conditionally
-        const upsertObj: Record<string, any> = {};
-
-        if (hasCreateContent) {
-            upsertObj.create = {
-                ...createData,
-            };
-        }
-
-        if (hasUpdateContent) {
-            upsertObj.update = {
-                ...updateData,
-            };
-        }
-
-        // Only return upsert if we have at least one operation
-        return Object.keys(upsertObj).length > 0 ? { 'upsert': upsertObj } : null;
-    }
-
-    /**
-     * Recursively process nested relations in data objects
-     */
-    #processNestedRelations(
-        dataObj: Record<string, any>,
-        relatedObjects: RelationConfig[],
-        user: any = null
-    ): Record<string, any> {
-        const processedData: Record<string, any> = { ...dataObj };
-
-        for (const key in processedData) {
-            const nestedRelation = relatedObjects.find((rel: RelationConfig) => rel.name === key);
-
-            if (nestedRelation && processedData[key] && typeof processedData[key] === 'object') {
-                // Ensure deep relations are available for recursive processing
-                this.#ensureRelations(nestedRelation);
-
-                if (Array.isArray(processedData[key])) {
-                    // Clone each item to avoid mutating originals
-                    processedData[key] = this.#processArrayRelation(
-                        processedData[key].map((item: Record<string, any>) => ({ ...item })), nestedRelation, null, user
-                    );
-                } else {
-                    // Clone the nested object to avoid mutating original
-                    const nestedResult = this.#processSingleRelation(
-                        { ...processedData[key] }, nestedRelation, user
-                    );
-                    if (nestedResult) {
-                        processedData[key] = nestedResult;
-                    } else {
-                        delete processedData[key];
-                    }
-                }
-            }
-        }
-
-        return processedData;
+        if (!this.#hasMeaningfulContent(updateData)) return null;
+        return { update: restricted ? { where: updateFilter, data: updateData } : updateData };
     }
 
     /**
      * Check if data object contains meaningful content for database operations
      */
     #hasMeaningfulContent(dataObj: Record<string, any>): boolean {
-        return Object.keys(dataObj).length > 0 &&
-            Object.keys(dataObj).some((key: string) => {
-                const value = dataObj[key];
-                if (value === null || value === undefined) return false;
-                if (typeof value === 'object') {
-                    // For nested objects, check if they have meaningful operations
-                    return value.connect || value.disconnect || value.create || value.update || value.upsert;
-                }
-                return true;
-            });
+        return Object.values(dataObj).some((value: any) => {
+            if (value === null || value === undefined) return false;
+            if (typeof value !== 'object' || value instanceof Date || Array.isArray(value)) return true;
+            // A nested write counts when it does something (connect, connectOrCreate, upsert, ...)
+            return Object.keys(value).length > 0;
+        });
     }
 
     /**
@@ -2819,67 +2886,6 @@ class QueryBuilder {
     }
 
     /**
-     * Simplify nested filter by removing parent-referencing conditions.
-     * When including comments from a post, conditions on the parent
-     * ({post: {...}}) are already implied by the parent row and must be dropped.
-     * Parent references are matched by RELATION NAME (resolved from the child model's
-     * relations targeting the parent model), with the raw parent model name as fallback
-     * for schemas where relation and model names coincide.
-     */
-    #simplifyNestedFilter(filter: any, parentModel: string, childModel?: string): any {
-        const parentKeys = new Set<string>([parentModel]);
-        if (childModel) {
-            for (const rel of dmmf.buildRelationships(childModel)) {
-                if (rel.object === parentModel) {
-                    parentKeys.add(rel.name);
-                }
-            }
-        }
-        return this.#simplifyFilterByKeys(filter, parentKeys);
-    }
-
-    #simplifyFilterByKeys(filter: any, parentKeys: Set<string>): any {
-        if (!filter || typeof filter !== 'object') {
-            return filter;
-        }
-
-        if (Array.isArray(filter)) {
-            const simplified = filter.map((item: any) => this.#simplifyFilterByKeys(item, parentKeys)).filter((item: any) => item !== null);
-            return simplified.length > 0 ? simplified : null;
-        }
-
-        const simplified: Record<string, any> = {};
-        for (const key in filter) {
-            const value = filter[key];
-
-            // Skip filters that reference the parent (we're already in that context)
-            if (parentKeys.has(key)) {
-                continue;
-            }
-
-            // Recursively process AND/OR arrays
-            if (key === 'AND' || key === 'OR') {
-                const simplifiedArray = this.#simplifyFilterByKeys(value, parentKeys);
-                if (simplifiedArray && Array.isArray(simplifiedArray) && simplifiedArray.length > 0) {
-                    simplified[key] = simplifiedArray;
-                }
-            } else {
-                simplified[key] = value;
-            }
-        }
-
-        // If simplified filter only has one condition in an AND/OR, unwrap it
-        if (Object.keys(simplified).length === 1 && (simplified.AND || simplified.OR)) {
-            const array = simplified.AND || simplified.OR;
-            if (Array.isArray(array) && array.length === 1) {
-                return array[0];
-            }
-        }
-
-        return Object.keys(simplified).length > 0 ? simplified : null;
-    }
-
-    /**
      * Get API result limit constant
      */
     static get API_RESULT_LIMIT(): number {
@@ -2922,18 +2928,19 @@ class QueryBuilder {
             // Handle dynamic messages (e.g., P2002 duplicate)
             if (error.code === 'P2002') {
                 // Driver adapters (Prisma 7) report the constraint in driverAdapterError, not meta.target
-                const constraint = error.meta?.driverAdapterError?.cause?.constraint;
-                const target = error.meta?.target ?? constraint?.fields ?? constraint?.index;
-                const modelName = error.meta?.modelName || '';
-                // target can be string (MySQL index name) or string[] (field names)
-                const fields = (Array.isArray(target) ? target : (target ? [target] : [])).map((f: unknown) => uniqueFieldName(String(f), modelName));
-                const field = fields.join(', ');
-                // Try to find the value from the data passed to errorHandler
-                const value = fields.length === 1 && data[fields[0]] !== undefined
-                    ? String(data[fields[0]])
+                const { model: modelName, fields } = duplicateTarget(error, data);
+                // The value from the data passed to errorHandler (a nested row's isn't there)
+                const value = fields.length > 0 && fields.every((f: string) => data[f] !== undefined && data[f] !== null && typeof data[f] !== 'object')
+                    ? fields.map((f: string) => String(data[f])).join(', ')
                     : '';
-                key = value ? 'duplicate_entry' : 'duplicate_entry_no_value';
-                errorData = { model: modelName, field, value };
+                if (fields.length === 0) {
+                    // A clash the database doesn't place (MariaDB's PRIMARY, in a nested write): no name
+                    key = 'duplicate_entry_unknown';
+                    errorData = {};
+                } else {
+                    key = value ? 'duplicate_entry' : 'duplicate_entry_no_value';
+                    errorData = { model: modelName, field: fields.join(', '), value };
+                }
                 message = LanguageDict.get(key, errorData, language);
             } else {
                 key = errorInfo.message!;

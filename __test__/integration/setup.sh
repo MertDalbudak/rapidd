@@ -7,11 +7,12 @@
 #
 # Redis 7 (:56379), OpenLDAP (:51389, no memberOf overlay — like many real installs),
 # Keycloak 26 (:58080, realm "corp", confidential client "rapidd-api", user alice/alice-pass
-# with realm role "admin"), PostgreSQL 16 (:56543, postgres/pw, database "app").
+# with realm role "admin"), PostgreSQL 16 (:56543, postgres/pw, database "app"), MariaDB 11
+# (:53306, root/pw, database "app").
 set -euo pipefail
 
 if [[ "${1:-}" == "down" ]]; then
-    docker rm -f rapidd-it-redis rapidd-it-ldap rapidd-it-kc rapidd-it-pg >/dev/null 2>&1 || true
+    docker rm -f rapidd-it-redis rapidd-it-ldap rapidd-it-kc rapidd-it-pg rapidd-it-mariadb >/dev/null 2>&1 || true
     echo "integration containers removed"
     exit 0
 fi
@@ -29,6 +30,7 @@ ensure rapidd-it-redis -p 56379:6379 redis:7-alpine
 ensure rapidd-it-ldap -p 51389:389 -e LDAP_ORGANISATION=Corp -e LDAP_DOMAIN=corp.example -e LDAP_ADMIN_PASSWORD=adminpw osixia/openldap:1.5.0
 ensure rapidd-it-kc -p 58080:8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=admin quay.io/keycloak/keycloak:26.4 start-dev
 ensure rapidd-it-pg -p 56543:5432 -e POSTGRES_PASSWORD=pw -e POSTGRES_DB=app postgres:16-alpine
+ensure rapidd-it-mariadb -p 53306:3306 -e MARIADB_ROOT_PASSWORD=pw -e MARIADB_DATABASE=app mariadb:11
 
 # ── OpenLDAP ────────────────────────────────────────────
 LDAP=(docker exec rapidd-it-ldap)

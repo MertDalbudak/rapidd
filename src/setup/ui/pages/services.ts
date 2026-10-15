@@ -85,6 +85,9 @@ export function installServicesPage(R) {
                         h('div', { class: 'with-addon' }, h('span', { class: 'addon mono', text: baseUrl(services()[service]) }),
                             h('input', { class: 'input mono', id: 'ep-path', value: ep.path, placeholder: '/users/{{id}}', oninput: (e) => { ep.path = e.target.value.trim(); } })),
                         h('div', { class: 'help', text: '{{name}} marks a path parameter — passed as params: { name } in ApiClient.call.' })),
+                    h('div', { class: 'form-row' }, h('label', { for: 'ep-retry', text: 'Retries' }),
+                        R.select([['', 'As the service'], ['on', 'Retry failed requests'], ['off', "Don't retry"]], ep.retry === true ? 'on' : ep.retry === false ? 'off' : '',
+                            (v) => { if (v === 'on') ep.retry = true; else if (v === 'off') ep.retry = false; else delete ep.retry; }, { id: 'ep-retry' })),
                     h('div', { class: 'grid-2' },
                         h('div', { class: 'form-row' }, h('label', { text: 'Headers' }), R.kvEditor(ep.headers, (v) => { ep.headers = Object.keys(v).length ? v : undefined; d.update(); }, { id: 'ep-h', keyLabel: 'Header', newKey: 'X-Header', addLabel: 'Add header' })),
                         h('div', { class: 'form-row' }, h('label', { text: 'Query parameters' }), R.kvEditor(ep.queries, (v) => { ep.queries = Object.keys(v).length ? v : undefined; d.update(); }, { id: 'ep-q', keyLabel: 'Parameter', newKey: 'param', addLabel: 'Add parameter' }))),
@@ -216,7 +219,12 @@ export function installServicesPage(R) {
                             onchange: (e) => change((all) => { const v = e.target.value.trim(); if (v) all[name].port = Number(v); else delete all[name].port; }) }),
                         h('input', { class: 'input mono', id: 'svc-path', value: s.path || '', placeholder: '/v1', style: { maxWidth: '180px' }, 'aria-label': 'Base path',
                             onchange: (e) => change((all) => { const v = e.target.value.trim(); if (v) all[name].path = v; else delete all[name].path; }) })),
-                    h('div', { class: 'help', text: 'Every endpoint path is appended to it.' })))),
+                    h('div', { class: 'help', text: 'Every endpoint path is appended to it.' }))),
+                h('div', { class: 'field' },
+                    h('div', null, h('span', { class: 'name', text: 'Retries' }), h('span', { class: 'key', text: 'retry' })),
+                    h('div', null, h('label', { class: 'check' }, h('input', { type: 'checkbox', id: 'svc-retry', checked: s.retry !== false,
+                        onchange: (e) => change((all) => { if (e.target.checked) delete all[name].retry; else all[name].retry = false; }) }), 'Retry failed requests'),
+                    h('div', { class: 'help', text: 'Network errors, 5xx and 429 are tried again — API_MAX_RETRIES times, with backoff — POST and PATCH too. Turn it off for a service whose calls must not run twice; an endpoint can decide for itself.' })))),
             R.card({ title: 'Authorization', icon: 'key', description: 'Credentials stay in the environment: config/app.json only references them as ${NAME}.',
                 actions: [R.seg(AUTH, (s.authorization && s.authorization.type) || '', (v) => change((all) => {
                     if (!v) delete all[name].authorization;

@@ -4,11 +4,16 @@ import type { FastifyInstance, FastifyRequest, FastifyReply } from 'fastify';
 // USER & AUTH
 // =====================================================
 
+/**
+ * The signed-in user: a user-table row (password stripped), the user resolveUser returns, or
+ * for identities without a row their claims ({ id, email, name, groups, roles, provider }).
+ * Rapidd assumes nothing but `id` — roles, groups, flags or relations are the app's data,
+ * read by its access control (src/config/acl.ts).
+ */
 export interface RapiddUser {
-    // id and role are null only for the framework system user (identity-less, bypasses ACL).
-    // Real users — the only ones ACL callbacks ever receive — always have both.
+    // null for the framework system user (identity-less, bypasses ACL) and for anonymous
+    // requests while sign-in is off
     id: string | number | null;
-    role: string | null;
     [key: string]: unknown;
 }
 
@@ -50,19 +55,19 @@ export interface AuthOptions extends AuthConfig {
 /**
  * An identity asserted by an auth provider (LDAP, OIDC, WebDAV, ...) before it is
  * mapped to an application user. Providers produce it; the identity resolver turns it
- * into a RapiddUser (see AuthConfig.resolveUser / link / roles).
+ * into a RapiddUser (see AuthConfig.resolveUser / link / provision).
  */
 export interface ExternalIdentity {
     /** Name of the provider instance that authenticated the user (e.g. 'ldap', 'entra') */
     provider: string;
-    /** Stable unique id at the provider: OIDC sub/oid, LDAP objectGUID/entryUUID/DN, WebDAV username */
+    /** Stable unique id at the provider: OIDC sub/oid, SAML NameID, LDAP objectGUID/entryUUID/DN, WebDAV username */
     subject: string;
     username?: string;
     email?: string;
     name?: string;
-    /** Group memberships: LDAP group CNs, the OIDC `groups` claim */
+    /** Group memberships: LDAP group DNs (cn=admins,ou=groups,…), the OIDC `groups` claim, a SAML groups attribute */
     groups: string[];
-    /** Roles asserted by the identity provider: OIDC `roles`, Keycloak realm/client roles */
+    /** Roles asserted by the identity provider: OIDC `roles`, Keycloak realm/client roles, a SAML roles attribute */
     roles: string[];
     /** Raw claims / directory attributes as returned by the provider */
     claims: Record<string, unknown>;
@@ -77,16 +82,16 @@ export type AuthFlowState = Record<string, unknown>;
  * An identity source. Implement any subset of the capabilities:
  * - `authenticate`: username + password (local DB, LDAP/AD, WebDAV, custom)
  * - `ownsToken` + `verifyToken`: bearer tokens issued by an external IdP (resource-server mode)
- * - `beginLogin` + `completeLogin`: browser redirect login (OAuth2 / OpenID Connect)
+ * - `beginLogin` + `completeLogin`: browser redirect login (OAuth2 / OpenID Connect, SAML)
+ * - `receivePost`: the identity provider answers with a form POST (SAML's HTTP-POST binding)
  */
 export interface AuthProvider {
     /** Unique instance name — appears in routes (/auth/:name/login) and ExternalIdentity.provider */
     readonly name: string;
     /** Provider kind: 'local' | 'ldap' | 'webdav' | 'oidc' | a custom string */
     readonly type: string;
-    /** Per-provider identity → user mapping, overriding AuthConfig.link / AuthConfig.roles */
+    /** Per-provider identity → user linking, overriding AuthConfig.link */
     readonly link?: AuthLinkConfig | false;
-    readonly roles?: RoleMappingConfig;
     /** Startup hook (discovery, connectivity). Must not throw on transient outages. */
     initialize?(): Promise<void>;
     /** Verify username + password. Resolve null for wrong credentials; throw when the provider is unreachable. */
@@ -97,8 +102,19 @@ export interface AuthProvider {
     verifyToken?(token: string): Promise<ExternalIdentity | null>;
     /** Start a redirect login: the URL to send the browser to, plus state to hand back to completeLogin */
     beginLogin?(options: { redirectUri: string }): Promise<{ url: string; state: string; flow: AuthFlowState }>;
-    /** Finish a redirect login from the callback query parameters */
-    completeLogin?(query: Record<string, string | undefined>, flow: AuthFlowState): Promise<ExternalIdentity>;
+    /**
+     * Finish a redirect login from the callback query parameters — with what `receivePost`
+     * returned when the identity provider answered with a form POST
+     */
+    completeLogin?(query: Record<string, string | undefined>, flow: AuthFlowState, posted?: Record<string, unknown>): Promise<ExternalIdentity>;
+    /**
+     * Validate an identity provider's form POST to the callback. The POST is cross-site, so it
+     * carries no SameSite cookie: Auth parks `data` single-use and sends the browser on to the
+     * GET callback with `state`, where the login is bound to the browser that began it.
+     */
+    receivePost?(body: Record<string, unknown>, options: { redirectUri: string }): Promise<{ state: string; data: Record<string, unknown> }>;
+    /** This API's metadata for the identity provider (SAML: the service provider's EntityDescriptor) */
+    serviceMetadata?(options: { redirectUri: string }): Promise<{ contentType: string; body: string }>;
     /**
      * Re-check at token refresh that the identity's account still exists and is enabled
      * (e.g. disabled in Active Directory). false ends the session; null = cannot tell.
@@ -118,32 +134,17 @@ export interface AuthLinkConfig {
     from: string;
 }
 
-/**
- * Derive a role from the identity's groups/roles (used when there is no user-table row
- * to take the role from, and offered to resolveUser/provision as `mapRole`).
- * `map` keys are IdP group/role names; the FIRST entry the identity holds wins, so list
- * the most privileged mapping first.
- */
-export interface RoleMappingConfig {
-    map?: Record<string, string>;
-    /** Role when nothing matches (default null: identity has no role) */
-    default?: string | null;
-}
-
 export interface ResolveUserHelpers {
     /** Find a user-table row (password field stripped) — null when there is no user table */
     findUser(where: Record<string, unknown>): Promise<RapiddUser | null>;
     /** Insert a user-table row and return it (password field stripped) */
     createUser(data: Record<string, unknown>): Promise<RapiddUser>;
-    /** The role the configured role mapping assigns to this identity */
-    mapRole(identity: ExternalIdentity): string | null;
 }
 
 interface BaseProviderConfig {
     /** Instance name (defaults to the type) — must be unique */
     name?: string;
     link?: AuthLinkConfig | false;
-    roles?: RoleMappingConfig;
 }
 
 export interface LocalProviderConfig extends BaseProviderConfig {
@@ -228,11 +229,47 @@ export interface OidcProviderConfig extends BaseProviderConfig {
     timeout?: number;
 }
 
+export interface SamlProviderConfig extends BaseProviderConfig {
+    type: 'saml';
+    /** The identity provider's metadata (XML) — or where to get it: */
+    idpMetadata?: string;
+    /** https URL of the metadata, refreshed daily (Entra ID, ADFS, Okta, Keycloak publish one) */
+    idpMetadataUrl?: string;
+    /** File with the metadata (default: config/saml-idp-metadata.xml — where the setup wizard puts an upload) */
+    idpMetadataFile?: string;
+    /** Which identity provider of a federation metadata file with several */
+    idpEntityId?: string;
+    /** Without metadata: the IdP's single sign-on URL (HTTP-Redirect), signing certificate(s) and entity id */
+    entryPoint?: string;
+    idpCert?: string | string[];
+    idpIssuer?: string;
+    /** This API's entity id at the IdP (default: <PUBLIC_URL>/auth/<name>/metadata) */
+    spEntityId?: string;
+    /** Assertion consumer URL registered at the IdP (default: <PUBLIC_URL>/auth/<name>/callback) */
+    callbackUrl?: string;
+    /** This API's private key (PEM): signs authentication requests and decrypts encrypted assertions */
+    privateKey?: string;
+    /** Its certificate (PEM) — published in this API's metadata */
+    cert?: string;
+    /** NameID format requested (default: unspecified — the IdP's choice). The NameID is the identity's subject */
+    nameIdFormat?: string;
+    /** A valid signature on the response or the assertion is always required — these require a specific one */
+    wantAssertionsSigned?: boolean;
+    wantResponseSigned?: boolean;
+    /** Attribute names (defaults cover Entra ID, ADFS, Okta, Keycloak, Shibboleth and Google) */
+    attributes?: { email?: string; name?: string; username?: string; groups?: string; roles?: string };
+    /** Allowed clock skew in seconds (default 30) */
+    clockTolerance?: number;
+    /** Request timeout in ms for fetching metadata (default 5000) */
+    timeout?: number;
+}
+
 export type AuthProviderConfig =
     | LocalProviderConfig
     | LdapProviderConfig
     | WebdavProviderConfig
-    | OidcProviderConfig;
+    | OidcProviderConfig
+    | SamlProviderConfig;
 
 /**
  * App-level auth configuration — the default export of src/config/auth.ts.
@@ -246,8 +283,6 @@ export interface AuthConfig {
     providers?: Array<AuthProviderConfig | AuthProvider>;
     /** Link external identities to user-table rows (default { field: 'email', from: 'email' }); false disables */
     link?: AuthLinkConfig | false;
-    /** Group/role → app role mapping for identities without a user-table row */
-    roles?: RoleMappingConfig;
     /** Create a user-table row for an unknown external identity; return the row data, or null to reject */
     provision?: (identity: ExternalIdentity) => Record<string, unknown> | null | Promise<Record<string, unknown> | null>;
     /** Full control: map any external identity to an app user (null rejects the login) */
@@ -268,7 +303,7 @@ export interface AuthEventContext {
     event: 'login' | 'refresh' | 'token';
     /** Name of the provider that authenticated the user */
     provider: string;
-    /** The external identity (absent on refresh) */
+    /** The external identity — on refresh the one the session began with; absent for local sign-in */
     identity?: ExternalIdentity;
 }
 
@@ -412,8 +447,12 @@ export interface RelationConfig {
     name: string;
     object: string;
     isList: boolean;
+    /** Pairs the two sides of a relation */
+    relationName?: string;
+    /** The side that holds the foreign key: its (first) column and the column it references */
     field?: string;
     foreignKey?: string;
+    /** A composite foreign key: all its columns, and the columns they reference */
     fields?: string[];
     foreignKeys?: string[];
     relation?: RelationConfig[];

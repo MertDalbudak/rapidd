@@ -62,7 +62,7 @@ export interface PolicySpec {
     match: { field: string; variable: string }[];
     /** All conditions (default) or any of them */
     combine?: 'AND' | 'OR';
-    /** Every row when this variable has this value — e.g. current_user_role = admin */
+    /** Every row when this variable has this value — e.g. current_user_is_admin = true */
     bypass?: { variable: string; value: string } | null;
     /** Also turn RLS on for the table (default true) */
     enable?: boolean;
@@ -84,10 +84,9 @@ export class RlsSpecError extends Error {}
 const quote = (identifier: string) => `"${identifier.replace(/"/g, '""')}"`;
 const literal = (text: string) => `'${text.replace(/'/g, "''")}'`;
 
-/** RLS_ENABLED as the API reads it: unset → on for PostgreSQL */
+/** RLS_ENABLED as the API reads it: PostgreSQL only, on unless false */
 export function rlsActive(values: Values): boolean {
-    const set = values.RLS_ENABLED;
-    return set !== undefined && set !== '' ? set === 'true' : detectProvider(values.DATABASE_URL || '') === 'postgresql';
+    return detectProvider(values.DATABASE_URL || '') === 'postgresql' && values.RLS_ENABLED !== 'false';
 }
 
 export function rlsNamespace(values: Values): string {

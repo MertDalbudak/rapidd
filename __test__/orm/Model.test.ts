@@ -100,9 +100,9 @@ describe('Model', () => {
         it('should default to a (non-forgeable) identity-less system user when no options', () => {
             const m = new Model('posts');
             expect(isSystemUser(m.user)).toBe(true);
-            // No fabricated PK / magic role — both are null
+            // No fabricated PK, and no attributes beyond it
             expect(m.user.id).toBeNull();
-            expect(m.user.role).toBeNull();
+            expect(Object.keys(m.user)).toEqual(['id']);
         });
 
         it('should NOT treat role="application" as a system bypass anymore', () => {

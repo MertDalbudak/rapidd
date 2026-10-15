@@ -251,10 +251,11 @@ export class SessionStoreManager extends ISessionStore {
         return removed;
     }
 
+    /** Whether the configured store holds the sessions — not while they fell back to memory */
     async isHealthy(): Promise<boolean> {
         await this._ensureInitialized();
-        const store = this._usingFallback ? this._fallbackStore! : this._primaryStore!;
-        return store.isHealthy();
+        if (this._usingFallback && this._primaryStore !== this._fallbackStore) return false;
+        return this._primaryStore!.isHealthy();
     }
 
     async destroy(): Promise<void> {

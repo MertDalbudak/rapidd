@@ -16,15 +16,14 @@ describe('validate', () => {
         expect(v.blockers).toEqual(['DATABASE_URL']);
     });
 
-    it('checks types: numbers, booleans, enums, lists of options, URLs, JSON', () => {
+    it('checks types: numbers, booleans, enums, lists of options, URLs', () => {
         const v = validate({
             DATABASE_URL: DB, PORT: 'abc', HEALTH_ENABLED: 'yes', LOG_LEVEL: 'debug', AUTH_STRATEGIES: 'bearer,magic',
-            AUTH_PROVIDERS: 'ldap,ldap', PUBLIC_URL: 'ftp://x', AUTH_ROLE_MAP: '[1]',
+            AUTH_PROVIDERS: 'ldap,ldap', PUBLIC_URL: 'ftp://x',
         }, sections);
         expect(v.errors).toMatchObject({
             PORT: 'A whole number', HEALTH_ENABLED: 'true or false', LOG_LEVEL: expect.stringContaining('essential'),
             AUTH_STRATEGIES: expect.stringContaining('magic'), AUTH_PROVIDERS: 'Listed twice', PUBLIC_URL: expect.any(String),
-            AUTH_ROLE_MAP: 'A JSON object',
         });
     });
 
@@ -69,7 +68,7 @@ describe('validate', () => {
         const off = validate({ DATABASE_URL: DB }, sections);
         expect(off.visible).not.toContain('LDAP_URL');
         const on = validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'ldap,oidc' }, sections);
-        expect(on.visible).toEqual(expect.arrayContaining(['LDAP_URL', 'OIDC_ISSUER', 'AUTH_ROLE_MAP']));
+        expect(on.visible).toEqual(expect.arrayContaining(['LDAP_URL', 'OIDC_ISSUER', 'AUTH_LINK']));
         expect(on.errors).toMatchObject({ LDAP_URL: 'Required', LDAP_BIND_TEMPLATE: expect.stringContaining('service account'), OIDC_ISSUER: 'Required' });
         // OIDC_CLIENT_ID is required too, but its absence does not stop the app — not a blocker
         expect(on.errors.OIDC_CLIENT_ID).toBe('Required');
@@ -93,8 +92,8 @@ describe('validate', () => {
         expect(v.blockers).toEqual([]);
         expect(v.visible).not.toEqual(expect.arrayContaining(['JWT_SECRET']));
         for (const key of ['JWT_SECRET', 'AUTH_SESSION_STORAGE', 'AUTH_STRATEGIES', 'DB_USER_TABLE']) expect(v.visible).not.toContain(key);
-        expect(v.warnings.AUTH_PROVIDERS).toMatch(/models without access rules are open/);
-        expect(validate({ ...prod, ACL_DEFAULT: 'deny' }, sections, user).warnings.AUTH_PROVIDERS).toMatch(/access rules for “anonymous” or “\*” decide/);
+        expect(v.warnings.AUTH_PROVIDERS).toMatch(/models without an entry in src\/config\/acl\.ts are open/);
+        expect(validate({ ...prod, ACL_DEFAULT: 'deny' }, sections, user).warnings.AUTH_PROVIDERS).toMatch(/src\/config\/acl\.ts decides what it may do/);
         expect(authEnabled({ AUTH_PROVIDERS: 'none' }, user)).toBe(false);
         expect(validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'none,local' }, sections).errors.AUTH_PROVIDERS).toBe('none cannot be combined with others');
         expect(validate({ DATABASE_URL: DB, AUTH_PROVIDERS: 'none,local' }, sections).blockers).toContain('AUTH_PROVIDERS');
@@ -139,11 +138,11 @@ describe('saveSettings', () => {
         fs.writeFileSync(file, '# mine\nLOG_LEVEL=fine\nRATE_LIMIT_ENABLED=true\n');
         loadEnvFile(file);
         process.env.PORT = '4000'; // the real environment
-        const result = saveSettings({ LOG_LEVEL: 'finest', RATE_LIMIT_ENABLED: '', PORT: '5000', AUTH_ROLE_MAP: '{"a b":"admin"}' }, sections, file);
-        expect(result).toMatchObject({ written: ['LOG_LEVEL', 'AUTH_ROLE_MAP'], removed: ['RATE_LIMIT_ENABLED'], ignored: ['PORT'], backup: `${file}.bak` });
+        const result = saveSettings({ LOG_LEVEL: 'finest', RATE_LIMIT_ENABLED: '', PORT: '5000', LDAP_GROUP_SEARCH_FILTER: '(cn="App Admins")' }, sections, file);
+        expect(result).toMatchObject({ written: ['LOG_LEVEL', 'LDAP_GROUP_SEARCH_FILTER'], removed: ['RATE_LIMIT_ENABLED'], ignored: ['PORT'], backup: `${file}.bak` });
         const content = fs.readFileSync(file, 'utf8');
         expect(content.startsWith('# mine\nLOG_LEVEL=finest\n')).toBe(true);
-        expect(dotenv.parse(content)).toEqual({ LOG_LEVEL: 'finest', AUTH_ROLE_MAP: '{"a b":"admin"}' });
+        expect(dotenv.parse(content)).toEqual({ LOG_LEVEL: 'finest', LDAP_GROUP_SEARCH_FILTER: '(cn="App Admins")' });
         expect(process.env.LOG_LEVEL).toBe('finest');
         expect(process.env.RATE_LIMIT_ENABLED).toBeUndefined();
         expect(process.env.PORT).toBe('4000');
@@ -155,18 +154,20 @@ describe('saveSettings', () => {
 });
 
 describe('exportSettings', () => {
-    const values = { DATABASE_URL: 'postgresql://u:p@h/db', AUTH_ROLE_MAP: '{"CN=x":"admin"}', QUOTE: "it's", EMPTY: '' };
+    const values = { DATABASE_URL: 'postgresql://u:p@h/db', AUTH_LINK: 'employee_no:employeeNumber', LDAP_GROUP_SEARCH_FILTER: '(cn="App Admins")', QUOTE: "it's", EMPTY: '' };
 
     it('env: parseable by dotenv, structured like .env.example', () => {
         const env = exportSettings(values, 'env');
-        expect(dotenv.parse(env)).toEqual({ DATABASE_URL: values.DATABASE_URL, AUTH_ROLE_MAP: values.AUTH_ROLE_MAP, QUOTE: "it's" });
+        expect(dotenv.parse(env)).toEqual({
+            DATABASE_URL: values.DATABASE_URL, AUTH_LINK: values.AUTH_LINK, LDAP_GROUP_SEARCH_FILTER: values.LDAP_GROUP_SEARCH_FILTER, QUOTE: "it's",
+        });
         expect(env.split('\n').filter((l) => /^#  [A-Z]/.test(l))).toEqual(['#  DATA STORES', '#  AUTHENTICATION', '#  OTHER']);
         expect(env).toContain('# ── External identities');
     });
 
     it('compose / kubernetes: values as quoted YAML scalars', () => {
         const compose = exportSettings(values, 'compose');
-        expect(compose).toContain('      AUTH_ROLE_MAP: "{\\"CN=x\\":\\"admin\\"}"');
+        expect(compose).toContain('      LDAP_GROUP_SEARCH_FILTER: "(cn=\\"App Admins\\")"');
         expect(compose).not.toContain('EMPTY');
         const k8s = exportSettings(values, 'kubernetes', sections, 'my-api');
         expect(k8s).toMatch(/^apiVersion: v1\nkind: Secret\nmetadata:\n {2}name: my-api\ntype: Opaque\nstringData:\n/);

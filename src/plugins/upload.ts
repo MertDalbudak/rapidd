@@ -143,7 +143,8 @@ async function saveToTemp(
     return { tempPath, size: getSize() };
 }
 
-function createSaveToFn(tempPath: string, ext: string, preserveExtension: boolean) {
+/** `file.saveTo(directory)`: moves the temp file there under a random name; returns its path */
+export function createSaveToFn(tempPath: string, ext: string, preserveExtension: boolean) {
     return async (destination: string): Promise<string> => {
         const destDir = path.isAbsolute(destination)
             ? destination
@@ -157,7 +158,14 @@ function createSaveToFn(tempPath: string, ext: string, preserveExtension: boolea
         const finalPath = path.join(destDir, finalName);
 
         const fs = await import('fs/promises');
-        await fs.rename(tempPath, finalPath);
+        try {
+            await fs.rename(tempPath, finalPath);
+        } catch (err) {
+            // Another filesystem (a Docker volume, a mounted share): rename can't cross it
+            if ((err as NodeJS.ErrnoException).code !== 'EXDEV') throw err;
+            await fs.copyFile(tempPath, finalPath);
+            await fs.unlink(tempPath);
+        }
 
         return finalPath;
     };

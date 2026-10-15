@@ -4,6 +4,7 @@ import { detectProvider, parseMySQLConnectionString, requireDriver } from '../co
 import { createRedisClient } from '../core/redis';
 import { ldapConfigFromEnv, webdavConfigFromEnv, LdapProvider, WebdavProvider } from '../auth/providers';
 import type { CheckName, Values } from './catalog';
+import { checkSaml } from './saml';
 
 /**
  * Connection tests for the setup wizard. They run against the values being edited (not
@@ -25,6 +26,9 @@ export interface CheckOptions {
     username?: string;
     password?: string;
     timeoutMs?: number;
+    /** The project, and its config files staged in the wizard (an uploaded SAML metadata file) */
+    root?: string;
+    files?: { samlIdp?: string };
 }
 
 const env = (values: Values): NodeJS.ProcessEnv => {
@@ -75,8 +79,10 @@ export async function databaseInfo(url: string, timeoutMs = 5000): Promise<{ pro
     }
     return withPostgres(url, async (client, schema) => {
         const { rows: [info] } = await client.query('SELECT version() AS version, current_database() AS database');
+        // The catalog, not information_schema: that shows a role only the tables it has
+        // privileges on — the API's own role would see none of the owner's
         const { rows } = await client.query(
-            "SELECT table_name FROM information_schema.tables WHERE table_schema = $1 AND table_type = 'BASE TABLE' ORDER BY table_name", [schema]);
+            "SELECT c.relname AS table_name FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') ORDER BY c.relname", [schema]);
         return {
             provider,
             version: String(info.version).split(' on ')[0],
@@ -100,13 +106,13 @@ export async function withMySQL<T>(url: string, fn: (conn: any) => Promise<T>, t
 }
 
 /** Run fn with a PostgreSQL connection; `schema` is Prisma's ?schema= (default public) */
-export async function withPostgres<T>(url: string, fn: (client: any, schema: string) => Promise<T>, timeoutMs = 5000): Promise<T> {
+export async function withPostgres<T>(url: string, fn: (client: any, schema: string) => Promise<T>, timeoutMs = 5000, queryTimeoutMs = 30_000): Promise<T> {
     const { Client } = requireDriver('pg');
     // Prisma's ?schema= is not a libpq parameter — read it, and keep it away from pg
     const parsed = new URL(url);
     const schema = parsed.searchParams.get('schema') || 'public';
     parsed.searchParams.delete('schema');
-    const client = new Client({ connectionString: parsed.toString(), connectionTimeoutMillis: timeoutMs, query_timeout: 30_000 });
+    const client = new Client({ connectionString: parsed.toString(), connectionTimeoutMillis: timeoutMs, query_timeout: queryTimeoutMs });
     await client.connect();
     try {
         return await fn(client, schema);
@@ -326,6 +332,7 @@ const CHECKS: Record<CheckName, (values: Values, options: CheckOptions) => Promi
     redis: checkRedis,
     ldap: checkLdap,
     oidc: checkOidc,
+    saml: (values, options) => checkSaml(options.root ?? process.cwd(), values, options.files?.samlIdp, options.timeoutMs),
     webdav: checkWebdav,
 };
 

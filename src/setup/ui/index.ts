@@ -3,7 +3,6 @@ import { installCore } from './core';
 import { installComponents } from './components';
 import { installStartPages } from './pages/start';
 import { installModelPage } from './pages/model';
-import { installAccessPage } from './pages/access';
 import { installRlsPage } from './pages/rls';
 import { installServicesPage } from './pages/services';
 import { installRateLimitsPage } from './pages/ratelimits';
@@ -22,7 +21,6 @@ const MODULES: ((R: unknown) => void)[] = [
     installComponents,
     installStartPages,
     installModelPage,
-    installAccessPage,
     installRlsPage,
     installServicesPage,
     installRateLimitsPage,
@@ -30,7 +28,7 @@ const MODULES: ((R: unknown) => void)[] = [
 ];
 
 /** Navigation order differs from install order where pages depend on helpers of others */
-const NAV_ORDER = ['overview', 'database', 'model', 'signin', 'admin', 'access', 'rls', 'ratelimits', 'services', 'environment', 'review'];
+const NAV_ORDER = ['overview', 'database', 'model', 'signin', 'admin', 'rls', 'ratelimits', 'services', 'environment', 'review'];
 
 /** The script of the wizard page */
 export function wizardScript(): string {

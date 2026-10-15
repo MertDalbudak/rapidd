@@ -3,7 +3,7 @@ import jwt from 'jsonwebtoken';
 import { ErrorResponse } from '../../core/errors';
 import { Logger } from '../../utils/Logger';
 import type {
-    AuthProvider, ExternalIdentity, OidcProviderConfig, AuthFlowState, AuthLinkConfig, RoleMappingConfig,
+    AuthProvider, ExternalIdentity, OidcProviderConfig, AuthFlowState, AuthLinkConfig,
 } from '../../types';
 
 interface OidcMetadata {
@@ -66,7 +66,6 @@ export class OidcProvider implements AuthProvider {
     readonly name: string;
     readonly type = 'oidc';
     readonly link?: AuthLinkConfig | false;
-    readonly roles?: RoleMappingConfig;
     private readonly config: OidcProviderConfig;
     private readonly algorithms: string[];
     private readonly audience: string[] | null;
@@ -84,7 +83,6 @@ export class OidcProvider implements AuthProvider {
         this.config = config;
         this.name = config.name || 'oidc';
         this.link = config.link;
-        this.roles = config.roles;
         this.algorithms = (config.algorithms || DEFAULT_ALGORITHMS).filter((a) => !/^(HS|none)/i.test(a));
         this.timeout = config.timeout ?? 5000;
 

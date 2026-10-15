@@ -59,7 +59,7 @@ export async function testService(
     const cacheKey = `setup-test:${crypto.randomUUID()}`;
     const started = Date.now();
     try {
-        const request = await prepareServiceRequest(cacheKey, service, endpointName, { params });
+        const request = await prepareServiceRequest(serviceName, service, endpointName, { params }, cacheKey);
         const response = await fetch(request.url, {
             method: request.method,
             headers: request.headers,

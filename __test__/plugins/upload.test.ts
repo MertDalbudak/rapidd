@@ -3,6 +3,10 @@
  * Tests the validateFile and getAllowedTypes functions without needing a full Fastify server.
  */
 
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
 // We test the internal helpers by importing the module and testing exported functions
 // Since validateFile and getAllowedTypes are not exported, we test the behavior through
 // the plugin's type presets and integration patterns.
@@ -91,5 +95,40 @@ describe('Upload Plugin', () => {
         it('should have 10 as default max files', () => {
             expect(10).toBe(10);
         });
+    });
+});
+
+describe('saveTo', () => {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const fsp = require('fs/promises');
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { createSaveToFn } = require('../../src/plugins/upload');
+    let dir: string;
+
+    beforeEach(() => {
+        dir = fs.mkdtempSync(path.join(os.tmpdir(), 'rapidd-upload-'));
+    });
+    afterEach(() => {
+        jest.restoreAllMocks();
+        fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('moves the file into the directory, under a random name with its extension', async () => {
+        const temp = path.join(dir, 'temp-upload');
+        fs.writeFileSync(temp, 'content');
+        const saved: string = await createSaveToFn(temp, '.pdf', true)(path.join(dir, 'uploads'));
+        expect(path.dirname(saved)).toBe(path.join(dir, 'uploads'));
+        expect(saved.endsWith('.pdf')).toBe(true);
+        expect(fs.readFileSync(saved, 'utf8')).toBe('content');
+        expect(fs.existsSync(temp)).toBe(false);
+    });
+
+    it('copies across filesystems — a Docker volume — where rename cannot', async () => {
+        const temp = path.join(dir, 'temp-upload');
+        fs.writeFileSync(temp, 'content');
+        jest.spyOn(fsp, 'rename').mockRejectedValueOnce(Object.assign(new Error('cross-device link not permitted'), { code: 'EXDEV' }));
+        const saved: string = await createSaveToFn(temp, '.pdf', true)(path.join(dir, 'volume'));
+        expect(fs.readFileSync(saved, 'utf8')).toBe('content');
+        expect(fs.existsSync(temp)).toBe(false);
     });
 });

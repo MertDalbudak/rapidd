@@ -1,6 +1,6 @@
 import { Logger } from '../utils/Logger';
 import type {
-    AuthConfig, AuthLinkConfig, AuthProvider, ExternalIdentity, RapiddUser, ResolveUserHelpers, RoleMappingConfig,
+    AuthConfig, AuthLinkConfig, AuthProvider, ExternalIdentity, RapiddUser, ResolveUserHelpers,
 } from '../types';
 
 /** The slice of Auth the resolver needs */
@@ -27,23 +27,6 @@ export function linkFromEnv(value = process.env.AUTH_LINK): AuthLinkConfig | fal
     return { field, from: from || field };
 }
 
-/** AUTH_ROLE_MAP (JSON object) + AUTH_DEFAULT_ROLE */
-export function rolesFromEnv(env: NodeJS.ProcessEnv = process.env): RoleMappingConfig | undefined {
-    if (!env.AUTH_ROLE_MAP && !env.AUTH_DEFAULT_ROLE) return undefined;
-    let map: Record<string, string> | undefined;
-    if (env.AUTH_ROLE_MAP) {
-        try {
-            map = JSON.parse(env.AUTH_ROLE_MAP);
-        } catch {
-            throw new Error('[Auth] AUTH_ROLE_MAP must be a JSON object, e.g. {"Domain Admins":"admin","Staff":"staff"}');
-        }
-        if (!map || typeof map !== 'object' || Array.isArray(map)) {
-            throw new Error('[Auth] AUTH_ROLE_MAP must be a JSON object');
-        }
-    }
-    return { map, default: env.AUTH_DEFAULT_ROLE || null };
-}
-
 /**
  * Maps identities asserted by providers (LDAP, OIDC, WebDAV, ...) to application users.
  *
@@ -52,7 +35,8 @@ export function rolesFromEnv(env: NodeJS.ProcessEnv = process.env): RoleMappingC
  * 2. `resolveUser` from the auth config — full control.
  * 3. A user table exists and linking is on → the row whose `link.field` equals the
  *    identity's `link.from`; `provision` may create it on first login.
- * 4. Otherwise a claims-only user: { id: subject, role: mapped role, email, name, ... }.
+ * 4. Otherwise a claims-only user: { id: provider:subject, email, name, groups, roles, ... }
+ *    — the identity provider's groups and roles as plain data for the app's access control.
  */
 export class IdentityResolver {
     private readonly source: UserTableSource;
@@ -69,30 +53,7 @@ export class IdentityResolver {
         return provider?.link ?? this.config.link ?? DEFAULT_LINK;
     }
 
-    /**
-     * Map the identity's groups/roles to an app role. Keys match EXACTLY (LDAP DNs
-     * case-insensitively) — a bare name like "admin" must not be satisfiable by some
-     * same-named group a user created. `group:<id>` / `role:<name>` restrict a key to
-     * one source; unprefixed keys match either.
-     */
-    mapRole(identity: ExternalIdentity, provider?: AuthProvider): string | null {
-        const roles = provider?.roles ?? this.config.roles;
-        if (!roles) return null;
-        const groups = new Set(identity.groups.map(normalizeName));
-        const idpRoles = new Set(identity.roles.map(normalizeName));
-        for (const [external, role] of Object.entries(roles.map || {})) {
-            if (external.startsWith('group:')) {
-                if (groups.has(normalizeName(external.slice(6)))) return role;
-            } else if (external.startsWith('role:')) {
-                if (idpRoles.has(normalizeName(external.slice(5)))) return role;
-            } else if (groups.has(normalizeName(external)) || idpRoles.has(normalizeName(external))) {
-                return role;
-            }
-        }
-        return roles.default ?? null;
-    }
-
-    helpers(provider?: AuthProvider): ResolveUserHelpers {
+    helpers(): ResolveUserHelpers {
         return {
             findUser: async (where) => {
                 const User = this.source.getUserModel();
@@ -106,7 +67,6 @@ export class IdentityResolver {
                 const row = await User.create({ data, ...this.source.buildUserQuery(false) });
                 return this.source.sanitizeUser(row)!;
             },
-            mapRole: (identity) => this.mapRole(identity, provider),
         };
     }
 
@@ -114,7 +74,7 @@ export class IdentityResolver {
         if (identity.user) return { user: identity.user, persisted: true };
 
         if (this.config.resolveUser) {
-            const user = await this.config.resolveUser(identity, this.helpers(provider));
+            const user = await this.config.resolveUser(identity, this.helpers());
             return user ? { user, persisted: false } : null;
         }
 
@@ -129,11 +89,11 @@ export class IdentityResolver {
                 // Namespaced by provider: subjects are only unique per IdP, and a bare "1" (e.g. a
                 // GitHub id) would collide with real user-table ids in ACL filters or RLS
                 id: `${identity.provider}:${identity.subject}`,
-                role: this.mapRole(identity, provider),
                 ...(identity.email ? { email: identity.email } : {}),
                 ...(identity.name ? { name: identity.name } : {}),
                 ...(identity.username ? { username: identity.username } : {}),
                 groups: identity.groups,
+                roles: identity.roles,
                 provider: identity.provider,
             },
             persisted: false,
@@ -191,14 +151,6 @@ export class IdentityResolver {
 function sameValue(stored: unknown, value: string): boolean {
     if (typeof stored === 'number' || typeof stored === 'bigint') return String(stored) === value;
     return typeof stored === 'string' && stored.toLowerCase() === value.toLowerCase();
-}
-
-const DN_LIKE = /^[A-Za-z][\w-]*\s*=/;
-
-/** LDAP DNs compare case-insensitively and ignore spaces around RDN separators; anything else is exact */
-function normalizeName(value: string): string {
-    if (!DN_LIKE.test(value)) return value;
-    return value.split(/(?<!\\),/).map((rdn) => rdn.trim().replace(/\s*=\s*/, '=')).join(',').toLowerCase();
 }
 
 /** Read an attribute of the identity: a well-known field or a raw claim name */

@@ -60,7 +60,6 @@ run('Auth ↔ Keycloak 26', () => {
         const auth = new Auth({
             providers: [{
                 type: 'oidc', name: 'keycloak', issuer: KC, clientId: 'rapidd-api', clientSecret: 'rapidd-secret',
-                roles: { map: { 'role:admin': 'admin' }, default: 'user' },
             }],
             jwt: { secret: 's'.repeat(40), refreshSecret: 'r'.repeat(40), accessExpiry: '15m', refreshExpiry: '7d' },
         });
@@ -75,10 +74,12 @@ run('Auth ↔ Keycloak 26', () => {
         process.env = savedEnv;
     });
 
-    it('accepts Keycloak access tokens; realm roles map to app roles', async () => {
+    it('accepts Keycloak access tokens; realm roles arrive as data (user.roles)', async () => {
         const { access_token } = await passwordGrant();
         const me = (await app.inject({ method: 'GET', url: '/private', headers: { authorization: `Bearer ${access_token}` } })).json();
-        expect(me.user).toMatchObject({ username: 'alice', email: 'alice@example.com', role: 'admin', provider: 'keycloak' });
+        expect(me.user).toMatchObject({ username: 'alice', email: 'alice@example.com', provider: 'keycloak' });
+        expect(me.user.roles).toContain('admin');
+        expect(me.user).not.toHaveProperty('role');
         expect(me.user.id).toMatch(/^keycloak:/);
 
         const tampered = access_token.slice(0, -4) + 'AAAA';
@@ -95,10 +96,11 @@ run('Auth ↔ Keycloak 26', () => {
         expect((await app.inject({ method: 'GET', url: '/private', headers: { authorization: `Bearer ${access_token}` } })).json().user).toBeNull();
     });
 
-    it('browser login through the Keycloak login form → ticket → session (same role as bearer)', async () => {
+    it('browser login through the Keycloak login form → ticket → session (same roles as bearer)', async () => {
         const start = await app.inject({ method: 'GET', url: '/auth/keycloak/login?redirect=/after' });
         expect(start.statusCode).toBe(302);
-        const stateCookie = start.cookies.find((c) => c.name === 'rapidd_auth_state')!;
+        // One state cookie per sign-in, named after its state
+        const stateCookie = start.cookies.find((c) => c.name.startsWith('rapidd_auth_state_'))!;
         const authorizeUrl = new URL(start.headers.location as string);
         expect(authorizeUrl.searchParams.get('redirect_uri')).toBe('http://rapidd.test/auth/keycloak/callback');
 
@@ -124,17 +126,18 @@ run('Auth ↔ Keycloak 26', () => {
         const callback = new URL(submitted.headers.get('location')!);
         expect(callback.origin + callback.pathname).toBe('http://rapidd.test/auth/keycloak/callback');
 
-        const done = await app.inject({ method: 'GET', url: `${callback.pathname}${callback.search}`, cookies: { rapidd_auth_state: stateCookie.value } });
+        const done = await app.inject({ method: 'GET', url: `${callback.pathname}${callback.search}`, cookies: { [stateCookie.name]: stateCookie.value } });
         expect(done.statusCode).toBe(302);
         const landing = new URL(done.headers.location as string, 'http://rapidd.test');
         expect(landing.pathname).toBe('/after');
 
         const tokens = (await app.inject({ method: 'POST', url: '/auth/exchange', payload: { ticket: landing.searchParams.get('auth_ticket') } })).json();
         const me = (await app.inject({ method: 'GET', url: '/auth/me', headers: { authorization: `Bearer ${tokens.accessToken}` } })).json();
-        expect(me.user).toMatchObject({ username: 'alice', role: 'admin' }); // realm role from the ACCESS token
+        expect(me.user).toMatchObject({ username: 'alice' });
+        expect(me.user.roles).toContain('admin'); // realm role from the ACCESS token
 
         // The callback is single-use
-        const replay = await app.inject({ method: 'GET', url: `${callback.pathname}${callback.search}`, cookies: { rapidd_auth_state: stateCookie.value } });
+        const replay = await app.inject({ method: 'GET', url: `${callback.pathname}${callback.search}`, cookies: { [stateCookie.name]: stateCookie.value } });
         expect(replay.headers.location).toMatch(/auth_error=auth_login_failed/);
 
         // Refresh, then logout ends the SSO session

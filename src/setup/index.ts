@@ -4,7 +4,6 @@ import { SECTIONS } from './catalog';
 import { validate, plainValues, currentValues } from './settings';
 import { inspectProject, clientProvider } from './project';
 import { Logger } from '../utils/Logger';
-import { ACL_RULES_FILE, loadAclRules } from '../core/aclRules';
 import { RLS_RULES_FILE, loadRlsRules } from '../core/rlsRules';
 
 /**
@@ -48,13 +47,11 @@ export async function setupReasons(root: string = process.cwd()): Promise<SetupR
         reasons.push({ key: 'prisma/client', message: `The Prisma client was generated for ${clientProvider(root)} — generate it again for ${provider}` });
     }
 
-    // Rules files the API refuses to start with (they never fail open)
-    for (const [file, load] of [[ACL_RULES_FILE, loadAclRules], [RLS_RULES_FILE, loadRlsRules]] as const) {
-        try {
-            load(path.join(root, file));
-        } catch (err) {
-            reasons.push({ key: file, message: (err as Error).message.replace(path.join(root, file), file) });
-        }
+    // A rules file the API refuses to start with (rules never fail open)
+    try {
+        loadRlsRules(path.join(root, RLS_RULES_FILE));
+    } catch (err) {
+        reasons.push({ key: RLS_RULES_FILE, message: (err as Error).message.replace(path.join(root, RLS_RULES_FILE), RLS_RULES_FILE) });
     }
     return reasons;
 }
@@ -66,7 +63,7 @@ export type WizardLaunch = Exclude<WizardMode, 'off'> | 'setup';
 
 /**
  * SETUP_WIZARD: auto (default) — serve the wizard while the API cannot start; on — at every
- * start, before the API (to change the access rules, services, ...); off — never
+ * start, before the API (to change services, rate limits, ...); off — never
  */
 export function wizardMode(): WizardMode {
     const mode = (process.env.SETUP_WIZARD || 'auto').toLowerCase();

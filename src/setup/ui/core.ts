@@ -22,7 +22,6 @@ export function installCore(R) {
         reveal: {},
         checks: {},
         project: null,
-        acl: null,
         rls: null,
         admin: null,
         ui: {},
@@ -218,7 +217,7 @@ export function installCore(R) {
         for (const id in S.files) if (R.fileDirty(id)) out[id] = S.files[id].text;
         return out;
     };
-    R.fileTitles = { app: 'config/app.json', rateLimit: 'config/rate-limit.json', acl: 'config/acl.json', rls: 'config/rls.json' };
+    R.fileTitles = { app: 'config/app.json', rateLimit: 'config/rate-limit.json', rls: 'config/rls.json', samlIdp: 'config/saml-idp-metadata.xml' };
     /** npm run setup ends with saving; at boot, finishing starts the API */
     R.command = () => S.state.mode === 'setup';
     R.finishTitle = () => (R.command() ? 'Review & finish' : 'Review & start');

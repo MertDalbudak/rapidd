@@ -4,7 +4,6 @@ import { SECTIONS, matches, listItems, isSecretKey, conditionKeys } from './cata
 import type { Section, Setting, Values } from './catalog';
 import { envFilePath, readEnvFile, updateEnvContent, writeEnvFile, valueSource, markFromFile } from './envfile';
 import type { EnvLayout } from './envfile';
-import { rolesFromEnv } from '../auth/identity';
 import { detectProvider } from '../core/adapter';
 import type { ProjectInfo } from './project';
 import { trustProxyError } from '../core/trustProxy';
@@ -172,8 +171,8 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
             const providers = listItems(value);
             if (providers.includes('none')) {
                 return [null, values.ACL_DEFAULT === 'deny'
-                    ? 'No sign-in: every request is anonymous — access rules for “anonymous” or “*” decide what it may do'
-                    : 'No sign-in, and models without access rules are open: anyone who reaches the API may read and change their data. Add access rules, or close such models (ACL_DEFAULT=deny)'];
+                    ? 'No sign-in: every request is anonymous ({ id: null }) — src/config/acl.ts decides what it may do'
+                    : 'No sign-in, and models without an entry in src/config/acl.ts are open: anyone who reaches the API may read and change their data. Add access control there, or close such models (ACL_DEFAULT=deny)'];
             }
             // Local sign-in without a user table: nobody can sign in, and the routes refuse every request
             const external = providers.some((p) => p !== 'local');
@@ -202,9 +201,6 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
             if (error) return [error, null];
             return [null, production && !value ? 'Unset in production trusts every proxy — set the proxies’ addresses or a hop count' : null];
         }
-        case 'AUTH_ROLE_MAP':
-            if (!value) return [null, null];
-            try { rolesFromEnv({ AUTH_ROLE_MAP: value }); return [null, null]; } catch (err) { return [(err as Error).message.replace(/^\[Auth\]\s*/, ''), null]; }
         case 'AUTH_LINK':
             return value && !/^(email|username|subject|false|none|off|[\w.]+(:[\w.]+)?)$/i.test(value.trim())
                 ? ['email, username, subject, false, or <userField>:<identityAttribute>', null] : [null, null];
@@ -232,8 +228,34 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
                 ? ['Set a service account (DN + search base) or a direct bind template', null] : [null, null];
         case 'LDAP_TLS_CA_FILE':
             return value && !fs.existsSync(value) ? [`File not found: ${value}`, null] : [null, null];
+        case 'SAML_IDP_METADATA_URL':
+            // The signing certificates come from it
+            return value && /^http:\/\//i.test(value) && !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(value)
+                ? ['Use https — the identity provider’s signing certificates come from it', null] : [null, null];
+        case 'SAML_IDP_METADATA_FILE':
+            if (!listItems(values.AUTH_PROVIDERS).includes('saml') || values.SAML_IDP_METADATA_URL) return [null, null];
+            if (project?.saml && !project.saml.library) return ['SAML needs the @node-saml/node-saml package — run: npm install @node-saml/node-saml', null];
+            return project?.saml && !project.saml.metadata
+                ? [`Upload the identity provider’s metadata below — or set its URL${value ? ` (no file ${value})` : ''}`, null] : [null, null];
+        case 'SAML_SP_ENTITY_ID':
+            return listItems(values.AUTH_PROVIDERS).includes('saml') && !values.PUBLIC_URL && !values.SAML_CALLBACK_URL
+                ? ['Set PUBLIC_URL (Server) — the identity provider posts sign-ins to <PUBLIC_URL>/auth/saml/callback', null] : [null, null];
+        case 'SAML_SP_PRIVATE_KEY_FILE':
+        case 'SAML_SP_CERT_FILE': {
+            if (!value) return [null, null];
+            if (!fs.existsSync(value)) return [`File not found: ${value}`, null];
+            try {
+                const pem = fs.readFileSync(value, 'utf8');
+                if (key === 'SAML_SP_PRIVATE_KEY_FILE') crypto.createPrivateKey(pem);
+                else new crypto.X509Certificate(pem);
+                return [null, null];
+            } catch {
+                return [key === 'SAML_SP_PRIVATE_KEY_FILE' ? 'Not a PEM private key' : 'Not a PEM certificate', null];
+            }
+        }
         case 'RLS_ENABLED':
-            return [null, value === 'true' && values.DATABASE_URL && detectProvider(values.DATABASE_URL) === 'mysql' ? 'MySQL has no row-level security' : null];
+            return [null, value === 'true' && values.DATABASE_URL && detectProvider(values.DATABASE_URL) === 'mysql'
+                ? 'No effect: MySQL and MariaDB have no row-level security — restrict rows in src/config/acl.ts' : null];
         case 'LOG_LEVEL':
             return [null, production && value === 'finest' ? 'finest logs request bodies — keep it for troubleshooting' : null];
         case 'SETUP_PASSWORD':
@@ -248,7 +270,7 @@ function rules(key: string, value: string, values: Values, project?: Partial<Pro
  * so a deployment that starts now is never sent into setup by a stricter rule.
  */
 const BOOT_BLOCKERS = new Set(['DATABASE_URL', 'API_TIMEZONE', 'JWT_SECRET', 'JWT_REFRESH_SECRET', 'AUTH_PROVIDERS',
-    'AUTH_ROLE_MAP', 'LDAP_URL', 'LDAP_BIND_TEMPLATE', 'LDAP_TLS_CA_FILE', 'OIDC_ISSUER', 'WEBDAV_URL', 'TRUST_PROXY']);
+    'LDAP_URL', 'LDAP_BIND_TEMPLATE', 'LDAP_TLS_CA_FILE', 'OIDC_ISSUER', 'WEBDAV_URL', 'TRUST_PROXY']);
 
 export function validate(values: Values, sections: Section[] = buildSections(), project?: Partial<ProjectInfo>): Validation {
     const result: Validation = { errors: {}, warnings: {}, blockers: [], visible: [], required: [] };

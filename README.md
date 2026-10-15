@@ -22,7 +22,7 @@ Rapidd generates a fully-featured REST API from your database schema — then ge
 - **Zero to API in 3 commands** — CRUD endpoints with filtering, pagination, relations, and field selection
 - **Convention over configuration** — auto-detects auth tables, password fields, DB provider, and RLS support. Every default overridable
 - **Production-grade from day one** — security headers, rotating sessions with reuse detection, row-level security, per-model ACL, rate limiting, health checks, graceful shutdown, request-id-correlated (JSON) logs
-- **Enterprise sign-in, plug & play** — your user table, LDAP / Active Directory, OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, ...) and WebDAV — configured with env vars
+- **Enterprise sign-in, plug & play** — your user table, LDAP / Active Directory, OpenID Connect / OAuth2 (Entra ID, Keycloak, Okta, ...), SAML 2.0 (Entra ID, ADFS, Shibboleth, ...) and WebDAV — configured with env vars
 - **Essentials included, the rest is yours** — HTTP client, file uploads, rate limiting, i18n across 10 languages; pick your own mailer, queue or SDK
 - **Fully extensible** — before/after middleware on every CRUD operation, custom routes alongside generated ones
 
@@ -41,9 +41,9 @@ npm run setup               # the setup wizard, any time
 ```
 
 The console prints a link to the **setup wizard**: connect and test the database, read the
-schema from it (or create the tables from yours), generate the Prisma client, models and routes,
-set up sign-in, access rules, row-level security, rate limits and the external APIs you call,
-create the first user — then the API starts, in the same process.
+schema from it (or create the tables from yours), add the indexes its lookups lack, generate the
+Prisma client, models and routes, set up sign-in, row-level security, rate limits and the
+external APIs you call, create the first user — then the API starts, in the same process.
 
 Every table gets full CRUD endpoints. Auth is enabled automatically when a user table is detected. Every auto-detected value — auth fields, password hashing, JWT secrets, session store — is overridable via env vars. See [`.env.example`](.env.example) for the full list.
 
@@ -93,7 +93,7 @@ Comma-separated conditions combine with implicit AND. For explicit boolean logic
 
 ## Authentication
 
-Auto-enabled when a user table is detected — or off with `AUTH_PROVIDERS=none`: every request is anonymous and access rules decide. External identity providers plug in with env vars:
+Auto-enabled when a user table is detected — or off with `AUTH_PROVIDERS=none`: every request is anonymous and your access control decides. External identity providers plug in with env vars:
 
 ```env
 AUTH_PROVIDERS=ldap,oidc,local        # tried in order for password logins
@@ -105,6 +105,9 @@ LDAP_SEARCH_BASE=DC=corp,DC=example,DC=com
 
 OIDC_ISSUER=https://login.microsoftonline.com/<tenant>/v2.0   # Entra ID, Keycloak, Okta, ...
 OIDC_CLIENT_ID=...                    # accepts the IdP's access tokens + SSO browser login
+
+SAML_IDP_METADATA_URL=https://...     # SAML 2.0 single sign-on (AUTH_PROVIDERS=saml) — or upload the
+                                      # IdP's metadata in the setup wizard
 ```
 
 ```
@@ -114,9 +117,10 @@ POST /auth/refresh        { "refreshToken": "..." }
 GET  /auth/me             Authorization: Bearer <token>
 GET  /auth/providers      enabled providers, for login pages
 GET  /auth/<provider>/login → IdP → callback → single-use ticket → POST /auth/exchange
+GET  /auth/saml/metadata  this API's SAML metadata, for the identity provider
 ```
 
-External identities link to your user table by email (or provision rows on first login, or come from IdP claims with role mapping). Sessions are server-side with rotating refresh tokens, reuse detection and per-user revocation; `validateUser` / `onLogin` hooks gate deactivated accounts and record logins.
+External identities link to your user table by email (or provision rows on first login, or are their IdP claims — groups and roles included). Sessions are server-side with rotating refresh tokens, reuse detection and per-user revocation; `validateUser` / `onLogin` hooks gate deactivated accounts and record logins.
 
 Four strategies — **bearer** (default), **basic**, **cookie**, and **custom header** — configurable globally via `AUTH_STRATEGIES` env var or per endpoint prefix in `config/app.json`:
 
@@ -141,40 +145,28 @@ Multi-identifier login lets users authenticate with any unique field (email, use
 
 ## Access Control
 
-Rules per model and role in `config/acl.json` — edited in the setup wizard, generated with defaults by `rapidd build`. Enforced on every CRUD operation, relation include, and field selection.
-
-```json
-{
-    "models": {
-        "posts": {
-            "create": { "GUEST": false, "*": true },
-            "read":   { "ADMIN": "all", "*": { "where": { "authorId": "$user.id" } } },
-            "delete": { "ADMIN": "all" },
-            "hide":   { "*": ["internalNotes"], "ADMIN": [] }
-        }
-    }
-}
-```
-
-Anything a rule cannot express goes into `src/config/acl.ts` — an entry there takes its model over:
+Code in `src/config/acl.ts`, one entry per model — `rapidd build` writes the first version (credential columns hidden, the user table's password never written through the API). Enforced on every CRUD operation, relation include, and field selection. Your hooks receive the signed-in user as your data has it — Rapidd assumes nothing but `id`, so roles in a column or their own table, directory groups or flags all work:
 
 ```typescript
+// Your user, your data: a flag, a role column, related roles, directory groups, ...
+const isAdmin = (user: RapiddUser) => user.is_admin === true;
+
 const acl: AclConfig = {
     model: {
         posts: {
-            canCreate: (user, data) => user.role !== 'GUEST',
-            getAccessFilter: (user) => user.role === 'ADMIN' ? {} : { authorId: user.id },
-            getUpdateFilter: (user) => user.role === 'ADMIN' ? {} : { authorId: user.id },
-            getDeleteFilter: (user) => user.role === 'ADMIN' ? {} : false,
-            getOmitFields: (user) => user.role !== 'ADMIN' ? ['internalNotes'] : [],
+            canCreate: (user) => user.id != null,
+            getAccessFilter: (user) => isAdmin(user) ? true : { authorId: user.id },
+            getUpdateFilter: (user) => isAdmin(user) ? true : { authorId: user.id },
+            getDeleteFilter: (user) => isAdmin(user),
+            getOmitFields: (user) => isAdmin(user) ? [] : ['internalNotes'],
         }
     }
 };
 ```
 
-Return `{}` for full access, a filter object to scope records, or `false` to deny.
+Return `true` for full access, a Prisma where to scope records, or `false` to deny.
 
-> **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** — all 5 ACL methods, relation ACL, 404 vs 403 distinction
+> **[Access Control wiki](https://github.com/MertDalbudak/rapidd/wiki/Access-Control-(ACL))** — all 6 ACL methods, the user your hooks receive, relation ACL, 404 vs 403 distinction
 
 ---
 
@@ -212,7 +204,7 @@ Auto-enabled for PostgreSQL. Define which variables to inject in `src/config/rls
 // src/config/rls.ts
 const rlsContext: RlsContextFn = (request) => ({
     current_user_id: request.user?.id ?? null,
-    current_tenant_id: request.headers['x-tenant-id'] ?? null,
+    current_tenant_id: request.user?.tenant_id ?? null,   // from the user — a client can send any header
 });
 ```
 

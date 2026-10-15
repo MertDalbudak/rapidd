@@ -1,21 +1,21 @@
 import fs from 'fs';
 import path from 'path';
-import { validateAclRules } from '../core/aclRules';
 import { validateRlsRules } from '../core/rlsRules';
 import { writeEnvFile } from './envfile';
+import { validateIdpMetadata } from './saml';
 
 /**
  * The config files the wizard edits besides the env file. Changes are staged in the browser
  * and written together with the env changes on save — validated first, all or nothing.
  */
 
-export type ConfigFileId = 'app' | 'rateLimit' | 'acl' | 'rls';
+export type ConfigFileId = 'app' | 'rateLimit' | 'rls' | 'samlIdp';
 
 export const CONFIG_FILES: Record<ConfigFileId, { path: string; title: string }> = {
     app: { path: 'config/app.json', title: 'Services (ApiClient)' },
     rateLimit: { path: 'config/rate-limit.json', title: 'Rate limits' },
-    acl: { path: 'config/acl.json', title: 'Access control rules' },
     rls: { path: 'config/rls.json', title: 'Row-level security variables' },
+    samlIdp: { path: 'config/saml-idp-metadata.xml', title: 'SAML identity provider metadata' },
 };
 
 export function isConfigFileId(id: string): id is ConfigFileId {
@@ -41,6 +41,7 @@ export function validateAppConfig(config: Record<string, any>): string[] {
         if (s.path !== undefined && (typeof s.path !== 'string' || (s.path && !s.path.startsWith('/')))) problems.push(`${at}.path: starts with /`);
         if (s.port !== undefined && !(Number.isInteger(s.port) && s.port > 0 && s.port < 65536)) problems.push(`${at}.port: 1 – 65535`);
         if (s.secure !== undefined && typeof s.secure !== 'boolean') problems.push(`${at}.secure: true or false`);
+        if (s.retry !== undefined && typeof s.retry !== 'boolean') problems.push(`${at}.retry: true or false`);
         if (!stringMap(s.headers)) problems.push(`${at}.headers: names to text values`);
         if (!stringMap(s.queries)) problems.push(`${at}.queries: names to text values`);
         const auth = s.authorization;
@@ -58,6 +59,7 @@ export function validateAppConfig(config: Record<string, any>): string[] {
                 if (!e || typeof e !== 'object') { problems.push(`${eat}: must be an object`); continue; }
                 if (typeof e.path !== 'string' || !e.path.startsWith('/')) problems.push(`${eat}.path: starts with /`);
                 if (e.method !== undefined && !METHODS.includes(String(e.method).toUpperCase())) problems.push(`${eat}.method: one of ${METHODS.join(', ')}`);
+                if (e.retry !== undefined && typeof e.retry !== 'boolean') problems.push(`${eat}.retry: true or false`);
                 if (!stringMap(e.headers)) problems.push(`${eat}.headers: names to text values`);
                 if (!stringMap(e.queries)) problems.push(`${eat}.queries: names to text values`);
             }
@@ -81,8 +83,9 @@ export function validateRateLimits(config: Record<string, any>): string[] {
     return problems;
 }
 
-/** Problems with the content of a config file (JSON syntax, then its structure) */
-export function validateConfigFile(id: ConfigFileId, content: string, schemaFields?: Record<string, string[]>): string[] {
+/** Problems with the content of a config file (JSON syntax, then its structure — the SAML metadata is XML) */
+export function validateConfigFile(id: ConfigFileId, content: string): string[] {
+    if (id === 'samlIdp') return validateIdpMetadata(content);
     let parsed: unknown;
     try {
         parsed = JSON.parse(content);
@@ -93,8 +96,8 @@ export function validateConfigFile(id: ConfigFileId, content: string, schemaFiel
     switch (id) {
         case 'app': return validateAppConfig(parsed as Record<string, any>);
         case 'rateLimit': return validateRateLimits(parsed as Record<string, any>);
-        case 'acl': return validateAclRules(parsed, schemaFields);
         case 'rls': return validateRlsRules(parsed);
+        default: return [];
     }
 }
 

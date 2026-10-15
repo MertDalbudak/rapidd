@@ -1,7 +1,7 @@
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { words, singular, plural, relationFields, renameRelations, renameInRules, typeJsonColumns, writeSchema, SchemaEditError } from '../../src/setup/schema';
+import { words, singular, plural, relationFields, renameRelations, typeJsonColumns, writeSchema, SchemaEditError } from '../../src/setup/schema';
 import type { DMMF } from '../../src/types';
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
@@ -174,29 +174,6 @@ describe('renameRelations', () => {
         expect(() => renameRelations(HR, dmmf, { employees: { manager_id: 'manager' } })).toThrow('employees.manager_id is not a relation');
         expect(() => renameRelations(HR, dmmf, { employees: { employees: '1st' } })).toThrow('"1st" is not a field name');
         expect(() => renameRelations(HR, dmmf, { nope: { a: 'b' } })).toThrow(SchemaEditError);
-    });
-});
-
-describe('renameInRules', () => {
-    it('follows the renames in row filters (through relation paths) and hide/write lists', async () => {
-        const dmmf = await dmmfOf(SOCIAL);
-        const rules = {
-            roleField: 'role',
-            models: {
-                Comment: {
-                    read: { admin: 'all', '*': { where: { OR: [{ User: { username: '$user.username' } }, { Post: { User: { id: '$user.id' } } }] } } },
-                    hide: { '*': ['other_Comment'] },
-                },
-                User: { update: { '*': { where: { Post: { some: { User: { id: '$user.id' } } } } } }, write: { '*': ['username', 'Post'], admin: 'all' } },
-            },
-        };
-        const out = renameInRules(rules, dmmf, { Comment: { User: 'author', other_Comment: 'children' }, Post: { User: 'author' }, User: { Post: 'posts' } });
-        expect(out.models.Comment.read).toEqual({ admin: 'all', '*': { where: { OR: [{ author: { username: '$user.username' } }, { Post: { author: { id: '$user.id' } } }] } } });
-        expect(out.models.Comment.hide).toEqual({ '*': ['children'] });
-        expect(out.models.User.update).toEqual({ '*': { where: { posts: { some: { author: { id: '$user.id' } } } } } });
-        expect(out.models.User.write).toEqual({ '*': ['username', 'posts'], admin: 'all' });
-        // The input is not changed
-        expect(rules.models.User.write['*']).toEqual(['username', 'Post']);
     });
 });
 

@@ -1,4 +1,4 @@
-import { IdentityResolver, linkFromEnv, rolesFromEnv } from '../../src/auth/identity';
+import { IdentityResolver, linkFromEnv } from '../../src/auth/identity';
 import type { ExternalIdentity } from '../../src/types';
 
 const identity = (overrides: Partial<ExternalIdentity> = {}): ExternalIdentity => ({
@@ -99,15 +99,13 @@ describe('IdentityResolver', () => {
         expect(await new IdentityResolver(source, {}).resolve(identity({ email: undefined }))).toBeNull();
     });
 
-    it('builds a claims-only user when there is no user table', async () => {
+    it('builds a claims-only user when there is no user table: its groups and IdP roles as data, no role', async () => {
         const source = { getUserModel: () => null, buildUserQuery: () => ({}), sanitizeUser: (u: any) => u };
-        const resolved = await new IdentityResolver(source, {
-            roles: { map: { 'Domain Admins': 'admin', Staff: 'staff' }, default: 'user' },
-        }).resolve(identity());
+        const resolved = await new IdentityResolver(source, {}).resolve(identity({ roles: ['editor'] }));
         expect(resolved).toEqual({
             user: {
-                id: 'ldap:guid-1', role: 'admin', email: 'alice@corp.example', name: 'Alice', username: 'alice',
-                groups: ['Staff', 'Domain Admins'], provider: 'ldap',
+                id: 'ldap:guid-1', email: 'alice@corp.example', name: 'Alice', username: 'alice',
+                groups: ['Staff', 'Domain Admins'], roles: ['editor'], provider: 'ldap',
             },
             persisted: false,
         });
@@ -117,33 +115,6 @@ describe('IdentityResolver', () => {
         const { source } = userTable([{ id: 1, email: 'alice@corp.example' }]);
         const resolved = await new IdentityResolver(source, { link: false }).resolve(identity());
         expect(resolved!.user.id).toBe('ldap:guid-1'); // namespaced: subjects are only unique per IdP
-    });
-
-    it('maps roles: first configured match wins, exact names, else default', () => {
-        const { source } = userTable();
-        const resolver = new IdentityResolver(source, { roles: { map: { Staff: 'staff', 'Domain Admins': 'admin' }, default: 'guest' } });
-        expect(resolver.mapRole(identity())).toBe('staff'); // map order, not group order
-        expect(resolver.mapRole(identity({ groups: ['Other'] }))).toBe('guest');
-        expect(resolver.mapRole(identity({ groups: [], roles: ['Staff'] }))).toBe('staff');
-        expect(resolver.mapRole(identity({ groups: ['staff'] }))).toBe('guest'); // no case folding of plain names
-        expect(new IdentityResolver(source, {}).mapRole(identity())).toBeNull(); // no implicit roles
-    });
-
-    it('matches LDAP DNs case- and spacing-insensitively, but never by bare CN', () => {
-        const { source } = userTable();
-        const resolver = new IdentityResolver(source, { roles: { map: { 'CN=App Admins,OU=Groups,DC=corp,DC=example': 'admin' } } });
-        expect(resolver.mapRole(identity({ groups: ['cn=App Admins, ou=Groups, dc=corp, dc=example'] }))).toBe('admin');
-        expect(resolver.mapRole(identity({ groups: ['CN=App Admins,OU=Users,DC=corp,DC=example'] }))).toBeNull(); // same CN, other OU
-        expect(resolver.mapRole(identity({ groups: ['App Admins'] }))).toBeNull();
-    });
-
-    it('keeps groups and IdP roles apart with group:/role: prefixes', () => {
-        const { source } = userTable();
-        const resolver = new IdentityResolver(source, { roles: { map: { 'role:admin': 'admin' }, default: 'user' } });
-        // A user-created group that happens to be called "admin" grants nothing
-        expect(resolver.mapRole(identity({ groups: ['admin'], roles: [] }))).toBe('user');
-        expect(resolver.mapRole(identity({ groups: [], roles: ['admin'] }))).toBe('admin');
-        expect(new IdentityResolver(source, { roles: { map: { 'group:ops': 'ops' } } }).mapRole(identity({ groups: [], roles: ['ops'] }))).toBeNull();
     });
 
     it('decides links exactly — no LIKE wildcards, accents or padding from the database', async () => {
@@ -162,23 +133,22 @@ describe('IdentityResolver', () => {
         expect((await resolver.resolve(identity({ email: 'ALICE@corp.com' })))!.user.id).toBe(1);
     });
 
-    it('prefers per-provider link and role config', async () => {
+    it('prefers the per-provider link config', async () => {
         const { source } = userTable([{ id: 8, username: 'alice' }]);
-        const provider = { name: 'ldap', type: 'ldap', link: { field: 'username', from: 'username' }, roles: { default: 'p-role' } };
-        const resolver = new IdentityResolver(source, { roles: { default: 'global' } });
+        const provider = { name: 'ldap', type: 'ldap', link: { field: 'username', from: 'username' } };
+        const resolver = new IdentityResolver(source, { link: { field: 'email', from: 'email' } });
         expect((await resolver.resolve(identity(), provider as any))!.user.id).toBe(8);
-        expect(resolver.mapRole(identity(), provider as any)).toBe('p-role');
     });
 
     it('hands full control to resolveUser', async () => {
         const { source } = userTable([{ id: 1, email: 'alice@corp.example' }]);
         const resolveUser = jest.fn(async (id: ExternalIdentity, helpers: any) => {
             const row = await helpers.findUser({ email: id.email });
-            return { ...row, role: helpers.mapRole(id) };
+            return { ...row, groups: id.groups };
         });
-        const resolver = new IdentityResolver(source, { resolveUser, roles: { map: { Staff: 'staff' } } });
+        const resolver = new IdentityResolver(source, { resolveUser });
         const resolved = await resolver.resolve(identity());
-        expect(resolved).toEqual({ user: { id: 1, email: 'alice@corp.example', role: 'staff' }, persisted: false });
+        expect(resolved).toEqual({ user: { id: 1, email: 'alice@corp.example', groups: ['Staff', 'Domain Admins'] }, persisted: false });
     });
 });
 
@@ -188,13 +158,5 @@ describe('env parsing', () => {
         expect(linkFromEnv('false')).toBe(false);
         expect(linkFromEnv('email')).toEqual({ field: 'email', from: 'email' });
         expect(linkFromEnv('login_name:username')).toEqual({ field: 'login_name', from: 'username' });
-    });
-
-    it('parses AUTH_ROLE_MAP / AUTH_DEFAULT_ROLE', () => {
-        expect(rolesFromEnv({})).toBeUndefined();
-        expect(rolesFromEnv({ AUTH_ROLE_MAP: '{"Admins":"admin"}', AUTH_DEFAULT_ROLE: 'user' }))
-            .toEqual({ map: { Admins: 'admin' }, default: 'user' });
-        expect(() => rolesFromEnv({ AUTH_ROLE_MAP: 'Admins=admin' })).toThrow(/JSON/);
-        expect(() => rolesFromEnv({ AUTH_ROLE_MAP: '["x"]' })).toThrow(/JSON object/);
     });
 });

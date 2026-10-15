@@ -113,6 +113,25 @@ afterAll(() => {
 });
 
 describe('buildApp()', () => {
+    it('serves routes from options.routesPath under their path there — not relative to ROUTES_PATH', async () => {
+        const other = fs.mkdtempSync(path.join(__dirname, '__temp_routes_other_'));
+        try {
+            fs.mkdirSync(path.join(other, 'api', 'v2'), { recursive: true });
+            fs.writeFileSync(path.join(other, 'api', 'v2', 'ping.js'),
+                "module.exports = async function (fastify) { fastify.get('/', async () => ({ pong: true })); };");
+            const app = await buildApp({ routesPath: other, rateLimit: false });
+            try {
+                const res = await app.inject({ method: 'GET', url: '/api/v2/ping' });
+                expect(res.statusCode).toBe(200);
+                expect(res.json()).toEqual({ pong: true });
+            } finally {
+                await app.close();
+            }
+        } finally {
+            fs.rmSync(other, { recursive: true, force: true });
+        }
+    });
+
     it('should create a Fastify instance', async () => {
         const app = await buildApp({ routesPath: TEMP_ROUTES, rateLimit: false });
         expect(app).toBeDefined();

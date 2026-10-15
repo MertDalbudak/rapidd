@@ -93,6 +93,7 @@
     "pg": "^8.23.1"
   },
   "devDependencies": {
+    "@node-saml/node-saml": "^5.1.0",
     "@rapidd/build": "^3.0.0",
     "@types/bcrypt": "^6.0.0",
     "@types/jest": "^30.0.0",

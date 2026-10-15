@@ -20,7 +20,7 @@ export function installModelPage(R) {
             S.ui.selectionFor = names;
             S.ui.selected = r.models.filter((m) => !m.modelFile.exists || (m.route.kind === 'route' && !m.route.exists)).map((m) => m.name);
         }
-        if (['model', 'ratelimits', 'access', 'rls'].includes(S.page)) R.render();
+        if (['model', 'ratelimits', 'rls'].includes(S.page)) R.render();
         R.refreshChrome();
         // MariaDB keeps JSON in LONGTEXT — columns the schema reads as String (asks the database)
         if (S.page === 'model' && r.project.schema.provider === 'mysql' && r.models.length) {
@@ -33,31 +33,19 @@ export function installModelPage(R) {
         } else {
             S.ui.json = null;
         }
+        if (S.page === 'model' && r.models.length) loadIndexes();
+        else S.ui.indexes = null;
         return r;
     });
 
-    R.defaultRules = (model) => Object.assign(
-        { create: { '*': true }, read: { '*': 'all' }, update: { '*': 'all' }, delete: { '*': 'all' } },
-        model.sensitive.length ? { hide: { '*': model.sensitive.slice() } } : {});
-
-    /** Default rules (staged) for the given models that have none — returns how many */
-    R.addDefaultRules = (names, models) => {
-        const rules = R.fileJson('acl', { models: {} });
-        if (rules === null) {
-            R.toast('bad', 'config/acl.json is not valid JSON — fix it under Access control first');
-            return 0;
-        }
-        rules.models = rules.models || {};
-        let added = 0;
-        for (const name of names) {
-            const model = models.find((m) => m.name === name);
-            if (!model || model.code || rules.models[name]) continue;
-            rules.models[name] = R.defaultRules(model);
-            added++;
-        }
-        if (added) R.setFileJson('acl', rules);
-        return added;
-    };
+    /** The lookups no index serves (asks the database when it can) */
+    function loadIndexes() {
+        return R.api('POST', '/schema/indexes', R.payload()).then((a) => {
+            S.ui.indexes = a && a.__status < 400 && !a.error ? a : null;
+            if (S.page === 'model') R.render();
+            return S.ui.indexes;
+        });
+    }
 
     async function run(name, build) {
         S.ui.running = name;
@@ -76,22 +64,20 @@ export function installModelPage(R) {
 
     async function generate(models) {
         const selected = S.ui.selected.filter((n) => models.some((m) => m.name === n));
-        const components = ['model', 'route'].filter((c) => S.ui.components[c]);
+        const components = ['model', 'route', 'acl'].filter((c) => S.ui.components[c]);
         // Afterwards the selection starts over with the models that still have no code
         S.ui.selectionFor = null;
         if (components.length) await run('build', { models: selected, components });
-        if (S.ui.components.acl) {
-            const added = R.addDefaultRules(selected, S.project.models);
-            if (added) R.toast('info', 'Default access rules for ' + added + ' model' + (added === 1 ? '' : 's') + ' — review them under Access control, then save.', 8000);
-        }
         R.render();
     }
 
     function access(model) {
-        if (model.code) return R.badge('Code', 'brand', 'code');
-        const rules = R.fileJson('acl', { models: {} });
-        if (rules && rules.models && rules.models[model.name]) return R.badge('Rules', 'ok', 'shield');
-        return R.badge(R.value('ACL_DEFAULT') === 'deny' ? 'None — denied' : 'None — open', 'warn', 'alert');
+        if (model.code) return h('span', { title: 'An entry in src/config/acl.ts' }, R.badge('acl.ts', 'ok', 'shield'));
+        const open = R.value('ACL_DEFAULT') !== 'deny';
+        const title = 'No entry in src/config/acl.ts — ' + (open
+            ? 'unrestricted' + (model.sensitive.length ? ', and the API returns ' + model.sensitive.join(', ') : '')
+            : 'closed (ACL_DEFAULT=deny)');
+        return h('span', { title }, R.badge(open ? 'None — open' : 'None — denied', 'warn', 'alert'));
     }
 
     function route(model) {
@@ -160,18 +146,14 @@ export function installModelPage(R) {
                         } })),
                         R.button('Cancel', { onClick: () => d.close() }),
                         R.button(count ? 'Rename ' + count : 'Rename', { kind: 'primary', busy: 'Renaming…', disabled: !count || invalid || !!S.ui.running, onClick: async () => {
-                            const acl = R.fileJson('acl', null);
-                            const r = await R.api('POST', '/schema/relations', R.payload({ renames, acl }));
+                            const r = await R.api('POST', '/schema/relations', R.payload({ renames }));
                             if (r.__status >= 400) {
                                 error = r.error || 'The schema could not be changed';
                                 d.update();
                                 return;
                             }
-                            let note = '';
-                            if (r.acl && JSON.stringify(r.acl) !== JSON.stringify(acl)) {
-                                R.setFileJson('acl', r.acl);
-                                note = ' The access rules that use them are updated — save them under Review & start.';
-                            }
+                            // Code that uses relation names — src/config/acl.ts, custom routes — is the developer's
+                            const note = r.ok ? ' Code that uses the old names (src/config/acl.ts, custom routes) needs the new ones.' : '';
                             R.toast(r.ok ? 'ok' : 'bad', r.message + note, note ? 8000 : undefined);
                             S.ui.output = { name: 'generate', result: r };
                             d.close();
@@ -201,6 +183,87 @@ export function installModelPage(R) {
         S.ui.output = { name: 'generate', result: r };
         S.ui.json = null;
         await R.loadProject();
+    }
+
+    // ── Indexes ──────────────────────────────────────────────────────────
+    const count = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+    const number = (n) => Number(n).toLocaleString('en-US');
+    // Full-table reads matter once a table has some size
+    const sizeOf = (s) => (s.rows === null ? null : '≈ ' + number(s.rows) + ' rows' + (s.seqScans && s.rows >= 1000 ? ' · read in full ' + number(s.seqScans) + '×' : ''));
+
+    /** Review the lookups without an index — and add the chosen indexes */
+    function indexesDialog() {
+        const a = S.ui.indexes;
+        if (!a) return;
+        const addable = (s) => !!s.statement && !s.problem;
+        const chosen = new Set(a.suggestions.filter(addable).map((s) => s.id));
+        let error = '';
+        const how = a.via === 'migration'
+            ? 'Added as a migration in prisma/migrations and deployed (prisma migrate deploy — with any other pending migration), and to prisma/schema.prisma.'
+            : a.provider === 'postgresql'
+                ? 'Built in the database with CREATE INDEX CONCURRENTLY — reads and writes go on meanwhile — then added to prisma/schema.prisma.'
+                : 'Built in the database — online: reads and writes go on meanwhile — then added to prisma/schema.prisma.';
+        const d = R.dialog({
+            title: 'Indexes', wide: true,
+            render: () => {
+                const n = a.suggestions.filter((s) => chosen.has(s.id)).length;
+                return {
+                    body: [
+                        h('p', { class: 'muted', style: { marginTop: 0 }, text: 'The lookups the API makes — by foreign keys (includes, nested routes, deletes), by the columns src/config/acl.ts filters every read by, and at sign-in — that no index serves. Each such lookup reads the whole table.' }),
+                        a.database.checked ? null : R.notice('warn', 'The database was not read', (a.database.error ? a.database.error + ' — ' : '') + 'this comes from prisma/schema.prisma alone; an index the database has may be missing from it.'),
+                        a.notes.length ? h('ul', { class: 'muted small', style: { paddingLeft: '18px' } }, a.notes.map((t) => h('li', { text: t }))) : null,
+                        a.suggestions.length === 0
+                            ? R.empty('check', 'Every lookup has an index', 'Foreign keys, access filters and sign-in all find rows through one.')
+                            : h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
+                                h('thead', null, h('tr', null, h('th', { class: 'shrink' }), h('th', { text: 'Index' }), h('th', { text: 'Why' }), h('th', { text: 'SQL' }))),
+                                h('tbody', null, a.suggestions.map((s) => h('tr', { class: chosen.has(s.id) ? 'selected' : '' },
+                                    h('td', { class: 'shrink' }, h('input', { type: 'checkbox', id: 'idx-' + s.id, disabled: !addable(s), checked: chosen.has(s.id), 'aria-label': 'Add the index on ' + s.model + ' (' + s.fields.join(', ') + ')',
+                                        onchange: (e) => { if (e.target.checked) chosen.add(s.id); else chosen.delete(s.id); d.update(); } })),
+                                    h('td', null,
+                                        h('b', { text: s.model }), ' ', h('code', { text: '(' + s.fields.join(', ') + ')' }),
+                                        sizeOf(s) ? h('div', { class: 'sub', text: sizeOf(s) }) : null,
+                                        s.impact === 'high' ? R.badge('large table', 'warn') : s.impact === 'low' && s.rows !== null ? R.badge('small table', 'outline') : null),
+                                    h('td', null, s.reasons.map((r) => h('div', { class: 'small', text: r.text })),
+                                        s.problem ? h('div', { class: 'bad-text small', text: s.problem }) : null),
+                                    h('td', null, s.statement ? h('code', { class: 'small', style: { overflowWrap: 'break-word' }, text: s.statement }) : h('span', { class: 'faint', text: '—' }))))))),
+                        a.suggestions.length ? h('p', { class: 'muted small', text: how }) : null,
+                        error ? R.notice('bad', 'Not added', h('pre', { class: 'code light', style: { marginTop: '8px' }, text: error })) : null,
+                    ],
+                    actions: [
+                        R.button(a.suggestions.length ? 'Cancel' : 'Close', { onClick: () => d.close() }),
+                        a.suggestions.length ? R.button(n ? 'Add ' + count(n, 'index', 'indexes') : 'Add', { kind: 'primary', busy: 'Adding…', disabled: !n || !!S.ui.running, onClick: async () => {
+                            S.ui.running = 'indexes';
+                            let r;
+                            try {
+                                r = await R.api('POST', '/schema/indexes/apply', R.payload({ ids: [...chosen] }));
+                            } finally {
+                                S.ui.running = null;
+                            }
+                            if (r.__status >= 400) {
+                                error = r.error || 'The indexes could not be added';
+                                d.update();
+                                return;
+                            }
+                            R.toast(r.ok ? 'ok' : 'bad', r.message);
+                            S.ui.output = { name: 'indexes', result: r };
+                            d.close();
+                            await R.loadProject();
+                        } }) : null,
+                    ],
+                };
+            },
+        });
+    }
+
+    function indexNotice() {
+        const a = S.ui.indexes;
+        const list = a ? a.suggestions : [];
+        if (!list.length) return null;
+        const named = list.slice(0, 3).map((s) => s.model + ' (' + s.fields.join(', ') + ')').join(', ') + (list.length > 3 ? ' and ' + (list.length - 3) + ' more' : '');
+        const behind = list.filter((s) => s.source === 'schema').length;
+        return h('div', { style: { padding: '14px 20px 0' } }, R.notice(list.some((s) => s.impact !== 'low') ? 'warn' : 'info', count(list.length, 'lookup', 'lookups') + ' without an index',
+            h('span', null, 'Each reads the whole table: ' + named + '.' + (behind ? ' ' + count(behind, 'index', 'indexes') + ' of prisma/schema.prisma ' + (behind === 1 ? 'is' : 'are') + ' missing in the database.' : '')),
+            [R.button('Review indexes', { size: 'sm', kind: 'primary', icon: 'gauge', disabled: !!S.ui.running, onClick: indexesDialog })]));
     }
 
     function schemaCard() {
@@ -242,21 +305,22 @@ export function installModelPage(R) {
         const suggested = models.filter((m) => m.relationFields.some((r) => r.suggestion));
         return R.card({
             title: 'Models & routes', icon: 'layers',
-            description: 'Generated code: a model class (src/models) and a REST route (routes/api/v1) per model. Existing files are never overwritten.',
+            description: 'Generated code: a model class (src/models) and a REST route (routes/api/v1) per model, and src/config/acl.ts while it has no entries (credential columns hidden). Existing files are never overwritten.',
             body: 'flush',
             footer: [
                 h('span', { class: 'muted small', text: 'Generate' }),
-                chip('model', 'Model classes'), chip('route', 'REST routes'), chip('acl', 'Default access rules'),
+                chip('model', 'Model classes'), chip('route', 'REST routes'), chip('acl', 'Access control (acl.ts)'),
                 h('span', { style: { flex: 1 } }),
                 R.button('Generate for ' + chosen + ' model' + (chosen === 1 ? '' : 's'), {
                     kind: 'primary', icon: 'play', busy: 'Generating…',
-                    disabled: !chosen || nothing || !!S.ui.running || (!!S.project.actions.build && (components.model || components.route)),
+                    disabled: !chosen || nothing || !!S.ui.running || !!S.project.actions.build,
                     title: S.project.actions.build || null,
                     onClick: () => generate(models),
                 }),
             ],
         },
         !build.installed ? h('div', { style: { padding: '14px 20px 0' } }, R.notice('warn', '@rapidd/build is not installed', h('span', null, 'Install the code generator: ', h('code', { text: 'npm install -D @rapidd/build' })))) : null,
+        indexNotice(),
         S.ui.json ? h('div', { style: { padding: '14px 20px 0' } }, R.notice('warn', 'JSON read as text',
             h('span', null, 'MariaDB keeps JSON in LONGTEXT columns, which Prisma reads as String — the API returns ', h('code', { text: S.ui.json.fields.join(', ') }), ' as text instead of JSON.'),
             [R.button('Type as Json', { size: 'sm', kind: 'primary', busy: 'Typing…', disabled: !!S.ui.running, onClick: typeJson })])) : null,
@@ -266,7 +330,9 @@ export function installModelPage(R) {
                 S.ui.selected = models.filter((m) => !m.modelFile.exists || (m.route.kind === 'route' && !m.route.exists)).map((m) => m.name);
                 R.render();
             } }),
-            suggested.length ? R.button('Relation names', { size: 'sm', kind: 'ghost', icon: 'edit', title: 'Clearer names for relations read from the database', onClick: () => renameRelations(suggested) }) : null),
+            suggested.length ? R.button('Relation names', { size: 'sm', kind: 'ghost', icon: 'edit', title: 'Clearer names for relations read from the database', onClick: () => renameRelations(suggested) }) : null,
+            R.button('Indexes', { size: 'sm', kind: 'ghost', icon: 'gauge', busy: 'Analyzing…', title: 'The lookups the API makes, and whether an index serves them',
+                onClick: async () => { if (await loadIndexes()) indexesDialog(); else R.toast('bad', 'The indexes could not be analyzed'); } })),
         h('div', { class: 'table-wrap' }, h('table', { class: 'table' },
             h('thead', null, h('tr', null,
                 h('th', { class: 'shrink' }, h('input', { type: 'checkbox', 'aria-label': 'Select all', checked: allOn, onchange: (e) => {
@@ -281,7 +347,7 @@ export function installModelPage(R) {
                 h('td', null, h('code', { text: m.key.join(', ') || '—' })),
                 h('td', null, m.modelFile.exists ? h('span', { title: m.modelFile.path }, R.icon('check', 'ok-text'), ' ', h('code', { text: m.modelFile.path.replace(/^src\/models\//, '') })) : R.badge('missing', 'warn')),
                 h('td', null, route(m)),
-                h('td', null, h('a', { href: '#/access/' + encodeURIComponent(m.name), onclick: (e) => { e.preventDefault(); S.ui.aclModel = m.name; R.go('access', m.name); } }, access(m)))))))),
+                h('td', null, access(m))))))),
         shown.length === 0 ? R.empty('layers', 'No models match', 'Clear the filter to see every model.') : null,
         build.installed && !build.modelList && chosen > 1 && chosen < models.length
             ? h('div', { class: 'muted small', style: { padding: '10px 20px' }, text: 'This version of @rapidd/build generates one model per run — several models take a little longer.' }) : null);
@@ -309,7 +375,10 @@ export function installModelPage(R) {
             } else {
                 out.push(modelsCard());
             }
-            if (S.ui.output) out.push(R.console(S.ui.output.name === 'build' ? 'rapidd build' : 'prisma ' + S.ui.output.name, S.ui.output.result.output, S.ui.output.result.ok));
+            if (S.ui.output) {
+                const name = S.ui.output.name;
+                out.push(R.console(name === 'build' ? 'rapidd build' : name === 'indexes' ? 'Indexes' : 'prisma ' + name, S.ui.output.result.output, S.ui.output.result.ok));
+            }
             out.push(R.pager('database', 'signin'));
             return out;
         },

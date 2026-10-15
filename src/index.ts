@@ -43,6 +43,7 @@ export {
     LdapProvider,
     WebdavProvider,
     OidcProvider,
+    SamlProvider,
     escapeFilterValue,
     escapeDnValue,
 } from './auth/providers';
@@ -113,9 +114,9 @@ export type {
     LocalProviderConfig,
     LdapProviderConfig,
     OidcProviderConfig,
+    SamlProviderConfig,
     WebdavProviderConfig,
     ResolveUserHelpers,
-    RoleMappingConfig,
     RapiddPluginEntry,
     RouteAuthConfig,
     ModelOptions,

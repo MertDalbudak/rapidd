@@ -3,8 +3,7 @@ import path from 'path';
 import type { RLSVariables, DatabaseProvider, AclConfig } from '../types';
 import * as dmmf from './dmmf';
 import { Logger } from '../utils/Logger';
-import { applyAclDefault, mergeAclRules } from './acl';
-import { aclFromRules } from './aclRules';
+import { applyAclDefault } from './acl';
 import { createAdapter } from './adapter';
 
 export { createAdapter };
@@ -24,7 +23,7 @@ function validateIdentifier(value: string, name: string): string {
     return value;
 }
 
-/** RLS namespace for SQL session variable prefix */
+/** RLS namespace: variables are set as <namespace>.<name> */
 const RLS_NAMESPACE = validateIdentifier(process.env.RLS_NAMESPACE || 'app', 'RLS_NAMESPACE');
 
 // =====================================================
@@ -36,10 +35,14 @@ const baseConnection = createAdapter(process.env.DATABASE_URL || '');
 
 export const dbProvider: DatabaseProvider = baseConnection.provider;
 
-/** Whether RLS is enabled. Auto: true for PostgreSQL, false for MySQL. Override with RLS_ENABLED env var. */
-export const rlsEnabled: boolean = process.env.RLS_ENABLED !== undefined
-    ? process.env.RLS_ENABLED === 'true'
-    : dbProvider === 'postgresql';
+/**
+ * Whether the API sets the RLS variables: PostgreSQL only, unless RLS_ENABLED=false. MySQL and
+ * MariaDB have no row-level security — RLS_ENABLED does nothing there.
+ */
+export const rlsEnabled: boolean = dbProvider === 'postgresql' && process.env.RLS_ENABLED !== 'false';
+if (dbProvider === 'mysql' && process.env.RLS_ENABLED === 'true') {
+    Logger.warn('RLS_ENABLED=true has no effect: MySQL and MariaDB have no row-level security — restrict rows in src/config/acl.ts');
+}
 
 export const authPrisma = new PrismaClient({
     adapter: authConnection.adapter,
@@ -66,16 +69,10 @@ export async function setRLSVariables(tx: any, variables: RLSVariables): Promise
 
     // Batch all variables into ONE statement — RLS wraps every Prisma operation in a
     // transaction, so each extra round trip here is paid on every single query.
-    if (dbProvider === 'mysql') {
-        const assignments = entries.map(([name, value]) =>
-            `@${RLS_NAMESPACE}_${validateIdentifier(name, name)} = '${sanitizeRLSValue(value)}'`);
-        await tx.$executeRawUnsafe(`SET ${assignments.join(', ')}`);
-    } else {
-        // set_config(..., true) is transaction-local — equivalent to SET LOCAL, but batchable
-        const calls = entries.map(([name, value]) =>
-            `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '${sanitizeRLSValue(value)}', true)`);
-        await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
-    }
+    // set_config(..., true) is transaction-local — equivalent to SET LOCAL, but batchable
+    const calls = entries.map(([name, value]) =>
+        `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '${sanitizeRLSValue(value)}', true)`);
+    await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
 }
 
 export async function resetRLSVariables(tx: any, variables: RLSVariables): Promise<void> {
@@ -83,17 +80,18 @@ export async function resetRLSVariables(tx: any, variables: RLSVariables): Promi
     if (names.length === 0) return;
 
     try {
-        if (dbProvider === 'mysql') {
-            const assignments = names.map((name) => `@${RLS_NAMESPACE}_${validateIdentifier(name, name)} = NULL`);
-            await tx.$executeRawUnsafe(`SET ${assignments.join(', ')}`);
-        } else {
-            // Custom GUCs default to '' — set_config(..., '', false) matches RESET, batchable
-            const calls = names.map((name) => `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '', false)`);
-            await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
-        }
+        // Custom GUCs default to '' — set_config(..., '', false) matches RESET, batchable
+        const calls = names.map((name) => `set_config('${RLS_NAMESPACE}.${validateIdentifier(name, name)}', '', false)`);
+        await tx.$queryRawUnsafe(`SELECT ${calls.join(', ')}`);
     } catch {
         // Ignore errors on reset
     }
+}
+
+/** Run with the request's RLS variables set — transaction-local, gone when it ends */
+async function withRLSVariables<T>(tx: any, variables: RLSVariables, run: () => Promise<T>): Promise<T> {
+    await setRLSVariables(tx, variables);
+    return run();
 }
 
 // =====================================================
@@ -112,21 +110,11 @@ export const prisma = rlsEnabled
                 }
 
                 if (operation === '$transaction') {
-                    return basePrisma.$transaction(async (tx: any) => {
-                        await setRLSVariables(tx, variables);
-                        return query(args);
-                    });
+                    return basePrisma.$transaction((tx: any) => withRLSVariables(tx, variables, () => query(args)));
                 }
 
-                return basePrisma.$transaction(async (tx: any) => {
-                    await setRLSVariables(tx, variables);
-
-                    if (model) {
-                        return tx[model][operation](args);
-                    } else {
-                        return tx[operation](args);
-                    }
-                });
+                return basePrisma.$transaction((tx: any) => withRLSVariables(tx, variables,
+                    () => (model ? tx[model][operation](args) : tx[operation](args))));
             },
         },
     })
@@ -150,15 +138,14 @@ export async function prismaTransaction(
     const context = requestContext.getStore();
 
     return basePrisma.$transaction(async (tx: any) => {
+        const run = async () => Array.isArray(callback)
+            ? Promise.all(callback.map((fn: (tx: any) => Promise<any>) => fn(tx)))
+            : callback(tx);
         const variables = context?.variables;
         if (rlsEnabled && variables && Object.keys(variables).length > 0) {
-            await setRLSVariables(tx, variables);
+            return withRLSVariables(tx, variables, run);
         }
-
-        if (Array.isArray(callback)) {
-            return await Promise.all(callback.map((fn: (tx: any) => Promise<any>) => fn(tx)));
-        }
-        return await callback(tx);
+        return run();
     }, options);
 }
 
@@ -199,29 +186,26 @@ initializeDMMF();
 let _acl: AclConfig | null = null;
 export function getAcl(): AclConfig {
     if (!_acl) {
-        // config/acl.json (the setup wizard's rules) applies to every model it lists; it is
-        // loaded first, so a broken file stops the API — rules never fail open
-        const rules = aclFromRules();
         let code: AclConfig = { model: {} };
+        let file: string | null = null;
         try {
-            // eslint-disable-next-line @typescript-eslint/no-require-imports
-            code = require('../config/acl').default || require('../config/acl');
-        } catch (error: any) {
-            if (error?.name === 'AclRulesError') throw error;
-            // A missing code ACL may be intentional (rules only, internal services), but a
-            // broken one (syntax error, bad import) must be loud — otherwise a typo silently
-            // drops every code entry.
-            if (error?.code === 'MODULE_NOT_FOUND') {
-                if (Object.keys(rules).length === 0) {
-                    Logger.warn('No ACL found (config/acl.json, src/config/acl) — ALL models are unrestricted. Add access rules in the setup wizard or an acl.ts.');
-                }
-            } else {
-                Logger.error(`src/config/acl failed to load — only the rules of config/acl.json apply: ${error?.message || error}`);
+            file = require.resolve('../config/acl');
+        } catch {
+            // No acl.ts — may be intentional (internal services); every model is then unrestricted
+            Logger.warn('No src/config/acl.ts — ALL models are unrestricted. Add access control there, or set ACL_DEFAULT=deny.');
+        }
+        if (file) {
+            // A broken acl.ts (syntax error, bad import) stops the API instead of dropping its rules
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-require-imports
+                const mod = require(file);
+                code = mod.default || mod;
+            } catch (error: any) {
+                throw new Error(`src/config/acl failed to load — the API does not start without its access control: ${error?.message || error}`);
             }
         }
-        // An entry in src/config/acl.ts takes its model over with code; ACL_DEFAULT=deny
-        // closes every model that has no entry
-        _acl = applyAclDefault(mergeAclRules(code, rules));
+        // ACL_DEFAULT=deny closes every model without an entry
+        _acl = applyAclDefault(code);
     }
     return _acl!;
 }

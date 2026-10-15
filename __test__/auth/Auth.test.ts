@@ -370,10 +370,10 @@ describe('Auth', () => {
             expect(result!.id).toBe(1);
         });
 
-        it('should return minimal user from sub-only token', async () => {
+        it('should return minimal user from sub-only token — no invented attributes', async () => {
             const token = jwt.sign({ sub: 99 }, TEST_SECRET, { algorithm: 'HS256' });
             const result = await auth.handleBearerAuth(token);
-            expect(result).toEqual({ id: 99, role: 'user' });
+            expect(result).toEqual({ id: 99 });
         });
     });
 

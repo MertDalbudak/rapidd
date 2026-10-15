@@ -1,6 +1,6 @@
 import { ErrorResponse } from '../../core/errors';
 import { Logger } from '../../utils/Logger';
-import type { AuthProvider, ExternalIdentity, LdapProviderConfig, AuthLinkConfig, RoleMappingConfig } from '../../types';
+import type { AuthProvider, ExternalIdentity, LdapProviderConfig, AuthLinkConfig } from '../../types';
 
 const DEFAULT_SEARCH_FILTER =
     '(|(sAMAccountName={{username}})(userPrincipalName={{username}})(uid={{username}})(mail={{username}}))';
@@ -78,7 +78,6 @@ export class LdapProvider implements AuthProvider {
     readonly name: string;
     readonly type = 'ldap';
     readonly link?: AuthLinkConfig | false;
-    readonly roles?: RoleMappingConfig;
     private readonly config: LdapProviderConfig;
     private readonly urls: string[];
     private readonly attributes: { username?: string; email: string; name?: string; groups: string };
@@ -87,7 +86,6 @@ export class LdapProvider implements AuthProvider {
         this.config = config;
         this.name = config.name || 'ldap';
         this.link = config.link;
-        this.roles = config.roles;
         this.urls = (Array.isArray(config.url) ? config.url : [config.url]).filter(Boolean);
 
         if (this.urls.length === 0) {

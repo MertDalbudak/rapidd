@@ -58,6 +58,13 @@ export function getDMMFSync(): DMMF | null {
     return _dmmf;
 }
 
+/** An enum's values — null when the DMMF doesn't know the enum */
+export function getEnumValues(enumName: string): string[] | null {
+    const enums = (_dmmf?.datamodel.enums ?? []) as { name: string; values: { name: string }[] }[];
+    const found = enums.find((e) => e.name === enumName);
+    return found ? found.values.map((v) => v.name) : null;
+}
+
 /**
  * Get a model from the DMMF by name
  */
@@ -119,17 +126,27 @@ export function getPrimaryKey(modelName: string): string | string[] {
     const model = getModel(modelName);
     if (!model) return 'id';
 
-    let pk: string | string[];
-    if (model.primaryKey?.fields && model.primaryKey.fields.length > 0) {
-        pk = model.primaryKey.fields.length === 1
-            ? model.primaryKey.fields[0]
-            : model.primaryKey.fields;
-    } else {
-        const idField = model.fields.find((f: DMMFField) => f.isId);
-        pk = idField ? idField.name : 'id';
-    }
+    const key = keyOf(model);
+    const pk = key.length === 1 ? key[0] : key;
     _primaryKeyCache.set(modelName, pk);
     return pk;
+}
+
+/**
+ * The fields that identify a row of a model: its @id / @@id — or, without one, its first
+ * unique of required fields: a @unique field, else a @@unique. Prisma requires every model to
+ * have one (a table without is left out as @@ignore).
+ */
+export function keyOf(model: Pick<DMMFModel, 'fields' | 'primaryKey' | 'uniqueIndexes'>): string[] {
+    if (model.primaryKey?.fields?.length) return [...model.primaryKey.fields];
+    const id = model.fields.find((f: DMMFField) => f.isId);
+    if (id) return [id.name];
+    const required = (names: string[]) => names.every((n) => model.fields.find((f: DMMFField) => f.name === n)?.isRequired === true);
+    const candidates = [
+        ...model.fields.filter((f: DMMFField) => f.kind !== 'object' && f.isUnique).map((f: DMMFField) => [f.name]),
+        ...(model.uniqueIndexes ?? []).map((index) => [...index.fields]),
+    ];
+    return candidates.find(required) ?? ['id'];
 }
 
 /**
@@ -247,6 +264,26 @@ export function findPasswordField(modelName: string): string | null {
 // =====================================================
 
 /**
+ * A relation field as the write paths read it. The side that holds the foreign key names its
+ * columns and the columns they reference; the other side (a list, or a to-one without the key)
+ * has none — its rows are addressed by their own key.
+ */
+export function relationConfig(rel: DMMFField): RelationConfig {
+    const config: RelationConfig = { name: rel.name, object: rel.type, isList: rel.isList };
+    if (rel.relationName) config.relationName = rel.relationName;
+    const from = rel.relationFromFields ?? [];
+    if (from.length > 0) {
+        config.field = from[0];
+        config.foreignKey = rel.relationToFields?.[0];
+        if (from.length > 1) {
+            config.fields = [...from];
+            config.foreignKeys = [...(rel.relationToFields ?? [])];
+        }
+    }
+    return config;
+}
+
+/**
  * Build relationships configuration for a model (replaces relationships.json).
  * Memoized — callers must treat the returned configs as read-only schema data
  * (QueryBuilder's #ensureRelations only adds idempotent schema-derived enrichment).
@@ -258,33 +295,11 @@ export function buildRelationships(modelName: string): RelationConfig[] {
     const relations = getRelations(modelName);
 
     const configs = relations.map((rel: DMMFField) => {
-        const config: RelationConfig = {
-            name: rel.name,
-            object: rel.type,
-            isList: rel.isList,
-        };
-
-        if (rel.relationFromFields && rel.relationFromFields.length > 0) {
-            config.field = rel.relationFromFields[0];
-            config.foreignKey = rel.relationToFields?.[0] || 'id';
-
-            if (rel.relationFromFields.length > 1) {
-                config.fields = rel.relationFromFields;
-                config.foreignKeys = rel.relationToFields;
-            }
-        }
-
+        const config = relationConfig(rel);
         const targetRelations = getRelations(rel.type);
         if (targetRelations.length > 0) {
-            config.relation = targetRelations.map((nested: DMMFField) => ({
-                name: nested.name,
-                object: nested.type,
-                isList: nested.isList,
-                field: nested.relationFromFields?.[0],
-                foreignKey: nested.relationToFields?.[0] || 'id',
-            }));
+            config.relation = targetRelations.map(relationConfig);
         }
-
         return config;
     });
 

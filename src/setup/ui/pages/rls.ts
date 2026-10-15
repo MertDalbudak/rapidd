@@ -6,8 +6,6 @@ export function installRlsPage(R) {
     const S = R.S;
     const PRESETS = [
         ['current_user_id', 'user.id', 'User id'],
-        ['current_user_role', 'user.role', 'User role'],
-        ['current_tenant_id', 'header.x-tenant-id', 'Tenant (X-Tenant-Id header)'],
     ];
     const COMMANDS = [['ALL', 'All'], ['SELECT', 'Read'], ['INSERT', 'Create'], ['UPDATE', 'Update'], ['DELETE', 'Delete']];
 
@@ -92,8 +90,8 @@ export function installRlsPage(R) {
                             R.button('Add condition', { size: 'sm', icon: 'plus', onClick: () => { spec.match.push({ field: fields[0] ? fields[0].name : '', variable: vars[0] || '' }); d.update(); refresh(); } }),
                             spec.match.length > 1 ? R.seg([['AND', 'All match'], ['OR', 'Any matches']], spec.combine, (v) => { spec.combine = v; d.update(); refresh(); }, { label: 'Combine' }) : null))),
                     h('div', { class: 'form-row' },
-                        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!spec.bypass, onchange: (e) => { spec.bypass = e.target.checked ? { variable: vars.find((v) => /role/.test(v)) || 'current_user_role', value: 'admin' } : null; d.update(); refresh(); } }),
-                            'Every row when a variable has a value (e.g. the administrator role)'),
+                        h('label', { class: 'check' }, h('input', { type: 'checkbox', checked: !!spec.bypass, onchange: (e) => { spec.bypass = e.target.checked ? { variable: '', value: '' } : null; d.update(); refresh(); } }),
+                            'Every row when a variable has a value (e.g. an administrator flag)'),
                         spec.bypass ? h('div', { class: 'row', style: { marginTop: '8px' } },
                             varInput(spec.bypass.variable, (v) => { spec.bypass.variable = v; }, 'p-bypass-var'),
                             h('span', { class: 'muted', text: '=' }),
@@ -156,7 +154,7 @@ export function installRlsPage(R) {
         if (!rules) return R.card({ title: 'Session variables', icon: 'sliders' }, h('div', { style: { padding: '14px 0' } }, R.fileNotice('rls')));
         const vars = rules.variables;
         const entries = Object.entries(vars);
-        const attrs = (S.acl && S.acl.userAttributes) || ['id', 'role'];
+        const attrs = (S.rls && S.rls.userAttributes) || ['id'];
         const rename = (oldName, newName) => {
             const next = {};
             for (const [k, v] of entries) next[k === oldName ? newName : k] = v;
@@ -177,7 +175,7 @@ export function installRlsPage(R) {
                         h('td', null, R.select([['user', 'Signed-in user'], ['header', 'Request header']], kind === 'header' ? 'header' : 'user',
                             (v) => setVariables(Object.assign({}, vars, { [name]: v + '.' + (v === 'header' ? 'x-' + name.replace(/_/g, '-') : 'id') })), { size: 'sm', disabled: readOnly, label: 'Source' })),
                         h('td', null, h('input', { class: 'input sm mono', id: 'rv-path-' + i, value: path, disabled: readOnly, list: kind === 'header' ? null : 'rls-attrs', 'aria-label': kind === 'header' ? 'Header' : 'Attribute',
-                            placeholder: kind === 'header' ? 'x-tenant-id' : 'id', onchange: (e) => setVariables(Object.assign({}, vars, { [name]: (kind === 'header' ? 'header.' : 'user.') + e.target.value.trim() })) })),
+                            placeholder: kind === 'header' ? 'x-gateway-tenant-id' : 'id', onchange: (e) => setVariables(Object.assign({}, vars, { [name]: (kind === 'header' ? 'header.' : 'user.') + e.target.value.trim() })) })),
                         h('td', null, h('code', { class: 'small', text: "current_setting('" + namespace() + '.' + name + "', true)" })),
                         h('td', { class: 'shrink' }, readOnly ? null : R.button('', { kind: 'ghost', size: 'sm', icon: 'trash', aria: 'Remove ' + name, onClick: () => {
                             const next = Object.assign({}, vars);
@@ -188,9 +186,15 @@ export function installRlsPage(R) {
         } else {
             body.push(R.empty('sliders', 'No variables', 'Policies compare columns with variables the API sets per request — from the signed-in user or a header.'));
         }
+        // A client chooses a header's value — isolation must not rest on it alone
+        const headerSources = entries.map(([, source]) => String(source)).filter((x) => x.startsWith('header.')).map((x) => x.slice(7)).filter(Boolean);
+        if (headerSources.length && !readOnly) {
+            body.push(h('div', { style: { padding: '0 20px 14px' } }, R.notice('warn', 'Clients choose header values',
+                'Any client can send ' + headerSources.join(', ') + ' with any value. Use a header only when a gateway in front of the API sets it, or when the policy also checks it against the signed-in user (e.g. tenant membership).')));
+        }
         // A header browsers send cross-origin must be allowed by CORS
         const allowed = (R.value('CORS_ALLOWED_HEADERS') || '').split(',').map((x) => x.trim().toLowerCase()).filter(Boolean);
-        const headers = entries.map(([, source]) => String(source)).filter((x) => x.startsWith('header.')).map((x) => x.slice(7)).filter((x) => x && !allowed.includes(x.toLowerCase()));
+        const headers = headerSources.filter((x) => !allowed.includes(x.toLowerCase()));
         if (headers.length && !readOnly) {
             body.push(h('div', { style: { padding: '0 20px 14px' } }, R.notice('info', 'Browsers need CORS for ' + headers.join(', '),
                 'A browser app on another origin may only send the header when CORS_ALLOWED_HEADERS lists it.',
@@ -266,8 +270,6 @@ export function installRlsPage(R) {
         enter: () => {
             load().catch((err) => R.toast('bad', err.message));
             if (!S.project) R.loadProject().catch(() => undefined);
-            // The user's attributes, offered as variable sources
-            if (!S.acl) R.api('POST', '/acl/context', R.payload()).then((r) => { if (r.models) { S.acl = r; if (S.page === 'rls') R.render(); } });
         },
         render: () => {
             const json = !!S.ui['json-rls'];
@@ -280,9 +282,10 @@ export function installRlsPage(R) {
             const out = [head];
             if (S.rls.error) out.push(R.notice('warn', 'The database could not be read', S.rls.error));
             if (!S.rls.supported) {
-                out.push(R.notice('info', 'MySQL and MariaDB have no row-level security', 'Restrict rows with access control. With RLS_ENABLED=true the variables below are still set (as @' + namespace() + '_<name>) — for views or triggers that read them.'));
+                out.push(R.notice('info', 'MySQL and MariaDB have no row-level security', 'Restrict rows with access control in src/config/acl.ts — Data model & API shows which models have an entry.'));
+                return out;
             }
-            if (S.rls.supported && !S.rls.error) out.push(enforcementCard());
+            if (!S.rls.error) out.push(enforcementCard());
             out.push(variablesCard());
             if (S.rls.supported && !S.rls.error) out.push(tablesCard());
             return out;

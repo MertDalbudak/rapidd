@@ -202,17 +202,14 @@ describe('HTTP setup wizard', () => {
             fs.writeFileSync(path.join(dir, 'config', 'app.json'), '{"services":{"X":{"hostname":"x.test","authorization":{"type":"bearer","token":"${X_TOKEN:-dev}"}}}}');
             await start();
             const state = (await wizard.app.inject({ method: 'GET', url: '/setup/api/state', headers: bearer })).json();
-            expect(state.files).toEqual({ app: expect.stringContaining('X_TOKEN'), rateLimit: null, acl: null, rls: null });
+            expect(state.files).toEqual({ app: expect.stringContaining('X_TOKEN'), rateLimit: null, rls: null, samlIdp: null });
             expect(state.sections.find((s: any) => s.id === 'services').settings[0]).toMatchObject({ key: 'X_TOKEN', type: 'secret', default: 'dev' });
 
             const staged = { app: '{"services":{"X":{"hostname":"x.test","authorization":{"type":"basic","username":"u","password":"${X_PASS}"}}}}',
-                acl: '{"models":{"ghost":{},"user":{"hide":{"*":["passwrd"]}}}}', rls: '{ broken' };
+                rls: '{ broken' };
             const r = (await wizard.app.inject({ method: 'POST', url: '/setup/api/evaluate', headers: bearer, payload: { files: staged } })).json();
             expect(r.sections.find((s: any) => s.id === 'services').settings.map((x: any) => x.key)).toEqual(['X_PASS']);
-            expect(r.fileProblems).toEqual({
-                acl: ['ghost: no such model in the schema', 'user.hide.*: unknown field(s) passwrd'],
-                rls: [expect.stringMatching(/^Invalid JSON/)],
-            });
+            expect(r.fileProblems).toEqual({ rls: [expect.stringMatching(/^Invalid JSON/)] });
         });
 
         it('save: staged files and settings together — nothing is written while one is invalid', async () => {
@@ -224,33 +221,32 @@ describe('HTTP setup wizard', () => {
             expect(fs.existsSync(process.env.ENV_FILE!)).toBe(false);
             expect(fs.existsSync(path.join(dir, 'config'))).toBe(false);
 
-            const acl = '{\n    "models": {\n        "user": {\n            "read": {\n                "*": "all"\n            }\n        }\n    }\n}';
             const ok = await wizard.app.inject({ method: 'POST', url: '/setup/api/save', headers: bearer, payload: {
-                changes: { LOG_FORMAT: 'json' }, files: { rateLimit: '{"/api":{"maxRequests":5,"windowMs":1000}}', acl, unknown: 'x' } } });
+                changes: { LOG_FORMAT: 'json' }, files: { rateLimit: '{"/api":{"maxRequests":5,"windowMs":1000}}', unknown: 'x' } } });
             expect(ok.statusCode).toBe(200);
             const body = ok.json();
-            expect(body.files).toEqual(['config/rate-limit.json', 'config/acl.json']);
-            expect(body.texts.acl).toBe(acl + '\n');
+            expect(body.files).toEqual(['config/rate-limit.json']);
             expect(JSON.parse(fs.readFileSync(path.join(dir, 'config', 'rate-limit.json'), 'utf8'))).toEqual({ '/api': { maxRequests: 5, windowMs: 1000 } });
-            expect(fs.statSync(path.join(dir, 'config', 'acl.json')).mode & 0o777).toBe(0o644);
+            expect(fs.statSync(path.join(dir, 'config', 'rate-limit.json')).mode & 0o777).toBe(0o644);
             expect(dotenv.parse(fs.readFileSync(process.env.ENV_FILE!))).toEqual({ LOG_FORMAT: 'json' });
         });
 
-        it('the logo is public; the data model, access context and policy SQL need the password', async () => {
+        it('the logo is public; the data model, RLS status and policy SQL need the password', async () => {
             await start();
             const logo = await wizard.app.inject({ method: 'GET', url: '/setup/assets/logo.png' });
             expect(logo.statusCode).toBe(200);
             expect(logo.headers['content-type']).toBe('image/png');
             expect(logo.rawPayload.subarray(1, 4).toString()).toBe('PNG');
-            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/acl/context', payload: {} })).statusCode).toBe(401);
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/rls', payload: {} })).statusCode).toBe(401);
 
             const project = (await wizard.app.inject({ method: 'POST', url: '/setup/api/project', headers: bearer, payload: {} })).json();
             expect(project.models.map((m: any) => [m.name, m.route.kind, m.sensitive])).toEqual([['user', 'route', ['password']]]);
             expect(project.build).toEqual(expect.objectContaining({ installed: expect.any(Boolean) }));
             expect(project.routes).toContain('/api/v1/user');
 
-            const acl = (await wizard.app.inject({ method: 'POST', url: '/setup/api/acl/context', headers: bearer, payload: {} })).json();
-            expect(acl).toMatchObject({ userModel: 'user', userAttributes: ['id', 'email'], codeFile: null });
+            // The signed-in user's attributes, offered as RLS variable sources — credentials left out
+            const rls = (await wizard.app.inject({ method: 'POST', url: '/setup/api/rls', headers: bearer, payload: {} })).json();
+            expect(rls.userAttributes).toEqual(['id', 'email']);
 
             const sql = (await wizard.app.inject({ method: 'POST', url: '/setup/api/rls/sql', headers: bearer, payload: {
                 changes: { DATABASE_URL: 'postgresql://u:p@h/db' },
@@ -263,6 +259,20 @@ describe('HTTP setup wizard', () => {
 
             const mysql = (await wizard.app.inject({ method: 'POST', url: '/setup/api/rls', headers: bearer, payload: { changes: { DATABASE_URL: 'mysql://u:p@h/db' } } })).json();
             expect(mysql).toMatchObject({ provider: 'mysql', supported: false, active: false, variablesSource: 'config' });
+        });
+
+        it('indexes: the lookups without one — from the schema alone while the database cannot be read; adding needs ids', async () => {
+            fs.writeFileSync(path.join(dir, 'prisma', 'schema.prisma'), 'datasource db {\n  provider = "postgresql"\n}\nmodel user {\n  id Int @id\n  email String @unique\n  posts post[]\n}\nmodel post {\n  id Int @id\n  user_id Int\n  user user @relation(fields: [user_id], references: [id])\n}\n');
+            await start();
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/schema/indexes', payload: {} })).statusCode).toBe(401);
+            const analysis = (await wizard.app.inject({ method: 'POST', url: '/setup/api/schema/indexes', headers: bearer, payload: {} })).json();
+            expect(analysis).toMatchObject({ provider: 'postgresql', via: 'database', database: { checked: false, error: 'No database connection is set' } });
+            expect(analysis.suggestions.map((s: any) => [s.id, s.source, s.statement])).toEqual([['post:user_id', 'missing', undefined]]);
+            expect(analysis.notes).toContain('Set the database connection to add them');
+
+            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/schema/indexes/apply', headers: bearer, payload: { ids: [] } })).statusCode).toBe(400);
+            const apply = (await wizard.app.inject({ method: 'POST', url: '/setup/api/schema/indexes/apply', headers: bearer, payload: { ids: ['post:user_id'] } })).json();
+            expect(apply).toMatchObject({ ok: false, message: 'post (user_id): no SQL for it' });
         });
 
         it('service test: with the staged config/app.json and unsaved settings', async () => {
@@ -327,14 +337,13 @@ describe('HTTP setup wizard', () => {
             }
         });
 
-        it('no sign-in: no JWT secrets are written, no first user offered, the anonymous role is known', async () => {
+        it('no sign-in: no JWT secrets are written, no first user offered', async () => {
             fs.mkdirSync(path.join(dir, 'prisma', 'client'));
             fs.writeFileSync(path.join(dir, 'prisma', 'client', 'index.js'), 'module.exports = {};');
             await start();
             const changes = { DATABASE_URL: 'postgresql://u:p@h/db', AUTH_PROVIDERS: 'none' };
             expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/admin/status', headers: bearer, payload: { changes } })).json())
                 .toEqual({ available: false, reason: 'Sign-in is off (AUTH_PROVIDERS=none) — the API needs no accounts' });
-            expect((await wizard.app.inject({ method: 'POST', url: '/setup/api/acl/context', headers: bearer, payload: { changes } })).json().roles).toContain('anonymous');
             const r = await wizard.app.inject({ method: 'POST', url: '/setup/api/finish', headers: bearer, payload: { changes } });
             expect(r.json()).toMatchObject({ ok: true });
             const env = dotenv.parse(fs.readFileSync(process.env.ENV_FILE!));

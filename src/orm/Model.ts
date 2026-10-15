@@ -1,8 +1,9 @@
 import { QueryBuilder } from './QueryBuilder';
 import { isRawOperation, rawOperationPayloads } from './nestedOperations';
-import { parseScalar } from './values';
+import { parseScalar, keyText } from './values';
 import { prisma, prismaTransaction, getAcl, dbProvider, rlsActive } from '../core/prisma';
 import { modelMiddleware } from '../core/middleware';
+import { guardAclFilter } from '../core/acl';
 import { ErrorResponse } from '../core/errors';
 import { isSystemUser, createSystemUser, getDefaultUser } from '../core/user';
 import * as dmmf from '../core/dmmf';
@@ -19,7 +20,7 @@ import type { RapiddUser, ModelOptions, GetManyOptions, GetManyResult, UpsertMan
  *     }
  * }
  *
- * const users = new Users({ user: { id: '123', role: 'admin' } });
+ * const users = new Users({ user: { id: '123' } });
  * const result = await users.getMany({ include: 'profile', limit: 10 });
  *
  * @example
@@ -58,7 +59,7 @@ class Model {
         this.acl = aclConfig.model[name] || {};
         this.options = options || {};
         // Resolve the acting user: explicit > app-configured default (src/config/user.ts) >
-        // framework system user (bypasses ACL). No hardcoded id/role — the old
+        // framework system user (bypasses ACL). No hardcoded identity — the old
         // { id: 'system', role: 'application' } assumed a string PK and a magic role value.
         this.user = this.options.user ?? getDefaultUser() ?? createSystemUser();
         this.user_id = this.user ? this.user.id : null;
@@ -88,6 +89,22 @@ class Model {
     get defaultSortField(): string {
         const pk = this.primaryKeyFields;
         return Array.isArray(pk) ? pk[0] : pk;
+    }
+
+    /**
+     * The order of rows without a requested sort: by the model's key. Without an ORDER BY the
+     * database returns rows in any order, and offset pages could repeat or skip rows.
+     */
+    #keyOrder(): Record<string, 'asc'>[] | undefined {
+        const key = this.primaryKeyFields;
+        const fields = Array.isArray(key) ? key : [key];
+        return fields.every((field: string) => this.fields[field] != null) ? fields.map((field: string) => ({ [field]: 'asc' as const })) : undefined;
+    }
+
+    /** A requested sort, then the key: rows that tie on the sort keep one order across pages too */
+    #withKeyOrder(sort: Record<string, any>): Record<string, any> | Record<string, any>[] {
+        const tieBreak = (this.#keyOrder() ?? []).filter((order) => !(Object.keys(order)[0] in sort));
+        return tieBreak.length > 0 ? [sort, ...tieBreak] : sort;
     }
 
     /**
@@ -215,6 +232,25 @@ class Model {
     }
 
     /**
+     * A write under the user's update or delete rule that finds no row: 403 when the row exists
+     * but the rule leaves it out (as a read of a hidden row answers), 404 when there is none. A
+     * miss from elsewhere (a nested link to a missing row) keeps its own error.
+     */
+    async #outsideRule<T>(write: () => Promise<T>, whereId: Record<string, any>, rule: any, denied: string): Promise<T> {
+        try {
+            return await write();
+        } catch (error: any) {
+            if (error?.code !== 'P2025') throw error;
+            // Unique lookups: a composite key's selector is valid in findUnique only
+            const select = this.#buildPrimaryKeySelect();
+            const restricted = !!rule && typeof rule === 'object' && Object.keys(rule).length > 0;
+            if (!await this.prisma.findUnique({ where: whereId, select })) throw new ErrorResponse(404, "record_not_found");
+            if (!restricted || await this.prisma.findUnique({ where: { ...whereId, AND: [rule] }, select })) throw error;
+            throw new ErrorResponse(403, denied);
+        }
+    }
+
+    /**
      * Coerce a key value to its column type, rejecting values that don't fit with 400 `invalid_id`
      */
     #coercePrimaryKeyValue(fieldName: string, value: unknown): unknown {
@@ -250,17 +286,17 @@ class Model {
     /** Transform data for create operation */
     _queryCreate = (data: Record<string, any>): Record<string, any> => this.queryBuilder.create(data, this.user);
     /** Transform data for update operation */
-    _queryUpdate = (id: string | number, data: Record<string, any>): Record<string, any> => this.queryBuilder.update(id, data, this.user);
+    _queryUpdate = (id: string | number | Record<string, any>, data: Record<string, any>): Record<string, any> => this.queryBuilder.update(id, data, this.user);
 
     // ACL METHODS
     /** Check if user can create records */
     _canCreate = (data?: Record<string, any>): boolean => this.acl.canCreate ? this.acl.canCreate(this.user, data) : true;
     /** Get access filter from ACL */
-    _getAccessFilter = (): any => this.acl.getAccessFilter?.(this.user);
+    _getAccessFilter = (): any => guardAclFilter(this.acl.getAccessFilter?.(this.user), this.name, 'getAccessFilter');
     /** Get update filter from ACL */
-    _getUpdateFilter = (): any => this.acl.getUpdateFilter?.(this.user);
+    _getUpdateFilter = (): any => guardAclFilter(this.acl.getUpdateFilter?.(this.user), this.name, 'getUpdateFilter');
     /** Get delete filter from ACL */
-    _getDeleteFilter = (): any => this.acl.getDeleteFilter?.(this.user);
+    _getDeleteFilter = (): any => guardAclFilter(this.acl.getDeleteFilter?.(this.user), this.name, 'getDeleteFilter');
     /** Get fields to omit from response */
     _omit = (): Record<string, boolean> | undefined => this.queryBuilder.omit(this.user) as Record<string, boolean> | undefined;
 
@@ -286,8 +322,7 @@ class Model {
             where: scope = {},
         } = opts;
 
-        // No default sort — without an explicit sort the DB decides the order
-        // (a forced id:asc breaks models without an 'id' column)
+        // Without a sort, rows come by the model's key (see #keyOrder); with one, the key breaks ties
         const sortBy = typeof opts.sortBy === 'string' && opts.sortBy.trim() !== '' ? opts.sortBy.trim() : null;
         const sortOrder = (opts.sortOrder ?? 'asc').trim();
 
@@ -296,7 +331,7 @@ class Model {
 
         // Validate an explicitly provided sort field
         if (sortBy && !sortBy.includes('.') && this.fields[sortBy] == undefined) {
-            throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.constructor.name });
+            throw new ErrorResponse(400, "invalid_sort_field", { sortBy, modelName: this.name });
         }
 
         // Execute before middleware
@@ -322,7 +357,7 @@ class Model {
             : Object.keys(clientFilter).length === 0 ? serverScope
                 : { AND: [clientFilter, serverScope] };
         const effectiveSortBy = beforeCtx.sortBy || sortBy;
-        const orderByClause = effectiveSortBy ? this.sort(effectiveSortBy, beforeCtx.sortOrder || sortOrder) : undefined;
+        const orderByClause = effectiveSortBy ? this.#withKeyOrder(this.sort(effectiveSortBy, beforeCtx.sortOrder || sortOrder)) : this.#keyOrder();
         const extraOptions = beforeCtx.options || {};
 
         let result: GetManyResult;
@@ -435,20 +470,23 @@ class Model {
 
         // CHECK CREATE PERMISSION
         if (!this.canCreate(data)) {
-            throw new ErrorResponse(403, "no_permission_to_create");
+            throw new ErrorResponse(403, "no_permission_to_create", { model: this.name });
         }
 
+        // What the user may not write is gone before the hooks run — what a hook sets is the server's
+        const clientData = this.queryBuilder.sanitizeRow(data, this.user);
+
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'create', { data: { ...data }, options });
+        const beforeCtx = await this._executeMiddleware('before', 'create', { data: { ...clientData }, options });
 
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
 
-        const createData = beforeCtx.data || data;
+        const createData = beforeCtx.data || clientData;
 
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object)
-        const transformedData = this._queryCreate(createData);
+        const transformedData = this.queryBuilder.create(createData, this.user, { stripped: true });
 
         // CREATE — apply the ACL omit clause so write responses don't leak hidden fields (e.g. password)
         const createOmit = this._omit();
@@ -484,32 +522,35 @@ class Model {
             throw new ErrorResponse(403, "no_permission_to_update");
         }
 
+        // What the user may not write is gone before the hooks run — what a hook sets is the server's
+        const clientData = this.queryBuilder.sanitizeRow(inputData, this.user);
+
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'update', { id, data: { ...inputData }, options });
+        const beforeCtx = await this._executeMiddleware('before', 'update', { id, data: { ...clientData }, options });
 
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
 
         const targetId = beforeCtx.id || id;
-        const updateData = beforeCtx.data || inputData;
+        const updateData = beforeCtx.data || clientData;
         const whereId = this.buildWhereId(targetId);
 
         // VALIDATE PASSED FIELDS AND RELATIONSHIPS (returns new transformed object).
-        // Nested n:m writes use the parent id: pass the coerced value, not the URL string.
-        const parentId = this.isCompositePK ? targetId : whereId[this.primaryKeyFields as string];
-        const transformedData = this._queryUpdate(parentId as string | number, updateData);
+        // The row's key, coerced (not the URL string): nested items take their part of it
+        const key = this.isCompositePK ? Object.values(whereId)[0] : whereId[this.primaryKeyFields as string];
+        const transformedData = this.queryBuilder.update(key, updateData, this.user, { stripped: true });
 
         const updateOmit = this._omit();
         const { include: updateInclude, ...updateOptions } = (beforeCtx.options || options) as Record<string, any>;
         const updateRelations = this.#writeInclude(updateInclude);
-        const result = await this.prisma.update({
+        const result = await this.#outsideRule(() => this.prisma.update({
             'where': this.#mergeAclIntoUniqueWhere(whereId, updateFilter),
             'data': transformedData,
             ...(updateRelations ? { include: updateRelations } : {}),
             ...(updateOmit && Object.keys(updateOmit).length > 0 ? { omit: updateOmit } : {}),
             ...updateOptions
-        });
+        }), whereId, updateFilter, 'no_permission_to_update');
 
         if (!result) {
             throw new ErrorResponse(403, "no_permission");
@@ -541,21 +582,24 @@ class Model {
             throw new ErrorResponse(403, "no_permission_to_update");
         }
 
+        // What the user may not write is gone before the hooks run — what a hook sets is the server's
+        const clientData = this.queryBuilder.sanitizeRow(data, this.user);
+
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'upsert', { data: { ...data }, unique_key, options });
+        const beforeCtx = await this._executeMiddleware('before', 'upsert', { data: { ...clientData }, unique_key, options });
 
         if (beforeCtx.abort) {
             return beforeCtx.result;
         }
 
-        const upsertData = beforeCtx.data || data;
+        const upsertData = beforeCtx.data || clientData;
         const targetKey = this.#resolveUniqueKey(beforeCtx.unique_key || unique_key);
 
         // create() and update() are now pure - they return new objects without mutating input
-        const createData = this.queryBuilder.create(upsertData, this.user);
+        const createData = this.queryBuilder.create(upsertData, this.user, { stripped: true });
 
-        // Nested n:m writes use the parent id (unknown when upserting by another unique key)
-        const updateData = this.queryBuilder.update(this.isCompositePK ? null : upsertData[this.primaryKey] ?? null, upsertData, this.user);
+        // The row's key, where the data carries it (not when upserting by another unique key)
+        const updateData = this.queryBuilder.update(upsertData, upsertData, this.user, { stripped: true });
 
         // Build where clause with ACL update filter
         const whereId = this.buildWhereUniqueKey(targetKey, upsertData);
@@ -613,21 +657,25 @@ class Model {
         const useTransaction = options.transaction ?? true;
         const timeout = options.timeout ?? 30000;
 
+        // What the user may not write is gone before the hooks run — what a hook sets is the server's
+        const clientData = data.map((record: Record<string, any>) => this.queryBuilder.sanitizeRow(record, this.user));
+
         // Execute before middleware
-        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data, unique_key, prismaOptions });
+        const beforeCtx = await this._executeMiddleware('before', 'upsertMany', { data: clientData, unique_key, prismaOptions });
 
         if (beforeCtx.abort) {
             return beforeCtx.result as UpsertManyResult;
         }
 
-        const upsertData: Record<string, any>[] = (Array.isArray(beforeCtx.data) ? beforeCtx.data : data) as Record<string, any>[];
+        const upsertData: Record<string, any>[] = (Array.isArray(beforeCtx.data) ? beforeCtx.data : clientData) as Record<string, any>[];
         const targetKey: string | string[] = this.#resolveUniqueKey(beforeCtx.unique_key || unique_key);
         const _prismaOptions: Record<string, any> = beforeCtx.prismaOptions || prismaOptions;
 
         // Define the upsert operation logic
         const executeUpsertMany = async (tx: any): Promise<UpsertManyResult> => {
             const keyFields: string[] = Array.isArray(targetKey) ? targetKey : [targetKey];
-            const keyOf = (record: Record<string, any>): string => keyFields.map((k: string) => String(record[k])).join('\u0000');
+            // Compared as text the way the database stores them — a date key comes back a Date, '1.50' as 1.5
+            const keyOf = (record: Record<string, any>): string => keyFields.map((k: string) => keyText(this.fields[k], record[k])).join('\u0000');
 
             // Which records exist: one query per 1000 keys, matched through a Set (plain field
             // equality — compound selectors are only valid in WhereUniqueInput, not in findMany)
@@ -715,8 +763,7 @@ class Model {
                 // Exists — or is created earlier in this batch, so a repeated key updates that row
                 if (key !== null && (existingKeys.has(key) || pendingCreates.has(key))) {
                     // Record exists, prepare for update (pure - returns new object)
-                    const parentId = this.isCompositePK ? null : record[this.primaryKey] ?? null;
-                    updateRecords.push({ original: record, transformed: this.queryBuilder.update(parentId, record, this.user) });
+                    updateRecords.push({ original: record, transformed: this.queryBuilder.update(record, record, this.user, { stripped: true }) });
                 } else {
                     // Record doesn't exist, prepare for create — check per-record create permission
                     if (!this.canCreate(record)) {
@@ -725,10 +772,10 @@ class Model {
                     if (key !== null) pendingCreates.add(key);
                     createRecords.push({
                         original: record,
-                        // createMany takes plain rows: strip what the ACL hides / doesn't allow writing
+                        // createMany takes plain rows (stripped of what the user may not write before the hooks)
                         transformed: validateRelation
-                            ? this.queryBuilder.create(record, this.user)
-                            : this.queryBuilder.sanitizeRow(record, this.user),
+                            ? this.queryBuilder.create(record, this.user, { stripped: true })
+                            : { ...record },
                     });
                 }
             }
@@ -856,12 +903,12 @@ class Model {
 
         // Support soft delete via middleware
         if (beforeCtx.softDelete && beforeCtx.data) {
-            const result = await this.prisma.update({
+            const result = await this.#outsideRule(() => this.prisma.update({
                 'where': this.#mergeAclIntoUniqueWhere(whereId, deleteFilter),
                 'data': beforeCtx.data,
                 'select': this.select(),
                 ...(beforeCtx.options || options)
-            });
+            }), whereId, deleteFilter, 'no_permission_to_delete');
 
             const afterCtx = await this._executeMiddleware('after', 'delete', { id: targetId, result, softDelete: true, state: beforeCtx.state });
             return afterCtx.result || result;
@@ -875,11 +922,11 @@ class Model {
         for (const [name, field] of Object.entries(this.fields)) {
             if ((field as { kind?: string }).kind !== 'object') scalars[name] = true;
         }
-        const result = await this.prisma.delete({
+        const result = await this.#outsideRule(() => this.prisma.delete({
             'where': this.#mergeAclIntoUniqueWhere(whereId, deleteFilter),
             'select': scalars,
             ...(beforeCtx.options || options)
-        });
+        }), whereId, deleteFilter, 'no_permission_to_delete');
 
         if (!result) {
             throw new ErrorResponse(403, "no_permission");

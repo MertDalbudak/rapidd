@@ -1,7 +1,7 @@
 /**
  * HTTP-level tests for the auth plugin: cookie sessions, logout/refresh transports,
- * the provider list, redirect validation, and a complete OIDC browser login against
- * a real (mock) identity provider.
+ * the provider list, redirect validation, and complete OIDC and SAML browser logins against
+ * (mock) identity providers.
  */
 import bcrypt from 'bcrypt';
 
@@ -40,11 +40,13 @@ jest.mock('../../src/core/dmmf', () => ({
 
 import Fastify, { FastifyInstance } from 'fastify';
 import fastifyCookie from '@fastify/cookie';
+import fastifyFormbody from '@fastify/formbody';
 import authPlugin from '../../src/plugins/auth';
 import responsePlugin from '../../src/plugins/response';
 import { Auth } from '../../src/auth/Auth';
 import { SessionStoreManager } from '../../src/auth/stores';
 import { startMockIdp, MockIdp } from '../helpers/mockIdp';
+import { idpMetadata, readRequest, samlResponse } from '../helpers/samlIdp';
 import type { AuthOptions } from '../../src/types';
 
 const PASSWORD = 'pw-123456';
@@ -52,6 +54,7 @@ const PASSWORD = 'pw-123456';
 async function buildApp(authOptions: AuthOptions = {}, cookieSecret?: string): Promise<{ app: FastifyInstance; auth: Auth }> {
     const app = Fastify();
     await app.register(fastifyCookie, { secret: cookieSecret });
+    await app.register(fastifyFormbody);
     await app.register(responsePlugin);
     const auth = new Auth({
         jwt: { secret: 's'.repeat(40), refreshSecret: 'r'.repeat(40), accessExpiry: '15m', refreshExpiry: '7d' },
@@ -75,6 +78,11 @@ function cookiesOf(response: { headers: Record<string, any> }) {
         map[name] = value.join('=');
     }
     return { map, raw };
+}
+
+/** The state cookie a redirect login set — one per sign-in, named after its state — as inject's `cookies` */
+function stateCookieOf(response: { headers: Record<string, any> }): Record<string, string> {
+    return Object.fromEntries(Object.entries(cookiesOf(response).map).filter(([name, value]) => name.startsWith('rapidd_auth_state_') && value));
 }
 
 beforeAll(async () => {
@@ -212,8 +220,8 @@ describe('OIDC browser login', () => {
     async function loginThroughIdp(app: FastifyInstance, redirect?: string) {
         const start = await app.inject({ method: 'GET', url: `/auth/idp/login${redirect ? `?redirect=${encodeURIComponent(redirect)}` : ''}` });
         expect(start.statusCode).toBe(302);
-        const stateCookie = cookiesOf(start).map.rapidd_auth_state;
-        expect(stateCookie).toBeTruthy();
+        const stateCookie = stateCookieOf(start);
+        expect(Object.keys(stateCookie)).toHaveLength(1);
 
         // The browser visits the IdP, which redirects back to our callback
         const atIdp = await fetch(start.headers.location as string, { redirect: 'manual' });
@@ -223,7 +231,7 @@ describe('OIDC browser login', () => {
         return app.inject({
             method: 'GET',
             url: `${callback.pathname}${callback.search}`,
-            cookies: { rapidd_auth_state: stateCookie },
+            cookies: stateCookie,
         });
     }
 
@@ -248,6 +256,28 @@ describe('OIDC browser login', () => {
 
         const replay = await app.inject({ method: 'POST', url: '/auth/exchange', payload: { ticket } });
         expect(replay.statusCode).toBe(400);
+        await app.close();
+    });
+
+    it('two tabs signing in at once both land — each callback takes only its own state', async () => {
+        const { app } = await withIdp();
+        // Both begin in the same instant — neither request carries the other's cookie
+        const [startA, startB] = await Promise.all([
+            app.inject({ method: 'GET', url: '/auth/idp/login?redirect=/a' }),
+            app.inject({ method: 'GET', url: '/auth/idp/login?redirect=/b' }),
+        ]);
+        // The browser keeps both cookies: one per sign-in
+        const jar = { ...stateCookieOf(startA), ...stateCookieOf(startB) };
+        expect(Object.keys(jar)).toHaveLength(2);
+        const back = async (start: any) => new URL((await fetch(start.headers.location as string, { redirect: 'manual' })).headers.get('location')!);
+        const callbackA = await back(startA);
+        const callbackB = await back(startB);
+
+        const doneA = await app.inject({ method: 'GET', url: `${callbackA.pathname}${callbackA.search}`, cookies: jar });
+        expect(new URL(doneA.headers.location as string, 'http://api.test').pathname).toBe('/a');
+        const doneB = await app.inject({ method: 'GET', url: `${callbackB.pathname}${callbackB.search}`, cookies: jar });
+        expect(new URL(doneB.headers.location as string, 'http://api.test').pathname).toBe('/b');
+        expect(doneB.headers.location).toMatch(/auth_ticket=/);
         await app.close();
     });
 
@@ -303,6 +333,95 @@ describe('OIDC browser login', () => {
             expect(res.json().key).toBe('auth_not_configured');
             await app.close();
         });
+    });
+});
+
+describe('SAML browser login', () => {
+    const ACS = 'https://api.example.com/auth/saml/callback';
+    const withSaml = (options: AuthOptions = {}) => {
+        process.env.PUBLIC_URL = 'https://api.example.com';
+        return buildApp({ providers: [{ type: 'local' }, { type: 'saml', idpMetadata: idpMetadata() }], ...options });
+    };
+
+    /** The login begun in a browser: the IdP's URL and the browser's state cookie */
+    async function begin(app: FastifyInstance) {
+        const start = await app.inject({ method: 'GET', url: '/auth/saml/login' });
+        expect(start.statusCode).toBe(302);
+        return { request: readRequest(start.headers.location as string), cookie: stateCookieOf(start) };
+    }
+
+    /** The IdP's form POST: cross-site — no cookies; its origin is the IdP's */
+    const post = (app: FastifyInstance, SAMLResponse: string, RelayState: string) => app.inject({
+        method: 'POST', url: '/auth/saml/callback',
+        headers: { 'content-type': 'application/x-www-form-urlencoded', origin: 'https://idp.example.com' },
+        payload: new URLSearchParams({ SAMLResponse, RelayState }).toString(),
+    });
+
+    it('IdP → form POST → 303 to the GET callback, which carries the state cookie → ticket → the linked user', async () => {
+        const { app } = await withSaml();
+        const { request, cookie } = await begin(app);
+        expect(request.acs).toBe(ACS);
+        const SAMLResponse = await samlResponse({ inResponseTo: request.id, attributes: [['email', 'alice@example.com']] });
+
+        const posted = await post(app, SAMLResponse, request.relayState);
+        expect(posted.statusCode).toBe(303);
+        const next = new URL(posted.headers.location as string);
+        expect(next.origin + next.pathname).toBe(ACS);
+        expect(next.searchParams.get('state')).toBe(request.relayState);
+
+        const callback = await app.inject({ method: 'GET', url: `${next.pathname}${next.search}`, cookies: cookie });
+        expect(callback.statusCode).toBe(302);
+        const ticket = new URL(callback.headers.location as string, 'https://x').searchParams.get('auth_ticket')!;
+        const exchange = await app.inject({ method: 'POST', url: '/auth/exchange', payload: { ticket } });
+        expect(exchange.json().user).toEqual({ id: 1, email: 'alice@example.com', role: 'admin' });
+
+        // The same answer again: its request id is spent
+        const replay = await post(app, SAMLResponse, request.relayState);
+        expect(replay.headers.location).toBe('/?auth_error=auth_login_failed');
+        await app.close();
+    });
+
+    it('an answer meant for another browser does not log this one in (login CSRF)', async () => {
+        const { app } = await withSaml();
+        const attacker = await begin(app);
+        const victim = await begin(app);
+        const attackersAnswer = await samlResponse({ inResponseTo: attacker.request.id, attributes: [['email', 'alice@example.com']] });
+
+        // Posted under the victim's state — the request id is not the victim's
+        const posted = await post(app, attackersAnswer, victim.request.relayState);
+        const next = new URL(posted.headers.location as string);
+        const res = await app.inject({ method: 'GET', url: `${next.pathname}${next.search}`, cookies: victim.cookie });
+        expect(res.headers.location).toBe('/?auth_error=auth_login_failed');
+
+        // Posted under the attacker's own state — the victim's browser lacks its cookie
+        const own = await post(app, await samlResponse({ inResponseTo: (await begin(app)).request.id }), attacker.request.relayState);
+        expect(own.statusCode).toBe(303);
+        await app.close();
+    });
+
+    it('a parked answer is taken once, with the state it was parked for', async () => {
+        const { app } = await withSaml();
+        const { request, cookie } = await begin(app);
+        const posted = await post(app, await samlResponse({ inResponseTo: request.id }), request.relayState);
+        const next = new URL(posted.headers.location as string);
+        const forged = new URL(next);
+        forged.searchParams.set('response', 'not-the-key');
+        const bad = await app.inject({ method: 'GET', url: `${forged.pathname}${forged.search}`, cookies: cookie });
+        expect(bad.headers.location).toBe('/?auth_error=auth_login_failed');
+        await app.close();
+    });
+
+    it('serves this API\'s metadata; the provider list offers the login', async () => {
+        const { app } = await withSaml();
+        const metadata = await app.inject({ method: 'GET', url: '/auth/saml/metadata' });
+        expect(metadata.statusCode).toBe(200);
+        expect(metadata.headers['content-type']).toMatch(/^application\/samlmetadata\+xml/);
+        expect(metadata.body).toContain('entityID="https://api.example.com/auth/saml/metadata"');
+        expect(metadata.body).toContain(`Location="${ACS}"`);
+        expect((await app.inject({ method: 'GET', url: '/auth/local/metadata' })).statusCode).toBe(404);
+        const providers = (await app.inject({ method: 'GET', url: '/auth/providers' })).json().providers;
+        expect(providers).toContainEqual({ name: 'saml', type: 'saml', password: false, redirect: true, loginUrl: '/auth/saml/login' });
+        await app.close();
     });
 });
 

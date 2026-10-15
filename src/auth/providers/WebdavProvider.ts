@@ -1,6 +1,6 @@
 import { ErrorResponse } from '../../core/errors';
 import { Logger } from '../../utils/Logger';
-import type { AuthProvider, ExternalIdentity, WebdavProviderConfig, AuthLinkConfig, RoleMappingConfig } from '../../types';
+import type { AuthProvider, ExternalIdentity, WebdavProviderConfig, AuthLinkConfig } from '../../types';
 
 /**
  * WebDAV password provider — validates credentials by issuing an authenticated
@@ -15,7 +15,6 @@ export class WebdavProvider implements AuthProvider {
     readonly name: string;
     readonly type = 'webdav';
     readonly link?: AuthLinkConfig | false;
-    readonly roles?: RoleMappingConfig;
     private readonly url: string;
     private readonly timeout: number;
     private readonly urlNamesUser: boolean;
@@ -23,7 +22,6 @@ export class WebdavProvider implements AuthProvider {
     constructor(config: WebdavProviderConfig) {
         this.name = config.name || 'webdav';
         this.link = config.link;
-        this.roles = config.roles;
         this.url = config.url;
         this.timeout = config.timeout ?? 5000;
         this.urlNamesUser = this.url.includes('{{username}}');

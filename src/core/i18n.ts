@@ -94,6 +94,7 @@ export class LanguageDict {
             translated = translated.replace(RE_PARAMS, (match: string, paramKey: string) => {
                 const value = data[paramKey];
                 if (value === undefined) return match;
+                if (Array.isArray(value)) return value.join(', ');
                 // Objects would render as "[object Object]" — show their JSON instead
                 if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
                     try { return JSON.stringify(value); } catch { return match; }

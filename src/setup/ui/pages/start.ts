@@ -4,7 +4,7 @@
 export function installStartPages(R) {
     const h = R.h;
     const S = R.S;
-    const AUTH_SECTIONS = ['providers', 'tokens', 'sessions', 'transport', 'users', 'identities', 'ldap', 'oidc', 'webdav'];
+    const AUTH_SECTIONS = ['providers', 'tokens', 'sessions', 'transport', 'users', 'identities', 'ldap', 'oidc', 'saml', 'webdav'];
 
     /** AUTH_PROVIDERS=none: no sign-in, every request is anonymous */
     R.signInOff = () => (R.value('AUTH_PROVIDERS') || '').split(',').map((x) => x.trim().toLowerCase()).includes('none');
@@ -14,7 +14,6 @@ export function installStartPages(R) {
         if (/^(DATABASE_|REDIS_)/.test(key)) return 'database';
         if (/^(JWT_|AUTH_|LDAP_|OIDC_|WEBDAV_|DB_USER_)/.test(key)) return 'signin';
         if (key === 'prisma/client' || key === 'prisma/schema.prisma') return 'model';
-        if (/acl\.json$/.test(key)) return 'access';
         if (/rls\.json$/.test(key)) return 'rls';
         return 'environment';
     };
@@ -34,7 +33,6 @@ export function installStartPages(R) {
         const p = S.state.project;
         const services = Object.keys((R.fileJson('app', {}) || {}).services || {}).length;
         const limits = Object.keys(R.fileJson('rateLimit', {}) || {}).length;
-        const rules = Object.keys(((R.fileJson('acl', {}) || {}).models) || {}).length;
         const steps = [
             { page: 'database', title: 'Database', state: R.byId.database.status(),
                 text: R.hasValue('DATABASE_URL') ? (S.checks.database && S.checks.database.ok ? 'Connected — ' + S.checks.database.message : 'Connection string set' + (S.checks.database ? '' : ' — test it')) : 'Connect the API to PostgreSQL, MySQL or MariaDB' },
@@ -45,8 +43,10 @@ export function installStartPages(R) {
                 text: R.signInOff() ? 'No sign-in — every request is anonymous' : 'Identity providers, tokens and sessions — ' + (R.value('AUTH_PROVIDERS') || 'local') },
             { page: 'admin', title: 'First user', state: R.byId.admin.status(), optional: true,
                 text: R.signInOff() ? 'Not needed — there is no sign-in' : S.admin ? (S.admin.available ? 'The user table is empty — create the first account' : S.admin.reason) : 'The first account, while the user table is empty' },
-            { page: 'access', title: 'Access control', state: R.byId.access.status(),
-                text: p.schema.models.length === 0 ? 'Rules per model and role' : p.acl.missing.length ? p.acl.missing.length + ' of ' + p.schema.models.length + ' models without rules' : 'Every model has rules (' + rules + ' in config/acl.json)' },
+            { page: 'model', title: 'Access control', state: p.schema.models.length === 0 ? '' : p.acl.error ? 'bad' : p.acl.missing.length ? 'warn' : 'ok',
+                text: p.acl.error ? 'src/config/acl.ts does not load: ' + p.acl.error
+                    : p.schema.models.length === 0 ? 'In code — src/config/acl.ts'
+                        : p.acl.missing.length ? p.acl.missing.length + ' of ' + p.schema.models.length + ' models without an entry in src/config/acl.ts' : 'Every model has an entry in src/config/acl.ts' },
             { page: 'rls', title: 'Row-level security', state: '', text: 'Database-enforced isolation (PostgreSQL)', optional: true },
             { page: 'services', title: 'Services', state: '', text: services ? services + ' external API' + (services === 1 ? '' : 's') + ' configured' : 'APIs your app calls with ApiClient', optional: true },
             { page: 'ratelimits', title: 'Rate limits', state: '', text: limits ? limits + ' path rule' + (limits === 1 ? '' : 's') : 'Default limit only', optional: true },
@@ -121,14 +121,14 @@ export function installStartPages(R) {
         status: () => R.groupState(AUTH_SECTIONS),
         render: () => {
             const providers = (R.value('AUTH_PROVIDERS') || 'local').split(',').map((x) => x.trim()).filter(Boolean);
-            const out = [R.pageHead('Sign-in', 'How users sign in: local accounts, LDAP / Active Directory, OpenID Connect (Entra ID, Keycloak, Okta, …) or WebDAV — and the tokens and sessions they get. Or no sign-in at all.')];
+            const out = [R.pageHead('Sign-in', 'How users sign in: local accounts, LDAP / Active Directory, OpenID Connect or SAML (Entra ID, ADFS, Keycloak, Okta, …) or WebDAV — and the tokens and sessions they get. Or no sign-in at all.')];
             const noSignIn = R.button('No sign-in', { size: 'sm', icon: 'globe', disabled: R.info('AUTH_PROVIDERS').locked, onClick: () => R.setValue('AUTH_PROVIDERS', 'none', true) });
             if (R.signInOff()) {
                 const closed = R.value('ACL_DEFAULT') === 'deny';
                 out.push(R.notice(closed ? 'info' : 'warn', 'No sign-in — every request is anonymous',
-                    'The API has no sign-in routes and issues no tokens. Every request runs as the anonymous user (role “anonymous”): access rules decide what it may read and change — the rules for “anonymous”, else “Everyone else”. Models without rules are '
+                    'The API has no sign-in routes and issues no tokens. Every request runs as the anonymous user ({ id: null }): src/config/acl.ts decides what it may read and change. Models without an entry there are '
                         + (closed ? 'closed (ACL_DEFAULT=deny).' : 'open to everyone who reaches the API.'),
-                    [R.button('Access control', { size: 'sm', icon: 'shield', onClick: () => R.go('access') }),
+                    [R.button('Data model & API', { size: 'sm', icon: 'shield', onClick: () => R.go('model') }),
                         R.info('AUTH_PROVIDERS').locked ? null : R.button('Turn sign-in on', { size: 'sm', kind: 'ghost', onClick: () => R.setValue('AUTH_PROVIDERS', '', true) })]));
             } else if (S.state.project.userModel === null && providers.includes('local') && !R.hasValue('DB_USER_TABLE')) {
                 const candidates = S.state.project.userModelCandidates || [];
@@ -163,10 +163,10 @@ export function installStartPages(R) {
             const a = S.admin;
             if (!a) return out.concat(R.loading('Looking at the user table…'));
             const result = S.ui.adminResult;
-            if (result && result.ok) return out.concat(R.notice('ok', result.message, 'Sign in with it once the API runs.'), R.pager('signin', 'access'));
+            if (result && result.ok) return out.concat(R.notice('ok', result.message, 'Sign in with it once the API runs.'), R.pager('signin', 'rls'));
             if (!a.available) {
                 const use = (a.candidates || []).map((c) => R.button('Use ' + c + ' as the user table', { size: 'sm', kind: 'primary', icon: 'user', onClick: () => { R.setValue('DB_USER_TABLE', c, true); S.admin = null; setTimeout(loadAdmin, 400); } }));
-                return out.concat(R.notice(/already/.test(a.reason || '') ? 'ok' : 'warn', a.reason, null, use.concat([R.button('Check again', { size: 'sm', icon: 'refresh', onClick: loadAdmin })])), R.pager('signin', 'access'));
+                return out.concat(R.notice(/already/.test(a.reason || '') ? 'ok' : 'warn', a.reason, null, use.concat([R.button('Check again', { size: 'sm', icon: 'refresh', onClick: loadAdmin })])), R.pager('signin', 'rls'));
             }
             const errors = (result && result.errors) || {};
             const fields = a.model.fields.map((f) => {
@@ -207,7 +207,7 @@ export function installStartPages(R) {
                 fields, passwords),
             result && !result.ok ? R.result(result) : null,
             h('div', { class: 'row', style: { marginBottom: '18px' } }, R.button('Create account', { kind: 'primary', icon: 'user', onClick: submit })),
-            R.pager('signin', 'access'));
+            R.pager('signin', 'rls'));
             return out;
         },
     });
@@ -277,15 +277,8 @@ export function installStartPages(R) {
         [[use('username')], 'Its username column equals the sign-in name at the directory or identity provider.'],
         [[use('subject')], 'Its subject column equals the identity’s stable id — OIDC sub (OIDC_SUBJECT_CLAIM), LDAP entryUUID or objectGUID.'],
         [['employee_no:employeeNumber'], 'Any pair, user column : identity attribute — the attribute is email, username, subject, name, or any claim or LDAP attribute.'],
-        [[use('false')], 'No user-table rows: users come from the identity’s claims, their role from AUTH_ROLE_MAP.'],
+        [[use('false')], 'No user-table rows: users are the identity’s claims — id, email, name, groups and roles.'],
     ], 'No matching row: the sign-in is rejected — unless provision in src/config/auth.ts creates one.');
-
-    R.fieldDocs.AUTH_ROLE_MAP = () => reference('AUTH_ROLE_MAP', 'Keys — group or role at the directory or identity provider; values — the role here', [
-        [['"CN=App Admins,OU=Groups,DC=corp,DC=example": "admin"'], 'An LDAP group, as its full DN — case doesn’t matter.'],
-        [['"group:Staff": "staff"'], 'A group with that name — groups only.'],
-        [['"role:editor": "editor"'], 'A role at the identity provider (OIDC roles claim) — roles only.'],
-        [['"Staff": "staff"'], 'A group or a role with exactly that name.'],
-    ], 'A JSON object: {"group:Staff": "staff", "role:editor": "editor"}. The first match wins; no match: AUTH_DEFAULT_ROLE.');
 
     // ── User table ───────────────────────────────────────────────────────
     R.fieldDocs.DB_USER_TABLE = () => {
@@ -319,6 +312,90 @@ export function installStartPages(R) {
                     h('code', { text: 'proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;' })))));
         }
         return out;
+    };
+
+    // ── SAML ─────────────────────────────────────────────────────────────
+    /** The identity provider and this API's values — asked again when something they depend on changes */
+    function samlInfo() {
+        const text = R.fileText('samlIdp') || '';
+        const key = ['SAML_IDP_METADATA_URL', 'SAML_IDP_METADATA_FILE', 'SAML_IDP_ENTITY_ID', 'PUBLIC_URL', 'SAML_SP_ENTITY_ID', 'SAML_CALLBACK_URL']
+            .map((k) => R.value(k) || '').concat([String(text.length), text.slice(0, 80), text.slice(-80)]).join('|');
+        if (S.ui.samlKey !== key) {
+            S.ui.samlKey = key;
+            S.ui.saml = null;
+            R.api('POST', '/saml/idp', R.payload()).then((r) => {
+                if (S.ui.samlKey !== key) return;
+                S.ui.saml = r && r.__status < 400 ? r : { error: (r && r.error) || 'The metadata could not be read' };
+                R.updateMessages();
+            });
+        }
+        return S.ui.saml;
+    }
+
+    function samlBox(title, rows, foot) {
+        return h('div', { class: 'ref' }, h('div', { class: 'ref-title', text: title }),
+            h('dl', null, rows.map(([label, value]) => [h('dt', null, label), h('dd', null, value)])),
+            foot ? h('div', { class: 'foot' }, foot) : null);
+    }
+
+    /** Upload of the identity provider's metadata, and what it says */
+    R.fieldHints.SAML_IDP_METADATA_FILE = () => {
+        const info = samlInfo();
+        const out = [];
+        const problems = (S.fileProblems && S.fileProblems.samlIdp) || [];
+        if (problems.length) out.push(R.notice('bad', 'The uploaded file', problems.join(' · ')));
+        else if (info && info.error) out.push(R.notice('bad', 'The metadata', info.error));
+        else if (info && info.idp) {
+            const idp = info.idp;
+            const from = { url: 'the metadata URL', upload: 'the upload — saved with the setup', file: info.metadataFile }[idp.source];
+            out.push(samlBox('Identity provider', [
+                ['Entity id', h('code', { text: idp.entityId })],
+                ['Single sign-on', idp.ssoUrl ? h('code', { text: idp.ssoUrl }) : h('span', { class: 'bad-text', text: 'no HTTP-Redirect endpoint — sign-in cannot start' })],
+                ['Certificates', h('div', null, idp.certificates.map((c) => h('div', null, c.subject + ' · until ' + c.validTo.slice(0, 10) + ' ',
+                    c.expired ? R.badge('expired', 'bad') : c.expiresSoon ? R.badge('expires soon', 'warn') : R.badge('valid', 'ok'))))],
+                idp.wantAuthnRequestsSigned && !R.value('SAML_SP_PRIVATE_KEY_FILE')
+                    ? ['Requests', h('span', { class: 'warn-text', text: 'it asks for signed ones — set a private key and certificate (advanced), or turn that off for this API at the identity provider' })] : null,
+            ].filter(Boolean), 'From ' + from + '.'));
+        }
+        if (!info || info.uploads) {
+            const input = h('input', { type: 'file', accept: '.xml,application/xml,text/xml,application/samlmetadata+xml', style: { display: 'none' },
+                onchange: (e) => {
+                    const file = e.target.files && e.target.files[0];
+                    if (!file) return;
+                    file.text().then((xml) => {
+                        R.setFileText('samlIdp', xml);
+                        R.toast('ok', file.name + ' — saved with the setup');
+                    });
+                } });
+            out.push(h('div', { class: 'row', style: { marginTop: '8px', gap: '8px' } },
+                R.button(R.fileDirty('samlIdp') || (info && info.idp && info.idp.source === 'file') ? 'Replace metadata file' : 'Upload metadata file', { size: 'sm', icon: 'file', onClick: () => input.click() }),
+                R.fileDirty('samlIdp') ? R.button('Discard upload', { size: 'sm', kind: 'ghost', onClick: () => R.discardFile('samlIdp') }) : null,
+                input));
+        } else if (info && !R.value('SAML_IDP_METADATA_URL')) {
+            out.push(h('div', { class: 'help', text: 'An upload is saved to config/saml-idp-metadata.xml — clear this setting to use one.' }));
+        }
+        return out;
+    };
+
+    /** What the identity provider needs to know about this API — and this API's metadata to upload there */
+    R.fieldHints.SAML_SP_ENTITY_ID = () => {
+        const info = samlInfo();
+        const service = info && info.service;
+        if (!service) return null;
+        const copyable = (value) => h('span', { class: 'row', style: { gap: '6px' } }, h('code', { text: value }), R.copyButton(value, 'Copy'));
+        return samlBox('Register this API at the identity provider', [
+            ['Entity id', copyable(service.entityId)],
+            ['Assertion consumer URL', copyable(service.acsUrl)],
+            ['Metadata', h('span', { class: 'row', style: { gap: '6px' } }, h('code', { text: service.metadataUrl }),
+                R.button('Download', { size: 'sm', icon: 'download', onClick: async () => {
+                    const r = await R.api('POST', '/saml/metadata', R.payload());
+                    if (r.__status >= 400) return R.toast('bad', r.error || 'The metadata could not be made');
+                    const link = h('a', { href: URL.createObjectURL(new Blob([r.xml], { type: 'application/samlmetadata+xml' })), download: 'rapidd-sp-metadata.xml' });
+                    document.body.appendChild(link);
+                    link.click();
+                    link.remove();
+                } }))],
+        ], 'Entra ID calls the entity id Identifier and the assertion consumer URL Reply URL. An identity provider that reads metadata takes the URL or the download.');
     };
 
     // ── Environment ──────────────────────────────────────────────────────

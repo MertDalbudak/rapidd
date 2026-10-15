@@ -285,16 +285,6 @@ pre.code.light { background: var(--surface-2); color: var(--text); border: 1px s
 .diff .gap { color: var(--text-3); background: var(--surface-2); }
 .diff .sign { display: inline-block; width: 16px; color: var(--text-3); user-select: none; }
 
-/* ── Split view (list + detail) ──────────────────────────────────────── */
-.split { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 18px; align-items: start; }
-.list-panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; position: sticky; top: 74px; }
-.list-panel .tools { padding: 10px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
-.list-panel .items { max-height: calc(100vh - 230px); overflow-y: auto; padding: 6px; }
-.list-item { display: flex; align-items: center; gap: 8px; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none; text-align: left; cursor: pointer; color: var(--text); }
-.list-item:hover { background: var(--surface-3); }
-.list-item.active { background: var(--brand-soft); color: var(--brand-ink); }
-.list-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 540; }
-
 /* ── Search & tabs ───────────────────────────────────────────────────── */
 .search { position: relative; }
 .search svg { position: absolute; left: 10px; top: 50%; transform: translateY(-50%); color: var(--text-3); }
@@ -341,11 +331,6 @@ pre.code.light { background: var(--surface-2); color: var(--text); border: 1px s
 .kv .head { font-size: 12px; color: var(--text-3); font-weight: 600; }
 .loading { display: flex; gap: 10px; align-items: center; color: var(--text-2); padding: 24px 0; }
 .loading .spin { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--brand); animation: spin .7s linear infinite; }
-.matrix td { vertical-align: top; }
-.matrix td.role { width: 170px; }
-.matrix select.input { min-width: 150px; }
-.filter-chip { display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; max-width: 260px; padding: 3px 8px; border-radius: 6px; background: var(--brand-soft); color: var(--brand-ink); font: 12px var(--mono); border: 0; cursor: pointer; text-align: left; }
-.filter-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inherit { color: var(--text-3); font-style: italic; }
 
 /* ── Sign-in page ────────────────────────────────────────────────────── */
@@ -366,9 +351,6 @@ pre.code.light { background: var(--surface-2); color: var(--text); border: 1px s
 @media (max-width: 1080px) {
   .grid-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .split { grid-template-columns: minmax(0, 1fr); }
-  .list-panel { position: static; }
-  .list-panel .items { max-height: 260px; }
 }
 @media (max-width: 860px) {
   .topbar .menu-btn { display: inline-flex; }

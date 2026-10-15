@@ -429,14 +429,39 @@ describe('ApiClient', () => {
             ok: status < 400, status, headers: new Headers(headers), text: () => Promise.resolve(body),
         });
 
-        it('does not retry POST/PATCH unless asked (no duplicate side effects)', async () => {
+        it('retries every method by default — POST and PATCH too; code can ask for another count', async () => {
             mockFetch.mockRejectedValue(new Error('network down'));
             await expect(ApiClient.fetch('https://api.example.com/invoices', { method: 'POST', body: {} })).rejects.toThrow('network down');
-            expect(mockFetch).toHaveBeenCalledTimes(1);
+            expect(mockFetch).toHaveBeenCalledTimes(3); // API_MAX_RETRIES (2) + the first try
 
             mockFetch.mockClear();
-            await expect(ApiClient.fetch('https://api.example.com/invoices', { method: 'post', body: {}, retries: 1 })).rejects.toThrow();
+            await expect(ApiClient.to('https://api.example.com').retries(1).patch('/invoices/1', {})).rejects.toThrow('network down');
             expect(mockFetch).toHaveBeenCalledTimes(2);
+        }, 30000);
+
+        it('config/app.json turns retries off for a service; an endpoint can decide for itself', async () => {
+            // eslint-disable-next-line @typescript-eslint/no-require-imports
+            const config = jest.spyOn(require('../../src/core/config'), 'getAppConfig').mockReturnValue({ services: {
+                Billing: { hostname: 'billing.example.com', retry: false, endpoints: {
+                    create: { path: '/invoices', method: 'POST' },
+                    status: { path: '/status', retry: true },
+                } },
+            } } as any);
+            try {
+                mockFetch.mockRejectedValue(new Error('network down'));
+                await expect(ApiClient.call('Billing', 'create', { body: {} })).rejects.toThrow('network down');
+                expect(mockFetch).toHaveBeenCalledTimes(1);
+
+                mockFetch.mockClear();
+                await expect(ApiClient.call('Billing', 'create', { body: {}, retries: 1 })).rejects.toThrow('network down');
+                expect(mockFetch).toHaveBeenCalledTimes(2); // code wins over the config
+
+                mockFetch.mockClear();
+                await expect(ApiClient.call('Billing', 'status')).rejects.toThrow('network down');
+                expect(mockFetch).toHaveBeenCalledTimes(3);
+            } finally {
+                config.mockRestore();
+            }
         }, 30000);
 
         it('returns null for 204 and empty JSON bodies', async () => {

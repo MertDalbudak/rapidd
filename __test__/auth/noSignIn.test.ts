@@ -1,6 +1,6 @@
 /**
  * AUTH_PROVIDERS=none: sign-in is off on purpose — every request is the anonymous user,
- * access rules apply, no JWT secrets are needed.
+ * src/config/acl.ts applies, no JWT secrets are needed.
  */
 import path from 'path';
 import fs from 'fs';
@@ -47,7 +47,6 @@ import { buildApp } from '../../src/app';
 import { Auth } from '../../src/auth/Auth';
 import { providerConfigsFromEnv } from '../../src/auth/providers';
 import { anonymousUser, isSystemUser } from '../../src/core/user';
-import { aclFromRules } from '../../src/core/aclRules';
 
 // Per run: the IDE's watcher may run this file at the same time
 const ROUTES = fs.mkdtempSync(path.join(__dirname, '__temp_routes_no_sign_in_'));
@@ -89,7 +88,7 @@ describe('AUTH_PROVIDERS=none', () => {
         try {
             const res = await app.inject({ method: 'GET', url: '/api/items' });
             expect(res.statusCode).toBe(200);
-            expect(res.json()).toEqual({ user: { id: null, role: 'anonymous' } });
+            expect(res.json()).toEqual({ user: { id: null } });
             expect((await app.inject({ method: 'POST', url: '/auth/login', payload: { user: 'a', password: 'b' } })).statusCode).toBe(404);
         } finally {
             await app.close();
@@ -143,16 +142,9 @@ describe('AUTH_PROVIDERS=none', () => {
         expect(auth.isAnonymous()).toBe(true);
     });
 
-    it('the anonymous user is no system user: access rules apply to it', () => {
+    it('the anonymous user is no system user — access control applies to it — and has nothing but a null id', () => {
         const user = anonymousUser();
         expect(isSystemUser(user)).toBe(false);
-        const acl = aclFromRules({ models: {
-            product: { read: { '*': 'all' }, create: { anonymous: false, '*': true } },
-            order: { read: { '*': { where: { owner_id: '$user.id' } } } },
-        } });
-        expect(acl.product.getAccessFilter!(user)).toBe(true);
-        expect(acl.product.canCreate!(user)).toBe(false);
-        // No id: rules on $user.id give it no rows
-        expect(acl.order.getAccessFilter!(user)).toBe(false);
+        expect(user).toEqual({ id: null });
     });
 });

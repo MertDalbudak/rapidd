@@ -3,8 +3,9 @@ import { LocalProvider, LocalUserSource } from './LocalProvider';
 import { LdapProvider, escapeFilterValue, escapeDnValue } from './LdapProvider';
 import { WebdavProvider } from './WebdavProvider';
 import { OidcProvider } from './OidcProvider';
+import { SamlProvider } from './SamlProvider';
 import type {
-    AuthProvider, AuthProviderConfig, LdapProviderConfig, OidcProviderConfig, WebdavProviderConfig,
+    AuthProvider, AuthProviderConfig, ISessionStore, LdapProviderConfig, OidcProviderConfig, SamlProviderConfig, WebdavProviderConfig,
 } from '../../types';
 
 const list = (value: string | undefined): string[] =>
@@ -58,6 +59,40 @@ export function oidcConfigFromEnv(env: NodeJS.ProcessEnv = process.env): OidcPro
     };
 }
 
+/** SAML_* env vars → SAML provider config (key and certificate are read from their files) */
+export function samlConfigFromEnv(env: NodeJS.ProcessEnv = process.env): SamlProviderConfig {
+    const read = (key: string): string | undefined => {
+        const file = env[key];
+        if (!file) return undefined;
+        try {
+            return fs.readFileSync(file, 'utf8');
+        } catch (err) {
+            throw new Error(`[Auth] ${key}: cannot read ${file} (${(err as NodeJS.ErrnoException).code ?? (err as Error).message})`);
+        }
+    };
+    const attributes = {
+        email: env.SAML_ATTRIBUTE_EMAIL || undefined,
+        name: env.SAML_ATTRIBUTE_NAME || undefined,
+        username: env.SAML_ATTRIBUTE_USERNAME || undefined,
+        groups: env.SAML_ATTRIBUTE_GROUPS || undefined,
+        roles: env.SAML_ATTRIBUTE_ROLES || undefined,
+    };
+    return {
+        type: 'saml',
+        idpMetadataUrl: env.SAML_IDP_METADATA_URL || undefined,
+        idpMetadataFile: env.SAML_IDP_METADATA_FILE || undefined,
+        idpEntityId: env.SAML_IDP_ENTITY_ID || undefined,
+        spEntityId: env.SAML_SP_ENTITY_ID || undefined,
+        callbackUrl: env.SAML_CALLBACK_URL || undefined,
+        privateKey: read('SAML_SP_PRIVATE_KEY_FILE'),
+        cert: read('SAML_SP_CERT_FILE'),
+        nameIdFormat: env.SAML_NAMEID_FORMAT || undefined,
+        wantAssertionsSigned: bool(env.SAML_WANT_ASSERTIONS_SIGNED, false),
+        wantResponseSigned: bool(env.SAML_WANT_RESPONSE_SIGNED, false),
+        attributes: Object.values(attributes).some(Boolean) ? attributes : undefined,
+    };
+}
+
 /** WEBDAV_* env vars → WebDAV provider config */
 export function webdavConfigFromEnv(env: NodeJS.ProcessEnv = process.env): WebdavProviderConfig {
     return { type: 'webdav', url: env.WEBDAV_URL || '', timeout: int(env.WEBDAV_TIMEOUT) };
@@ -79,8 +114,9 @@ export function providerConfigsFromEnv(env: NodeJS.ProcessEnv = process.env): Au
             case 'ldap': return ldapConfigFromEnv(env);
             case 'oidc': return oidcConfigFromEnv(env);
             case 'webdav': return webdavConfigFromEnv(env);
+            case 'saml': return samlConfigFromEnv(env);
             default:
-                throw new Error(`[Auth] Unknown provider "${type}" in AUTH_PROVIDERS (expected local, ldap, oidc, webdav — or none)`);
+                throw new Error(`[Auth] Unknown provider "${type}" in AUTH_PROVIDERS (expected local, ldap, oidc, saml, webdav — or none)`);
         }
     });
 }
@@ -92,10 +128,14 @@ function isProviderInstance(entry: unknown): entry is AuthProvider {
     );
 }
 
-/** Instantiate providers from configs (custom provider objects pass through unchanged). */
+/**
+ * Instantiate providers from configs (custom provider objects pass through unchanged).
+ * `sessionStore`: where SAML keeps its request ids — shared by every instance with Redis.
+ */
 export function createProviders(
     entries: Array<AuthProviderConfig | AuthProvider>,
-    localSource: LocalUserSource
+    localSource: LocalUserSource,
+    options: { sessionStore?: () => ISessionStore } = {}
 ): AuthProvider[] {
     const providers = entries.map((entry) => {
         if (isProviderInstance(entry)) return entry;
@@ -105,6 +145,7 @@ export function createProviders(
             case 'ldap': return new LdapProvider(config);
             case 'oidc': return new OidcProvider(config);
             case 'webdav': return new WebdavProvider(config);
+            case 'saml': return new SamlProvider(config, { sessionStore: options.sessionStore });
             default:
                 throw new Error(`[Auth] Unknown provider type "${(config as { type?: string }).type}"`);
         }
@@ -123,4 +164,4 @@ export function createProviders(
     return providers;
 }
 
-export { LocalProvider, LdapProvider, WebdavProvider, OidcProvider, escapeFilterValue, escapeDnValue };
+export { LocalProvider, LdapProvider, WebdavProvider, OidcProvider, SamlProvider, escapeFilterValue, escapeDnValue };

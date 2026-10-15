@@ -84,6 +84,18 @@ describe('SessionStoreManager', () => {
         });
     });
 
+    describe('readiness', () => {
+        it('is the configured store\'s — not healthy while the sessions fell back to memory', async () => {
+            manager = new SessionStoreManager({ store: 'redis', ttl: 60 });
+            await manager.create('a', { id: 1 });
+            expect(await manager.isHealthy()).toBe(true);
+            (manager as any)._primaryStore.setHealthy(false);
+            await manager.create('b', { id: 2 });
+            expect(manager.getStatus().usingFallback).toBe(true);
+            expect(await manager.isHealthy()).toBe(false);
+        });
+    });
+
     describe('with unknown store', () => {
         it('should fall back to memory for unknown store type', async () => {
             manager = new SessionStoreManager({ store: 'unknown-store', ttl: 60 });

@@ -40,7 +40,7 @@ const _context = new AsyncLocalStorage<LogContext>();
 const sensitiveHeaders = () => new Set(['authorization', 'cookie', 'set-cookie', 'proxy-authorization',
     (process.env.AUTH_CUSTOM_HEADER || 'x-auth-token').toLowerCase()]);
 let SENSITIVE_HEADERS = sensitiveHeaders();
-const SENSITIVE_KEY = /pass(word|wd)?$|secret|token|ticket|authorization|api[-_]?key|private[-_]?key/i;
+const SENSITIVE_KEY = /pass(word|wd)?$|secret|token|ticket|authorization|api[-_]?key|private[-_]?key|^saml(request|response)$|^relaystate$/i;
 const REDACTED = '[REDACTED]';
 
 function redactHeaders(headers: Record<string, unknown>): Record<string, unknown> {
@@ -54,9 +54,10 @@ function redactHeaders(headers: Record<string, unknown>): Record<string, unknown
     return out;
 }
 
-// Credentials that travel in URLs: login tickets, tokens — and, on /auth/ routes, OAuth codes
-const SENSITIVE_PARAM = /^(auth_ticket|ticket|token|access_token|id_token|refresh_token|password|client_secret|api_key|apikey)$/i;
-const SENSITIVE_AUTH_PARAM = /^(code|state|session_state)$/i;
+// Credentials that travel in URLs: login tickets, tokens, SAML messages (also on the way to the
+// identity provider) — and, on /auth/ routes, OAuth codes and the key to a parked SAML answer
+const SENSITIVE_PARAM = /^(auth_ticket|ticket|token|access_token|id_token|refresh_token|password|client_secret|api_key|apikey|SAMLRequest|SAMLResponse|RelayState)$/i;
+const SENSITIVE_AUTH_PARAM = /^(code|state|session_state|response)$/i;
 
 /** Replace the values of credential-carrying query parameters */
 function redactUrl(url: string): string {

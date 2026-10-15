@@ -12,12 +12,30 @@ export const DENY_ALL: ModelAcl = Object.freeze({
 
 const RAW_MODELS = Symbol('rapidd.acl.rawModels');
 
+const reportedUndefined = new Set<string>();
+
+/** An undefined value anywhere in a plain filter object */
+function hasUndefined(value: unknown, depth = 0): boolean {
+    if (value === undefined) return true;
+    if (depth > 32 || !value || typeof value !== 'object') return false;
+    if (Array.isArray(value)) return value.some((v) => hasUndefined(v, depth + 1));
+    if (Object.getPrototypeOf(value) !== Object.prototype) return false;
+    return Object.values(value as Record<string, unknown>).some((v) => hasUndefined(v, depth + 1));
+}
+
 /**
- * The ACL in effect: the rules of config/acl.json for the models they list, and the entries
- * of src/config/acl.ts on top — a code entry takes its model over.
+ * A row filter returned by an ACL hook, made safe: a filter with an `undefined` value — usually
+ * a user attribute that does not exist (`{ owner_id: user.uid }`) — denies. Prisma drops
+ * undefined conditions, so the filter would otherwise match every row. Reported once per hook.
  */
-export function mergeAclRules(code: AclConfig | null | undefined, rules: Record<string, ModelAcl>): AclConfig {
-    return { ...(code ?? {}), model: { ...rules, ...(code?.model ?? {}) } };
+export function guardAclFilter<T>(filter: T, model: string, hook: string): T | false {
+    if (!filter || typeof filter !== 'object' || !hasUndefined(filter)) return filter;
+    const at = `${model}.${hook}`;
+    if (!reportedUndefined.has(at)) {
+        reportedUndefined.add(at);
+        Logger.error(`ACL: ${at} returned a filter with an undefined value — denied. It probably reads a user attribute that does not exist.`);
+    }
+    return false;
 }
 
 function isModelName(name: string): boolean {
@@ -62,9 +80,11 @@ export function auditAcl(acl: AclConfig, mode: string | undefined = process.env.
 
     if (missing.length > 0) {
         if (mode === 'deny') {
-            Logger.log(`ACL: ${missing.length} model(s) without an ACL entry are denied (ACL_DEFAULT=deny)`, { models: missing });
+            Logger.log(`ACL: ${missing.length} model(s) without an ACL entry are denied (ACL_DEFAULT=deny): ${missing.join(', ')}`);
         } else {
-            Logger.warn(`ACL: ${missing.length} model(s) have no ACL entry and are UNRESTRICTED for every authenticated user: ${missing.join(', ')}. Add access rules in the setup wizard (config/acl.json) or src/config/acl.ts, or set ACL_DEFAULT=deny.`);
+            // Sign-in off (AUTH_PROVIDERS=none): every request is the anonymous user
+            const signInOff = (process.env.AUTH_PROVIDERS ?? '').split(',').some((name) => name.trim().toLowerCase() === 'none');
+            Logger.warn(`ACL: ${missing.length} model(s) have no ACL entry and are UNRESTRICTED for ${signInOff ? 'every caller — sign-in is off' : 'every authenticated user'}: ${missing.join(', ')}. Add access control in src/config/acl.ts, or set ACL_DEFAULT=deny.`);
         }
     }
     return missing;

@@ -6,6 +6,7 @@ import { isConfigContext } from '../core/rlsRules';
 import { codeAcl } from './models';
 import { readConfigText } from './files';
 import type { DMMF, DMMFField, DMMFModel } from '../types';
+import { idpMetadataPath, uploadsToDefault } from './saml';
 
 /**
  * What the setup wizard shows about the project beyond the environment: the Prisma
@@ -51,14 +52,16 @@ export interface ProjectInfo {
     client: { generated: boolean };
     migrations: boolean;
     generated: { models: number; routes: number };
-    /** Access control: config/acl.json rules and src/config/acl.ts code; models with neither */
-    acl: { codeFile: string | null; rules: boolean; missing: string[]; error?: string };
+    /** Access control: src/config/acl.ts and the models without an entry there */
+    acl: { codeFile: string | null; missing: string[]; error?: string };
     /** Where the RLS variables come from: config/rls.json, or a function in src/config/rls.ts */
     rls: { source: 'config' | 'code'; error?: string };
     configFiles: Record<'app' | 'rateLimit', ConfigFileInfo>;
     locales: string[];
     tools: { prisma: boolean; rapiddBuild: boolean };
     userModel: UserModelInfo | null;
+    /** SAML: the IdP metadata file (an unsaved upload counts) and whether the SAML library is installed */
+    saml: { metadataFile: string; metadata: boolean; library: boolean };
     /** Without a detected user table: tables that look like one (for DB_USER_TABLE) */
     userModelCandidates: string[];
 }
@@ -66,7 +69,6 @@ export interface ProjectInfo {
 const USER_MODEL_NAMES = ['user', 'users', 'account', 'accounts'];
 const PASSWORD_FIELD_NAMES = ['password', 'hash', 'passwordhash', 'password_hash', 'passwd', 'pwd', 'hashed_password'];
 const ENV_REF = /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g;
-const ACCESS_FIELD = /role|admin|status|active|enabled|verified|approved|type|level|permission/i;
 
 const DATASOURCE_PROVIDER = /(datasource\s+\w+\s*\{[^}]*?provider\s*=\s*")(\w+)(")/;
 
@@ -258,16 +260,17 @@ export function describeUserModel(dmmf: DMMF, env: Record<string, string | undef
         const generated = f.hasDefaultValue || f.isUpdatedAt === true;
         if (identifierFields.includes(f.name)) fields.push(spec(f, f.isRequired && !generated));
         else if (f.isRequired && !generated) fields.push(spec(f, true));
-        // A first account is usually the administrator: offer role / status / flag columns
-        // even though they have defaults (preselected)
-        else if (ACCESS_FIELD.test(f.name) && (f.kind === 'enum' || f.type === 'String' || f.type === 'Boolean') && !f.isUpdatedAt) {
+        // A first account is usually the administrator: offer the columns with a fixed default —
+        // flags, status, levels — preselected, whatever they are called (generated values such
+        // as now() or uuid() are left out)
+        else if (['string', 'number', 'boolean'].includes(typeof (f as { default?: unknown }).default) && !f.isUpdatedAt) {
             fields.push(spec(f, false));
         }
     }
     return { model: model.name, passwordField, identifierFields, fields };
 }
 
-/** Drop src/config/acl and src/config/rls from the module cache — they read the rules files when loaded */
+/** Drop src/config/acl and src/config/rls from the module cache — a build may rewrite acl.ts, rls.ts reads config/rls.json */
 export function forgetConfigModules(): void {
     for (const id of ['../config/acl', '../config/rls']) {
         try {
@@ -294,28 +297,17 @@ function rlsSource(): ProjectInfo['rls'] {
 export async function inspectProject(
     root: string = process.cwd(),
     env: Record<string, string | undefined> = process.env,
-    staged: { app?: string } = {},
+    staged: { app?: string; samlIdp?: string } = {},
 ): Promise<ProjectInfo> {
     const envPath = envFilePath();
     const schema = await readSchema(root);
     const models = schema.dmmf?.datamodel.models ?? [];
 
     const code = codeAcl(root);
-    let rules: Record<string, unknown> = {};
-    let rulesError: string | undefined;
-    const rulesText = readConfigText(root, 'acl');
-    if (rulesText !== null) {
-        try {
-            rules = JSON.parse(rulesText)?.models ?? {};
-        } catch (err) {
-            rulesError = `config/acl.json: ${(err as Error).message}`;
-        }
-    }
     const acl: ProjectInfo['acl'] = {
         codeFile: code.file,
-        rules: rulesText !== null,
-        missing: models.map((m) => m.name).filter((n) => !code.models.includes(n) && !Object.prototype.hasOwnProperty.call(rules, n)),
-        ...(code.error || rulesError ? { error: code.error ?? rulesError } : {}),
+        missing: models.map((m) => m.name).filter((n) => !code.models.includes(n)),
+        ...(code.error ? { error: code.error } : {}),
     };
 
     let clientGenerated = false;
@@ -364,6 +356,18 @@ export async function inspectProject(
         configFiles: { app, rateLimit },
         locales,
         tools: { prisma: !!findBin('prisma', root), rapiddBuild: !!findBin('@rapidd/build', root) },
+        saml: {
+            metadataFile: idpMetadataPath(env),
+            metadata: (staged.samlIdp !== undefined && uploadsToDefault(env)) || fs.existsSync(path.resolve(root, idpMetadataPath(env))),
+            library: (() => {
+                try {
+                    require.resolve('@node-saml/node-saml', { paths: [root] });
+                    return true;
+                } catch {
+                    return false;
+                }
+            })(),
+        },
         userModel: schema.dmmf ? describeUserModel(schema.dmmf, env) : null,
         userModelCandidates: schema.dmmf && !describeUserModel(schema.dmmf, env) ? userModelCandidates(schema.dmmf) : [],
     };

@@ -13,6 +13,18 @@ export const PRISMA_WRITE_OPS = [
 
 const OPS = new Set<string>(PRISMA_WRITE_OPS);
 
+/**
+ * Whether linking a related row rewrites it: the foreign key is on the related rows (a list's,
+ * or the other side of a to-one) — not in an implicit many-to-many, whose links are rows of
+ * their own, nor where it is on this side.
+ */
+export function linkRewritesRelated(relation: RelationConfig): boolean {
+    if (relation.field || relation.fields?.length) return false;
+    const sides = (relation.relation ?? []).filter((r) => relation.relationName != null && r.relationName === relation.relationName);
+    const back = sides.length > 1 ? sides.find((r) => r.name !== relation.name) : sides[0];
+    return !(relation.isList && back?.isList);
+}
+
 /** Does this relation payload use raw Prisma operations? */
 export function isRawOperation(value: unknown): boolean {
     return !!value && typeof value === 'object' && !Array.isArray(value)
@@ -67,7 +79,9 @@ function isWhereDataForm(value: Record<string, any>): boolean {
  * `{ tags: { deleteMany: {} } }` or `{ author: { connect: { id: 5 } } }` in a payload is held
  * to the same rules as Rapidd's own nested shapes:
  *
- * - connect / set / disconnect / connectOrCreate.where — the access filter
+ * - connect / set / disconnect / connectOrCreate.where — the access filter; where the foreign
+ *   key is on the related rows (list relations, the other side of a to-one), linking rewrites
+ *   them — the update filter too
  * - create / createMany / connectOrCreate.create / upsert.create — canCreate + field stripping
  * - update / updateMany / upsert — the update filter (+ field stripping)
  * - delete / deleteMany — the delete filter
@@ -84,24 +98,38 @@ export function secureNestedOperations(
         if (!ctx.canCreate(data)) throw new ErrorResponse(403, 'no_permission_to_create', { model });
         return ctx.cleanData(data);
     };
+    // Linking or unlinking rows that hold the foreign key rewrites them — their update rule too
+    const rewritesRelated = linkRewritesRelated(relation);
+    const linkable = (): void => {
+        deny(ctx.accessFilter, 'no_permission', model);
+        if (rewritesRelated) deny(ctx.updateFilter, 'no_permission_to_update', model);
+    };
+    const linkUnique = (where: Record<string, any>) =>
+        scopeUnique(scopeUnique(where, ctx.accessFilter), rewritesRelated ? ctx.updateFilter : null);
     const out: Record<string, any> = {};
 
     for (const [op, value] of Object.entries(ops)) {
         switch (op) {
             case 'connect':
             case 'set':
-                deny(ctx.accessFilter, 'no_permission', model);
-                out[op] = mapItems(value, (where) => scopeUnique(where, ctx.accessFilter));
+                linkable();
+                out[op] = mapItems(value, linkUnique);
                 break;
 
             case 'disconnect':
                 if (typeof value === 'boolean') {
-                    out[op] = value;
+                    if (value && rewritesRelated) {
+                        // The other side of a to-one: unlinking rewrites its row
+                        deny(ctx.updateFilter, 'no_permission_to_update', model);
+                        out[op] = isEmpty(ctx.updateFilter) ? true : scopeWhere(undefined, ctx.updateFilter);
+                    } else {
+                        out[op] = value;
+                    }
                 } else {
-                    deny(ctx.accessFilter, 'no_permission', model);
+                    linkable();
                     out[op] = relation.isList
-                        ? mapItems(value, (where) => scopeUnique(where, ctx.accessFilter))
-                        : scopeWhere(value, ctx.accessFilter);
+                        ? mapItems(value, linkUnique)
+                        : scopeWhere(scopeWhere(value, ctx.accessFilter), rewritesRelated ? ctx.updateFilter : null);
                 }
                 break;
 
@@ -114,10 +142,10 @@ export function secureNestedOperations(
                 break;
 
             case 'connectOrCreate':
-                deny(ctx.accessFilter, 'no_permission', model);
+                linkable();
                 out[op] = mapItems(value, (item) => ({
                     ...item,
-                    where: scopeUnique(item.where, ctx.accessFilter),
+                    where: linkUnique(item.where),
                     create: create(item.create ?? {}),
                 }));
                 break;

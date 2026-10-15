@@ -1,4 +1,5 @@
 import { getAppConfig } from '../core/config';
+import { Logger } from './Logger';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -11,6 +12,8 @@ export interface ServiceConfig {
     queries?: Record<string, string>;
     authorization?: AuthConfig;
     endpoints?: Record<string, EndpointConfig>;
+    /** Retry failed requests (API_MAX_RETRIES times). Default true — false turns it off */
+    retry?: boolean;
 }
 
 export interface EndpointConfig {
@@ -18,6 +21,8 @@ export interface EndpointConfig {
     method?: string;
     headers?: Record<string, string>;
     queries?: Record<string, string>;
+    /** Overrides the service's `retry` for this endpoint */
+    retry?: boolean;
 }
 
 export interface AuthConfig {
@@ -49,7 +54,7 @@ export interface RequestOptions {
     body?: unknown;
     timeout?: number;
     signal?: AbortSignal;
-    /** Retry attempts. Default: API_MAX_RETRIES for idempotent methods, 0 for POST/PATCH */
+    /** Retry attempts. Default: API_MAX_RETRIES — 0 with `retry: false` on the service or endpoint */
     retries?: number;
 }
 
@@ -79,11 +84,18 @@ export class ApiClientError extends Error {
 
 // ── Configuration ────────────────────────────────────────────────────────────
 
-const REQUEST_TIMEOUT = parseInt(process.env.REQUEST_TIMEOUT || '10000', 10);
-const MAX_RETRIES = parseInt(process.env.API_MAX_RETRIES || '2', 10);
+/** A whole number from the environment — the default when unset or not one (with a warning) */
+function envCount(name: string, fallback: number, min: number): number {
+    const raw = process.env[name];
+    if (raw == null || raw.trim() === '') return fallback;
+    const value = Number(raw);
+    if (Number.isInteger(value) && value >= min) return value;
+    Logger.warn(`ApiClient: ${name}=${raw} is not a whole number ≥ ${min} — using ${fallback}`);
+    return fallback;
+}
 
-/** Methods safe to repeat — POST/PATCH are only retried when explicitly asked to */
-const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS', 'PUT', 'DELETE']);
+const REQUEST_TIMEOUT = envCount('REQUEST_TIMEOUT', 10000, 1);
+const MAX_RETRIES = envCount('API_MAX_RETRIES', 2, 0);
 const MAX_BACKOFF_MS = 5000;
 
 const _tokenCache = new Map<string, { access_token: string; token_type: string; expires: number }>();
@@ -271,18 +283,22 @@ export interface PreparedRequest {
     url: string;
     method: string;
     headers: Record<string, string>;
+    /** 0 when config/app.json turns retries off for the endpoint or its service */
+    retries?: number;
 }
 
 /**
  * Build the request for an endpoint of a service — the configuration is passed in, so a
  * service that is not (yet) in config/app.json can be called too (the setup wizard tests
- * services before they are saved). `serviceName` keys the OAuth2 token cache.
+ * services before they are saved). `tokenCacheKey` keys the OAuth2 token cache (the service's
+ * name unless given).
  */
 export async function prepareServiceRequest(
     serviceName: string,
     service: ServiceConfig,
     endpointName: string,
-    options: RequestOptions = {}
+    options: RequestOptions = {},
+    tokenCacheKey: string = serviceName
 ): Promise<PreparedRequest> {
     const endpoint = service.endpoints?.[endpointName];
     if (!endpoint) {
@@ -305,9 +321,11 @@ export async function prepareServiceRequest(
     };
 
     if (service.authorization) {
-        await applyAuth(headers, serviceName, service.authorization);
+        await applyAuth(headers, tokenCacheKey, service.authorization);
     }
-    return { url, method: (endpoint.method || 'GET').toUpperCase(), headers };
+    // config/app.json decides whether failed calls are retried: the endpoint, else its service
+    const retry = endpoint.retry ?? service.retry ?? true;
+    return { url, method: (endpoint.method || 'GET').toUpperCase(), headers, retries: retry ? undefined : 0 };
 }
 
 // ── Main API ─────────────────────────────────────────────────────────────────
@@ -343,14 +361,14 @@ export const ApiClient = {
         endpointName: string,
         options: RequestOptions = {}
     ): Promise<T> {
-        const { url, method, headers } = await prepareServiceRequest(serviceName, getService(serviceName), endpointName, options);
+        const { url, method, headers, retries } = await prepareServiceRequest(serviceName, getService(serviceName), endpointName, options);
         return this.fetch<T>(url, {
             method,
             headers,
             body: options.body,
             timeout: options.timeout,
             signal: options.signal,
-            retries: options.retries
+            retries: options.retries ?? retries
         });
     },
 
@@ -370,8 +388,8 @@ export const ApiClient = {
     ): Promise<T> {
         const { method = 'GET', headers = {}, body, timeout = REQUEST_TIMEOUT } = options;
         const upperMethod = method.toUpperCase();
-        // A retried POST can create a record twice — non-idempotent methods retry only on request
-        const retries = options.retries ?? (IDEMPOTENT_METHODS.has(upperMethod) ? MAX_RETRIES : 0);
+        // A count from code: whole and not negative (none — not one request less)
+        const retries = Number.isFinite(options.retries) ? Math.max(0, Math.floor(options.retries!)) : MAX_RETRIES;
 
         const fetchOptions: RequestInit = {
             method: upperMethod,
@@ -471,7 +489,8 @@ class RequestBuilder {
     private _baseUrl: string;
     private _headers: Record<string, string> = {};
     private _timeout: number = REQUEST_TIMEOUT;
-    private _retries: number = MAX_RETRIES;
+    /** Unset: API_MAX_RETRIES */
+    private _retries: number | undefined;
 
     constructor(baseUrl: string) {
         this._baseUrl = baseUrl.replace(/\/$/, '');

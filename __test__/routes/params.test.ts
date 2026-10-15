@@ -463,39 +463,39 @@ describe('sortBy parameter', () => {
         mockPrismaModel.count.mockResolvedValue(0);
     });
 
-    it('should apply no ordering when sort is not provided (no default sort)', async () => {
+    it('orders by the model\'s key when no sort is requested — offset pages neither repeat nor skip rows', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toBeUndefined();
+        expect(call.orderBy).toEqual([{ id: 'asc' }]);
     });
 
     it('should sort by a scalar field', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=name' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ name: 'asc' });
+        expect(call.orderBy).toEqual([{ name: 'asc' }, { id: 'asc' }]);
     });
 
     it('should sort by price field', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=price' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ price: 'asc' });
+        expect(call.orderBy).toEqual([{ price: 'asc' }, { id: 'asc' }]);
     });
 
     it('should sort by createdAt field', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=createdAt' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ createdAt: 'asc' });
+        expect(call.orderBy).toEqual([{ createdAt: 'asc' }, { id: 'asc' }]);
     });
 
     it('should sort by relation field (dot notation)', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=category.name' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ category: { name: 'asc' } });
+        expect(call.orderBy).toEqual([{ category: { name: 'asc' } }, { id: 'asc' }]);
     });
 
     it('should return 400 for non-existent sortBy field', async () => {
@@ -507,7 +507,7 @@ describe('sortBy parameter', () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=%20name%20' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ name: 'asc' });
+        expect(call.orderBy).toEqual([{ name: 'asc' }, { id: 'asc' }]);
     });
 });
 
@@ -536,7 +536,7 @@ describe('sortOrder parameter', () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=name' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ name: 'asc' });
+        expect(call.orderBy).toEqual([{ name: 'asc' }, { id: 'asc' }]);
     });
 
     it('should sort ascending when sort=id:asc', async () => {
@@ -557,15 +557,15 @@ describe('sortOrder parameter', () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sort=price:desc' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        expect(call.orderBy).toEqual({ price: 'desc' });
+        expect(call.orderBy).toEqual([{ price: 'desc' }, { id: 'asc' }]);
     });
 
     it('should ignore legacy sortBy/sortOrder params', async () => {
         await app.inject({ method: 'GET', url: '/api/v1/products?sortBy=price&sortOrder=desc' });
 
         const call = mockPrismaModel.findMany.mock.calls[0][0];
-        // Legacy params are not supported — no ordering is applied
-        expect(call.orderBy).toBeUndefined();
+        // Legacy params are not supported — the default order (by key) applies
+        expect(call.orderBy).toEqual([{ id: 'asc' }]);
     });
 
     it('should return 400 for invalid sortOrder value', async () => {
@@ -1117,7 +1117,7 @@ describe('Combined query parameters', () => {
         expect(call.take).toBe(10);
         expect(call.skip).toBe(5);
         // Sorting
-        expect(call.orderBy).toEqual({ price: 'desc' });
+        expect(call.orderBy).toEqual([{ price: 'desc' }, { id: 'asc' }]);
 
         // Response meta
         const body = JSON.parse(response.payload);
@@ -1138,7 +1138,7 @@ describe('Combined query parameters', () => {
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.where.price).toBeDefined();
         expect(call.include.tags).toBeDefined();
-        expect(call.orderBy).toEqual({ name: 'asc' });
+        expect(call.orderBy).toEqual([{ name: 'asc' }, { id: 'asc' }]);
         expect(call).not.toHaveProperty('select');
     });
 
@@ -1151,7 +1151,7 @@ describe('Combined query parameters', () => {
         const call = mockPrismaModel.findMany.mock.calls[0][0];
         expect(call.take).toBe(3);
         expect(call.skip).toBe(9);
-        expect(call.orderBy).toEqual({ createdAt: 'desc' });
+        expect(call.orderBy).toEqual([{ createdAt: 'desc' }, { id: 'asc' }]);
     });
 
     it('should handle filter + fields without include', async () => {

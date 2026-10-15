@@ -9,8 +9,7 @@ import { Logger } from '../utils/Logger';
  * to obtain a system user is `createSystemUser()`, which the framework controls.
  *
  * This replaces the old `role === 'application'` convention, which was both a magic
- * string (not necessarily a valid role in the app's schema) and forgeable (anything
- * able to influence a user's role could bypass ACL).
+ * string and forgeable (anything able to influence a user attribute could bypass ACL).
  */
 const SYSTEM_USER = Symbol('rapidd.systemUser');
 
@@ -19,15 +18,15 @@ const SYSTEM_USER = Symbol('rapidd.systemUser');
  * for calls with no user, and available to apps for genuinely internal/privileged
  * operations (e.g. `new Users({ user: createSystemUser() })`).
  *
- * The system user is intentionally **identity-less**: `id` and `role` default to `null`
- * rather than fabricated values (`'system'` / `'application'`) that might violate the user
- * table's PK type or the app's role enum. The bypass keys off the symbol marker, so neither
- * value is ever consulted for a decision, validated, or written to the database. Override
- * them only for auditing/logging: `createSystemUser({ id: 1, role: 'cron' })`.
+ * The system user is intentionally **identity-less**: `id` defaults to `null` rather than a
+ * fabricated value (`'system'`) that might violate the user table's PK type. The bypass keys
+ * off the symbol marker, so no attribute is ever consulted for a decision, validated, or
+ * written to the database. Add attributes only for auditing/logging:
+ * `createSystemUser({ id: 1, job: 'cron' })`.
  */
 export function createSystemUser(overrides: Partial<RapiddUser> = {}): RapiddUser {
-    // Spread overrides first so callers can set id/role, then stamp the (non-overridable) marker.
-    return { id: null, role: null, ...overrides, [SYSTEM_USER]: true } as unknown as RapiddUser;
+    // Spread overrides first so callers can set attributes, then stamp the (non-overridable) marker.
+    return { id: null, ...overrides, [SYSTEM_USER]: true } as unknown as RapiddUser;
 }
 
 /**
@@ -76,17 +75,14 @@ export function getDefaultUser(): RapiddUser | null {
     return _defaultUser ? { ..._defaultUser } : null;
 }
 
-/** The role of requests while sign-in is off (AUTH_PROVIDERS=none) */
-export const ANONYMOUS_ROLE = 'anonymous';
-
 /**
  * The identity of every request while sign-in is off (AUTH_PROVIDERS=none): the default user
- * of `src/config/user.ts` when the app defines one, else `{ id: null, role: 'anonymous' }`.
- * Not a system user — access rules apply (role "anonymous", else "*"), and rules on
- * `$user.id` give it no rows.
+ * of `src/config/user.ts` when the app defines one, else `{ id: null }`. Not a system user —
+ * src/config/acl.ts decides what it may do (ownership filters on `user.id` must not match
+ * rows whose owner IS NULL).
  */
 export function anonymousUser(): RapiddUser {
-    return getDefaultUser() ?? ({ id: null, role: ANONYMOUS_ROLE } as unknown as RapiddUser);
+    return getDefaultUser() ?? ({ id: null } as RapiddUser);
 }
 
 /** Reset the cached default user (tests). */
